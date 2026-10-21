@@ -1249,7 +1249,7 @@ class VideoEditingViewModel : ViewModel() {
                     var delayMs = audioOp.startTimeMs ?: 0L
                     if (delayMs < 0) delayMs = 0L
                     if (delayMs > 0) {
-                        filters.add("adelay=$delayMs|$delayMs")
+                        filters.add("aformat=channel_layouts=stereo,adelay=$delayMs|$delayMs")
                     }
                     val safeVol = audioOp.volume.coerceIn(0f, 2f)
                     filters.add("volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}")
@@ -1473,7 +1473,7 @@ class VideoEditingViewModel : ViewModel() {
                 var delayMs = audioOp.startTimeMs ?: 0L
                 if (delayMs < 0) delayMs = 0L
                 if (delayMs > 0) {
-                    filters.add("adelay=$delayMs|$delayMs")
+                    filters.add("aformat=channel_layouts=stereo,adelay=$delayMs|$delayMs")
                 }
                 
                 val safeVol = audioOp.volume.coerceIn(0f, 2f)

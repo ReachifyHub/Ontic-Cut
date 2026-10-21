@@ -468,6 +468,7 @@ class VideoEditingActivity : AppCompatActivity() {
     private var previewFile: File? = null
     
     private var audioPreviewPlayer: android.media.MediaPlayer? = null
+    private val bgAudioPlayerMap = mutableMapOf<String, com.google.android.exoplayer2.ExoPlayer>()
     
     private var isInitialFitDone = false
 
@@ -646,10 +647,14 @@ class VideoEditingActivity : AppCompatActivity() {
                         if (muteOp != null) {
                             viewModel.removeOperation(muteOp.id)
                         }
+                        proj.operations.filterIsInstance<EditOperation.AddBackgroundAudio>().forEach { op ->
+                            bgAudioPlayerMap[op.id]?.volume = op.volume.coerceIn(0f, 1f)
+                        }
                     }
                 } else {
                     player.volume = 0f
                     btnMute.setImageResource(R.drawable.ic_volume_off_24)
+                    bgAudioPlayerMap.values.forEach { it.volume = 0f }
                     viewModel.addMuteAudioOperation()
                 }
             }
@@ -1594,22 +1599,32 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
                 val volumeSlider = toolbar.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)
                 val tvVolumeValue = toolbar.findViewById<TextView>(R.id.tvAudioVolumeValue)
-                volumeSlider?.addOnChangeListener { _, value, _ ->
+                volumeSlider?.addOnChangeListener { _, value, fromUser ->
                     tvVolumeValue?.text = "${(value * 100).toInt()}%"
+                    val safeVol = value.coerceIn(0f, 2f)
+                    val pVol = safeVol.coerceIn(0f, 1f)
                     audioPreviewPlayer?.let { player ->
                         try {
-                            val safeVol = value.coerceIn(0f, 2f)
-                            player.setVolume(safeVol, safeVol)
+                            player.setVolume(pVol, pVol)
                         } catch (_: Exception) {}
                     }
                     viewModel.selectedOperationId.value?.let { id ->
-                        val project = viewModel.project.value ?: return@addOnChangeListener
-                        val op = project.operations.find { it is com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio
-                        if (op != null) {
-                            viewModel.updateOperation(op.copy(volume = value))
-                        }
+                        bgAudioPlayerMap[id]?.volume = pVol
                     }
                 }
+                volumeSlider?.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
+                    override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                        val value = slider.value
+                        viewModel.selectedOperationId.value?.let { id ->
+                            val project = viewModel.project.value ?: return
+                            val op = project.operations.find { it is com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio
+                            if (op != null && op.volume != value) {
+                                viewModel.updateOperation(op.copy(volume = value))
+                            }
+                        }
+                    }
+                })
 
                 val trimTrack = toolbar.findViewById<com.tharunbirla.librecuts.customviews.TrackTrimView>(R.id.audioTrimTrack)
                 val tvTrimValue = toolbar.findViewById<TextView>(R.id.tvAudioTrimValues)
@@ -3621,6 +3636,7 @@ class VideoEditingActivity : AppCompatActivity() {
             val tvValue = toolbar.findViewById<TextView>(R.id.tvAudioVolumeValue)
             slider?.value = op.volume.coerceIn(0f, 2f)
             tvValue?.text = "${(op.volume * 100).toInt()}%"
+            bgAudioPlayerMap[op.id]?.volume = op.volume.coerceIn(0f, 1f)
             
             val btnBeats = toolbar.findViewById<ImageButton>(R.id.btnAudioBeats)
             btnBeats?.setColorFilter(if (op.beats.isNotEmpty()) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
@@ -3681,6 +3697,19 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private fun exitAudioEditingMode() {
+        audioEditingToolbar?.let { toolbar ->
+            val slider = toolbar.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)
+            if (slider != null) {
+                val value = slider.value
+                viewModel.selectedOperationId.value?.let { id ->
+                    val project = viewModel.project.value
+                    val op = project?.operations?.find { it is com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio
+                    if (op != null && op.volume != value) {
+                        viewModel.updateOperation(op.copy(volume = value))
+                    }
+                }
+            }
+        }
         audioEditingToolbar?.visibility = View.GONE
         editingControlsWrapper.visibility = View.VISIBLE
         viewModel.selectOperation(null)
@@ -5205,6 +5234,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         // player.seekTo(0)
                         // customVideoSeeker.setSeekPosition(0f)
 
+                        pauseAllBgAudio()
                         stopProgressUpdater()
                         if (isShowingPreview) dismissPreview()
                     }
@@ -5238,8 +5268,10 @@ class VideoEditingActivity : AppCompatActivity() {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     if (isPlaying) {
                         startProgressUpdater()
+                        syncBgAudio(getGlobalPosition(), true)
                     } else {
                         stopProgressUpdater()
+                        pauseAllBgAudio()
                     }
                 }
 
@@ -5514,6 +5546,8 @@ class VideoEditingActivity : AppCompatActivity() {
                 updateDraggableOverlayFromKeyframes(currentGlobalPos)
             }
 
+            syncBgAudio(currentGlobalPos, player.isPlaying)
+
             // Apply color filter corresponding to the active clip
             val sequenceItems = getSequenceItems()
             var accumulatedStartMs = 0L
@@ -5661,6 +5695,61 @@ class VideoEditingActivity : AppCompatActivity() {
         if (isKeyframeEditingMode) {
             updateDraggableOverlayFromKeyframes(globalPos)
         }
+        syncBgAudio(globalPos, player.isPlaying)
+    }
+
+    private fun syncBgAudio(globalPos: Long, isPlaying: Boolean) {
+        val project = viewModel.project.value ?: return
+        val totalSeqDuration = getTotalSequenceDuration()
+        val audioOps = project.operations.filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio>()
+        val isMasterMuted = if (::player.isInitialized) player.volume == 0f else false
+
+        for (op in audioOps) {
+            val bgPlayer = bgAudioPlayerMap[op.id] ?: continue
+            val effectiveVol = if (isMasterMuted) 0f else op.volume.coerceIn(0f, 1f)
+            if (bgPlayer.volume != effectiveVol) {
+                bgPlayer.volume = effectiveVol
+            }
+
+            val aStart = op.startTimeMs ?: 0L
+            val aEnd = op.endTimeMs ?: totalSeqDuration
+            if (globalPos in aStart..aEnd) {
+                val offsetInOp = globalPos - aStart
+                val targetAudioMs = op.internalStartMs + offsetInOp
+                val maxAudioMs = if (op.internalEndMs > 0) op.internalEndMs else (if (op.originalDurationMs > 0) op.originalDurationMs else Long.MAX_VALUE)
+                if (targetAudioMs < maxAudioMs) {
+                    if (isPlaying) {
+                        val currentAudioPos = bgPlayer.currentPosition
+                        if (kotlin.math.abs(currentAudioPos - targetAudioMs) > 120) {
+                            bgPlayer.seekTo(targetAudioMs)
+                        }
+                        if (!bgPlayer.isPlaying && effectiveVol > 0f) {
+                            bgPlayer.play()
+                        }
+                    } else {
+                        if (bgPlayer.isPlaying) bgPlayer.pause()
+                        if (kotlin.math.abs(bgPlayer.currentPosition - targetAudioMs) > 120) {
+                            bgPlayer.seekTo(targetAudioMs)
+                        }
+                    }
+                } else {
+                    if (bgPlayer.isPlaying) bgPlayer.pause()
+                }
+            } else {
+                if (bgPlayer.isPlaying) bgPlayer.pause()
+            }
+        }
+    }
+
+    private fun pauseAllBgAudio() {
+        bgAudioPlayerMap.values.forEach { p ->
+            if (p.isPlaying) p.pause()
+        }
+    }
+
+    private fun releaseAllBgAudio() {
+        bgAudioPlayerMap.values.forEach { it.release() }
+        bgAudioPlayerMap.clear()
     }
 
     // Update your existing Runnable to include the text display update
