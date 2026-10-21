@@ -495,27 +495,50 @@ class FFmpegRenderEngine(private val context: Context) {
         speed: Float,
         outputFilePath: String
     ): RenderResult {
-        val startSecs = startMs / 1000.0
-        val durationSecs = (endMs - startMs) / 1000.0
+        val safeSpeed = speed.coerceIn(0.1f, 10.0f)
+        val safeStartMs = maxOf(0L, startMs)
+        val safeEndMs = if (endMs > safeStartMs) endMs else safeStartMs + 1000L
+        val startSecs = safeStartMs / 1000.0
+        val durationSecs = (safeEndMs - safeStartMs) / 1000.0
         
-        val ptsMultiplier = 1.0f / speed
-        
-        val atempoFilters = mutableListOf<String>()
-        var currentSpeed = speed
-        while (currentSpeed < 0.5f) {
-            atempoFilters.add("atempo=0.5")
-            currentSpeed /= 0.5f
+        val ptsMultiplier = 1.0f / safeSpeed
+
+        // Detect if source video has an audio stream to prevent filtergraph errors
+        val hasAudio = try {
+            val retriever = android.media.MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(sourceFilePath)
+                val hasAudioStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                hasAudioStr == "yes"
+            } finally {
+                retriever.release()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not probe audio stream for speed proxy: ${e.message}")
+            false
         }
-        while (currentSpeed > 2.0f) {
-            atempoFilters.add("atempo=2.0")
-            currentSpeed /= 2.0f
+
+        val audioParams = if (hasAudio) {
+            val atempoFilters = mutableListOf<String>()
+            var currentSpeed = safeSpeed
+            while (currentSpeed < 0.5f) {
+                atempoFilters.add("atempo=0.5")
+                currentSpeed /= 0.5f
+            }
+            while (currentSpeed > 2.0f) {
+                atempoFilters.add("atempo=2.0")
+                currentSpeed /= 2.0f
+            }
+            if (currentSpeed != 1.0f || atempoFilters.isEmpty()) {
+                atempoFilters.add("atempo=$currentSpeed")
+            }
+            val audioFilter = atempoFilters.joinToString(",")
+            "-filter:a \"$audioFilter\" -c:a aac"
+        } else {
+            "-an"
         }
-        if (currentSpeed != 1.0f || atempoFilters.isEmpty()) {
-            atempoFilters.add("atempo=$currentSpeed")
-        }
-        val audioFilter = atempoFilters.joinToString(",")
-        
-        val command = "-y -ss $startSecs -t $durationSecs -i \"$sourceFilePath\" -filter:v \"setpts=${ptsMultiplier}*PTS,format=yuv420p\" -filter:a \"$audioFilter\" \"$outputFilePath\""
+
+        val command = "-y -ss $startSecs -t $durationSecs -i \"$sourceFilePath\" -filter:v \"setpts=${ptsMultiplier}*(PTS-STARTPTS),format=yuv420p\" -c:v libx264 -preset ultrafast $audioParams \"$outputFilePath\""
         return executeCommand(command)
     }
 

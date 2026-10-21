@@ -215,8 +215,16 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
                 com.tharunbirla.librecuts.services.ExportService.ACTION_EXPORT_FAILURE -> {
                     val error = intent.getStringExtra(com.tharunbirla.librecuts.services.ExportService.EXTRA_ERROR) ?: "Unknown Error"
+                    val errorCodeStr = intent.getStringExtra(com.tharunbirla.librecuts.services.ExportService.EXTRA_ERROR_CODE)
+                    val resolvedErrorCode = when {
+                        errorCodeStr == ErrorCode.GALLERY_SAVE_FAILED.code -> ErrorCode.GALLERY_SAVE_FAILED
+                        errorCodeStr == ErrorCode.FFMPEG_EXECUTION_FAILED.code -> ErrorCode.FFMPEG_EXECUTION_FAILED
+                        errorCodeStr == ErrorCode.UNEXPECTED_CRASH.code -> ErrorCode.UNEXPECTED_CRASH
+                        error.contains("gallery", ignoreCase = true) || error.contains("save video", ignoreCase = true) -> ErrorCode.GALLERY_SAVE_FAILED
+                        else -> ErrorCode.FFMPEG_EXECUTION_FAILED
+                    }
                     viewModel.exportError(error)
-                    showProErrorDialog(ErrorCode.FFMPEG_EXECUTION_FAILED, error)
+                    showProErrorDialog(resolvedErrorCode, error)
                 }
             }
         }
@@ -3890,24 +3898,32 @@ class VideoEditingActivity : AppCompatActivity() {
         if (index < 0 || index >= items.size) return
         
         val item = items[index]
-        if (item.speed == speed) {
+        val safeSpeed = speed.coerceIn(0.1f, 10.0f)
+        if (kotlin.math.abs(item.speed - safeSpeed) < 0.01f) {
             hideSpeedEditingToolbar()
             return
         }
         
-        updateSpeedUi(speed)
+        updateSpeedUi(safeSpeed)
         
-        if (speed == 1.0f) {
+        if (safeSpeed == 1.0f) {
+            // Clean up existing proxy file if any
+            item.proxyUri?.path?.let { oldPath ->
+                try { File(oldPath).takeIf { it.exists() }?.delete() } catch (e: Exception) {}
+            }
+
             // Reset to normal speed, but preserve reverse if it is reversed!
             if (item.isReversed) {
                 lifecycleScope.launch {
                     showLoading("Resetting speed...")
                     val outputFileName = "proxy_reverse_${System.currentTimeMillis()}.mp4"
                     val outputFilePath = java.io.File(cacheDir, outputFileName).absolutePath
+                    val resolvedSourcePath = getFilePathFromUri(item.uri) ?: ""
+                    val effectiveTrimEnd = if (item.trimEndMs > item.trimStartMs) item.trimEndMs else maxOf(item.durationMs, item.trimStartMs + 1000L)
                     val result = ffmpegEngine.reverseVideo(
-                        sourceFilePath = getFilePathFromUri(item.uri) ?: "",
+                        sourceFilePath = resolvedSourcePath,
                         startMs = item.trimStartMs,
-                        endMs = item.trimEndMs,
+                        endMs = effectiveTrimEnd,
                         outputFilePath = outputFilePath
                     )
                     hideLoading()
@@ -3919,6 +3935,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         } else {
                             updateVideoSegment(index, item.copy(speed = 1.0f, proxyUri = proxyUri, isReversed = true))
                         }
+                        viewModel.project.value?.let { renderTracks(it) }
                         hideSpeedEditingToolbar()
                     } else {
                         android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_failed_to_apply_speed_reset, android.widget.Toast.LENGTH_SHORT).show()
@@ -3930,6 +3947,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 } else {
                     updateVideoSegment(index, item.copy(speed = 1.0f, proxyUri = null))
                 }
+                viewModel.project.value?.let { renderTracks(it) }
                 hideSpeedEditingToolbar()
             }
             return
@@ -3940,22 +3958,36 @@ class VideoEditingActivity : AppCompatActivity() {
             val outputFileName = "proxy_speed_${System.currentTimeMillis()}.mp4"
             val outputFilePath = java.io.File(cacheDir, outputFileName).absolutePath
 
+            val resolvedSourcePath = getFilePathFromUri(item.uri) ?: ""
+            if (resolvedSourcePath.isEmpty()) {
+                hideLoading()
+                android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_failed_to_apply_speed, android.widget.Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            val effectiveTrimEnd = if (item.trimEndMs > item.trimStartMs) item.trimEndMs else maxOf(item.durationMs, item.trimStartMs + 1000L)
+
             val result = ffmpegEngine.generateSpeedProxy(
-                sourceFilePath = getFilePathFromUri(item.uri) ?: "",
+                sourceFilePath = resolvedSourcePath,
                 startMs = item.trimStartMs,
-                endMs = item.trimEndMs,
-                speed = speed,
+                endMs = effectiveTrimEnd,
+                speed = safeSpeed,
                 outputFilePath = outputFilePath
             )
 
             if (result is com.tharunbirla.librecuts.services.FFmpegRenderEngine.RenderResult.Success) {
+                // Delete previous proxy file to avoid caching leaks
+                item.proxyUri?.path?.let { oldPath ->
+                    try { File(oldPath).takeIf { it.exists() && it.absolutePath != outputFilePath }?.delete() } catch (e: Exception) {}
+                }
+
                 if (item.isReversed) {
                     showLoading("Reversing speed-adjusted video...")
                     val reverseFileName = "proxy_reverse_${System.currentTimeMillis()}.mp4"
                     val reverseFilePath = java.io.File(cacheDir, reverseFileName).absolutePath
                     val speedProxyPath = result.outputPath
 
-                    val durationMs = ((item.trimEndMs - item.trimStartMs) / speed).toLong()
+                    val durationMs = ((effectiveTrimEnd - item.trimStartMs) / safeSpeed).toLong()
                     val reverseResult = ffmpegEngine.reverseVideo(
                         sourceFilePath = speedProxyPath,
                         startMs = 0L,
@@ -3968,11 +4000,12 @@ class VideoEditingActivity : AppCompatActivity() {
                     if (reverseResult is com.tharunbirla.librecuts.services.FFmpegRenderEngine.RenderResult.Success) {
                         val finalProxyUri = android.net.Uri.fromFile(java.io.File(reverseResult.outputPath))
                         if (index == 0) {
-                            viewModel.updateMainVideoSpeed(speed, null)
+                            viewModel.updateMainVideoSpeed(safeSpeed, null)
                             viewModel.updateMainVideoReverse(isReversed = true, proxyUri = finalProxyUri)
                         } else {
-                            updateVideoSegment(index, item.copy(speed = speed, proxyUri = finalProxyUri, isReversed = true))
+                            updateVideoSegment(index, item.copy(speed = safeSpeed, proxyUri = finalProxyUri, isReversed = true))
                         }
+                        viewModel.project.value?.let { renderTracks(it) }
                         hideSpeedEditingToolbar()
                     } else {
                         android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_failed_to_reverse_speed_proxy, android.widget.Toast.LENGTH_SHORT).show()
@@ -3981,14 +4014,16 @@ class VideoEditingActivity : AppCompatActivity() {
                     hideLoading()
                     val proxyUri = android.net.Uri.fromFile(java.io.File(result.outputPath))
                     if (index == 0) {
-                        viewModel.updateMainVideoSpeed(speed, proxyUri)
+                        viewModel.updateMainVideoSpeed(safeSpeed, proxyUri)
                     } else {
-                        updateVideoSegment(index, item.copy(speed = speed, proxyUri = proxyUri))
+                        updateVideoSegment(index, item.copy(speed = safeSpeed, proxyUri = proxyUri))
                     }
+                    viewModel.project.value?.let { renderTracks(it) }
                     hideSpeedEditingToolbar()
                 }
             } else {
                 hideLoading()
+                try { File(outputFilePath).takeIf { it.exists() }?.delete() } catch (e: Exception) {}
                 android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_failed_to_apply_speed, android.widget.Toast.LENGTH_SHORT).show()
             }
         }
@@ -4715,6 +4750,12 @@ class VideoEditingActivity : AppCompatActivity() {
             if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
                 android.widget.Toast.makeText(this, "Please grant notification permission and try exporting again.", android.widget.Toast.LENGTH_LONG).show()
+                return
+            }
+        } else if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                androidx.core.app.ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 102)
+                android.widget.Toast.makeText(this, "Please grant storage permission to save video to gallery.", android.widget.Toast.LENGTH_LONG).show()
                 return
             }
         }

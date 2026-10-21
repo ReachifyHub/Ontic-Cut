@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.tharunbirla.librecuts.MainActivity
 import com.tharunbirla.librecuts.R
+import com.tharunbirla.librecuts.utils.ErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,6 +43,7 @@ class ExportService : Service() {
         const val EXTRA_PROGRESS = "extra_progress"
         const val EXTRA_SAVED_URI = "extra_saved_uri"
         const val EXTRA_ERROR = "extra_error"
+        const val EXTRA_ERROR_CODE = "extra_error_code"
 
         const val EXTRA_COMMAND = "extra_command"
         const val EXTRA_TEMP_OUTPUT_PATH = "extra_temp_output_path"
@@ -86,24 +88,30 @@ class ExportService : Service() {
 
                 when (result) {
                     is FFmpegRenderEngine.RenderResult.Success -> {
-                        val savedUri = saveVideoToGallery(tempFile, isAudioOnly)
-                        if (savedUri != null) {
-                            showCompletionNotification("Export Complete", "Video saved to gallery", savedUri)
-                            broadcastSuccess(savedUri.toString())
-                            Log.d(TAG, "Export successful: $savedUri")
+                        if (!tempFile.exists() || tempFile.length() == 0L) {
+                            Log.e(TAG, "Rendered output file is missing or 0 bytes: $tempOutputPath")
+                            showCompletionNotification("Export Failed", "Rendered file is missing or empty", null)
+                            broadcastFailure("Rendered output file is empty or missing", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         } else {
-                            showCompletionNotification("Export Failed", "Failed to save video to gallery", null)
-                            broadcastFailure("Failed to save video to gallery")
+                            val savedUri = saveVideoToGallery(tempFile, isAudioOnly)
+                            if (savedUri != null) {
+                                showCompletionNotification("Export Complete", "Video saved to gallery", savedUri)
+                                broadcastSuccess(savedUri.toString())
+                                Log.d(TAG, "Export successful: $savedUri")
+                            } else {
+                                showCompletionNotification("Export Failed", "Failed to save video to gallery", null)
+                                broadcastFailure("Failed to save video to gallery", ErrorCode.GALLERY_SAVE_FAILED.code)
+                            }
                         }
                     }
                     is FFmpegRenderEngine.RenderResult.Failure -> {
                         showCompletionNotification("Export Failed", "Error during rendering", null)
-                        broadcastFailure(result.error)
+                        broadcastFailure(result.error, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         Log.e(TAG, "Export failed: ${result.error}")
                     }
                     is FFmpegRenderEngine.RenderResult.Cancelled -> {
                         showCompletionNotification("Export Cancelled", "The export was cancelled", null)
-                        broadcastFailure("Export cancelled")
+                        broadcastFailure("Export cancelled", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                     }
                 }
 
@@ -114,7 +122,7 @@ class ExportService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Export exception", e)
                 showCompletionNotification("Export Failed", e.message ?: "Unknown error", null)
-                broadcastFailure(e.message ?: "Unknown error")
+                broadcastFailure(e.message ?: "Unknown error", ErrorCode.UNEXPECTED_CRASH.code)
             } finally {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -199,9 +207,10 @@ class ExportService : Service() {
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
-    private fun broadcastFailure(error: String) {
+    private fun broadcastFailure(error: String, errorCode: String = ErrorCode.FFMPEG_EXECUTION_FAILED.code) {
         val intent = Intent(ACTION_EXPORT_FAILURE).apply {
             putExtra(EXTRA_ERROR, error)
+            putExtra(EXTRA_ERROR_CODE, errorCode)
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
@@ -210,6 +219,7 @@ class ExportService : Service() {
         val mimeType = if (isAudioOnly) "audio/mpeg" else "video/mp4"
         val ext = if (isAudioOnly) ".mp3" else ".mp4"
         val prefix = if (isAudioOnly) "LibreCuts_Audio_" else "LibreCuts_"
+        val fileName = "${prefix}${System.currentTimeMillis()}$ext"
         
         val sharedPreferences = getSharedPreferences("librecuts_prefs", Context.MODE_PRIVATE)
         val prefKey = if (isAudioOnly) "export_audio_directory_uri" else "export_directory_uri"
@@ -226,39 +236,120 @@ class ExportService : Service() {
                     contentResolver,
                     parentUri,
                     mimeType,
-                    "${prefix}${System.currentTimeMillis()}$ext"
+                    fileName
                 )
                 if (newFileUri != null) {
-                    contentResolver.openOutputStream(newFileUri)?.use { output ->
-                        videoFile.inputStream().use { input -> input.copyTo(output) }
+                    try {
+                        contentResolver.openOutputStream(newFileUri)?.use { output ->
+                            videoFile.inputStream().use { input -> input.copyTo(output) }
+                        } ?: throw java.io.IOException("Unable to open output stream for custom directory")
+                        return newFileUri
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed writing to custom directory file, deleting partial file: ${e.message}", e)
+                        try {
+                            android.provider.DocumentsContract.deleteDocument(contentResolver, newFileUri)
+                        } catch (delEx: Exception) {
+                            Log.w(TAG, "Failed to delete partial document: ${delEx.message}")
+                        }
                     }
-                    return newFileUri
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error saving to custom directory: ${e.message}, falling back to default", e)
             }
         }
 
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveToMediaStoreQPlus(videoFile, mimeType, fileName, isAudioOnly)
+        } else {
+            saveToMediaStoreLegacy(videoFile, mimeType, fileName, isAudioOnly)
+        }
+    }
+
+    private fun saveToMediaStoreQPlus(videoFile: File, mimeType: String, fileName: String, isAudioOnly: Boolean): Uri? {
         return try {
             val contentValues = android.content.ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "${prefix}${System.currentTimeMillis()}$ext")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                if (isAudioOnly) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MUSIC + "/LibreCuts")
-                } else {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/LibreCuts")
-                }
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    if (isAudioOnly) Environment.DIRECTORY_MUSIC + "/LibreCuts" else Environment.DIRECTORY_MOVIES + "/LibreCuts"
+                )
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val collectionUri = if (isAudioOnly) MediaStore.Audio.Media.EXTERNAL_CONTENT_URI else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-            val uri = contentResolver.insert(collectionUri, contentValues)
-            uri?.let {
-                contentResolver.openOutputStream(it)?.use { output ->
+            val collectionUri = if (isAudioOnly) {
+                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            } else {
+                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            }
+            val uri = contentResolver.insert(collectionUri, contentValues) ?: return null
+            try {
+                contentResolver.openOutputStream(uri)?.use { output ->
                     videoFile.inputStream().use { input -> input.copyTo(output) }
+                } ?: throw java.io.IOException("Failed to open output stream for MediaStore URI")
+
+                contentValues.clear()
+                contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                contentResolver.update(uri, contentValues, null, null)
+                uri
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to write data to MediaStore URI, deleting incomplete entry: ${e.message}", e)
+                try {
+                    contentResolver.delete(uri, null, null)
+                } catch (delEx: Exception) {
+                    Log.w(TAG, "Failed to delete corrupt MediaStore URI: ${delEx.message}")
                 }
-                it
+                null
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error saving to default gallery: ${e.message}", e)
+            Log.e(TAG, "Error inserting into MediaStore (API 29+): ${e.message}", e)
+            null
+        }
+    }
+
+    private fun saveToMediaStoreLegacy(videoFile: File, mimeType: String, fileName: String, isAudioOnly: Boolean): Uri? {
+        return try {
+            val targetDirType = if (isAudioOnly) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_MOVIES
+            val publicDir = Environment.getExternalStoragePublicDirectory(targetDirType)
+            val libreCutsDir = File(publicDir, "LibreCuts")
+            if (!libreCutsDir.exists() && !libreCutsDir.mkdirs()) {
+                Log.w(TAG, "Directory ${libreCutsDir.absolutePath} could not be created or already exists")
+            }
+            val destFile = File(libreCutsDir, fileName)
+            try {
+                videoFile.copyTo(destFile, overwrite = true)
+            } catch (e: Exception) {
+                if (destFile.exists()) destFile.delete()
+                Log.e(TAG, "Failed copying video to legacy destination: ${e.message}", e)
+                return null
+            }
+
+            val contentValues = android.content.ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                put(MediaStore.MediaColumns.DATA, destFile.absolutePath)
+                put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+            }
+            val collectionUri = if (isAudioOnly) MediaStore.Audio.Media.EXTERNAL_CONTENT_URI else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            val insertedUri = try {
+                contentResolver.insert(collectionUri, contentValues)
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not insert legacy MediaStore record directly: ${e.message}")
+                null
+            }
+
+            // Always scan the file so system MediaScanner indexes it immediately in Gallery
+            android.media.MediaScannerConnection.scanFile(
+                applicationContext,
+                arrayOf(destFile.absolutePath),
+                arrayOf(mimeType)
+            ) { path, scannedUri ->
+                Log.d(TAG, "Legacy MediaScanner finished for $path -> $scannedUri")
+            }
+
+            insertedUri ?: Uri.fromFile(destFile)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving video in legacy mode (API <= 28): ${e.message}", e)
             null
         }
     }

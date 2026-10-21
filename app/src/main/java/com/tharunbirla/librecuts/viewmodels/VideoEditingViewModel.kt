@@ -742,10 +742,22 @@ class VideoEditingViewModel : ViewModel() {
         
         if (finalProxyUri != null) {
             val proxyPath = resolveUriToPath(finalProxyUri) ?: finalProxyUri.toString()
-            val baseDuration = if (trimOp != null) (trimOp.endMs - trimOp.startMs) else 0L
+            val baseDuration = if (trimOp != null) {
+                (trimOp.endMs - trimOp.startMs)
+            } else {
+                try {
+                    val r = android.media.MediaMetadataRetriever()
+                    try {
+                        r.setDataSource(proxyPath)
+                        r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    } finally {
+                        r.release()
+                    }
+                } catch (e: Exception) { 0L }
+            }
             if (baseDuration > 0) {
                 val speed = speedOp?.speed ?: 1.0f
-                outputDuration = baseDuration / speed / 1000.0
+                outputDuration = if (trimOp != null) (baseDuration / speed / 1000.0) else (baseDuration / 1000.0)
                 cmd.append(" -t $outputDuration -i \"$proxyPath\"")
             } else {
                 cmd.append(" -i \"$proxyPath\"")
@@ -779,7 +791,7 @@ class VideoEditingViewModel : ViewModel() {
         if (mergeOp != null) {
             for (item in mergeOp.items) {
                 if (item.proxyUri != null) {
-                    val proxyPath = item.proxyUri.path ?: item.proxyUri.toString()
+                    val proxyPath = resolveUriToPath(item.proxyUri) ?: item.proxyUri.path ?: item.proxyUri.toString()
                     val duration = item.trimmedDurationMs / 1000.0
                     cmd.append(" -t $duration -i \"$proxyPath\"")
                 } else {
