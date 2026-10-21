@@ -89,16 +89,83 @@ fun VideoEditingViewModel.updateMergeItemTrim(index: Int, startMs: Long, endMs: 
 }
 
 fun VideoEditingViewModel.addMergeOperation(items: List<EditOperation.MergeItem>) {
-    executeCommand(MutateListCommand("Merge Videos") { ops ->
-        val existingIdx = ops.indexOfFirst { it is EditOperation.Merge }
-        val newOps = ops.toMutableList()
-        if (existingIdx != -1) {
-            val existing = newOps[existingIdx] as EditOperation.Merge
-            newOps[existingIdx] = existing.copy(items = existing.items + items)
+    insertSequenceItems(Int.MAX_VALUE, items)
+}
+
+fun VideoEditingViewModel.insertSequenceItems(
+    insertIndex: Int,
+    newItems: List<EditOperation.MergeItem>,
+    currentPrimaryItem: EditOperation.MergeItem? = null
+) {
+    if (newItems.isEmpty()) return
+    executeCommand(MutateProjectCommand("Insert Media") { project ->
+        val ops = project.operations.toMutableList()
+        val mergeIdx = ops.indexOfFirst { it is EditOperation.Merge }
+        val currentMergeItems = if (mergeIdx != -1) {
+            (ops[mergeIdx] as EditOperation.Merge).items
         } else {
-            newOps.add(EditOperation.Merge(items))
+            emptyList()
         }
-        newOps
+
+        if (insertIndex <= 0) {
+            // Inserting at the beginning:
+            // First item in newItems becomes the new primary video
+            val newPrimary = newItems[0]
+            val restNew = newItems.drop(1)
+
+            val oldPrimaryItem = currentPrimaryItem ?: EditOperation.MergeItem(
+                uri = project.sourceUri,
+                durationMs = 5000L,
+                trimStartMs = ops.filterIsInstance<EditOperation.Trim>().lastOrNull()?.startMs ?: 0L,
+                trimEndMs = ops.filterIsInstance<EditOperation.Trim>().lastOrNull()?.endMs ?: 5000L,
+                speed = ops.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()?.speed ?: 1.0f,
+                isReversed = ops.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()?.isReversed ?: false,
+                isMirrored = ops.filterIsInstance<EditOperation.MirrorMain>().lastOrNull()?.isMirrored ?: false,
+                maskConfig = ops.filterIsInstance<EditOperation.MaskMain>().lastOrNull()?.maskConfig ?: EditOperation.MaskConfig()
+            )
+
+            ops.removeAll { it is EditOperation.Trim || it is EditOperation.SpeedMain || it is EditOperation.ReverseMain || it is EditOperation.MirrorMain || it is EditOperation.MaskMain }
+            ops.add(0, EditOperation.Trim(newPrimary.trimStartMs, newPrimary.trimEndMs))
+            if (newPrimary.speed != 1.0f) {
+                ops.add(EditOperation.SpeedMain(newPrimary.speed, newPrimary.proxyUri))
+            }
+            if (newPrimary.isReversed) {
+                ops.add(EditOperation.ReverseMain(true, newPrimary.proxyUri))
+            }
+            if (newPrimary.isMirrored) {
+                ops.add(EditOperation.MirrorMain(true))
+            }
+            if (newPrimary.maskConfig.shape != EditOperation.MaskShape.NONE) {
+                ops.add(EditOperation.MaskMain(newPrimary.maskConfig))
+            }
+
+            val allFollowItems = restNew + listOf(oldPrimaryItem) + currentMergeItems
+            val newMergeOp = EditOperation.Merge(allFollowItems)
+            val updatedMergeIdx = ops.indexOfFirst { it is EditOperation.Merge }
+            if (updatedMergeIdx != -1) {
+                ops[updatedMergeIdx] = newMergeOp
+            } else {
+                ops.add(newMergeOp)
+            }
+
+            project.copy(
+                sourceUri = newPrimary.uri,
+                sourceName = newPrimary.uri.lastPathSegment ?: "media",
+                operations = ops
+            )
+        } else {
+            // Insert between or at end
+            val targetIdx = (insertIndex - 1).coerceIn(0, currentMergeItems.size)
+            val updatedItems = currentMergeItems.toMutableList()
+            updatedItems.addAll(targetIdx, newItems)
+            val newMergeOp = EditOperation.Merge(updatedItems)
+            if (mergeIdx != -1) {
+                ops[mergeIdx] = newMergeOp
+            } else {
+                ops.add(newMergeOp)
+            }
+            project.copy(operations = ops)
+        }
     })
 }
 

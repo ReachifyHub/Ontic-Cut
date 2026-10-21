@@ -1596,6 +1596,12 @@ class VideoEditingActivity : AppCompatActivity() {
                 val tvVolumeValue = toolbar.findViewById<TextView>(R.id.tvAudioVolumeValue)
                 volumeSlider?.addOnChangeListener { _, value, _ ->
                     tvVolumeValue?.text = "${(value * 100).toInt()}%"
+                    audioPreviewPlayer?.let { player ->
+                        try {
+                            val safeVol = value.coerceIn(0f, 2f)
+                            player.setVolume(safeVol, safeVol)
+                        } catch (_: Exception) {}
+                    }
                     viewModel.selectedOperationId.value?.let { id ->
                         val project = viewModel.project.value ?: return@addOnChangeListener
                         val op = project.operations.find { it is com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio
@@ -1644,6 +1650,8 @@ class VideoEditingActivity : AppCompatActivity() {
                                 audioPreviewPlayer = android.media.MediaPlayer().apply {
                                     setDataSource(this@VideoEditingActivity, op.audioUri)
                                     prepare()
+                                    val safeVol = op.volume.coerceIn(0f, 2f)
+                                    setVolume(safeVol, safeVol)
                                     seekTo(op.internalStartMs.toInt())
                                     start()
                                     btnAudioPreviewPlay.setImageResource(R.drawable.ic_pause_24)
@@ -2291,6 +2299,17 @@ class VideoEditingActivity : AppCompatActivity() {
             playerView.translationX = -fullWidth * xFrac
             playerView.translationY = -fullHeight * yFrac
 
+            val photoLp = photoSequencePreviewImageView?.layoutParams as? FrameLayout.LayoutParams
+            photoLp?.let {
+                it.width = fullWidth.toInt()
+                it.height = fullHeight.toInt()
+                it.gravity = Gravity.TOP or Gravity.START
+                photoSequencePreviewImageView?.layoutParams = it
+                photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.FIT_XY
+                photoSequencePreviewImageView?.translationX = -fullWidth * xFrac
+                photoSequencePreviewImageView?.translationY = -fullHeight * yFrac
+            }
+
             val hwCanvas = findViewById<com.tharunbirla.librecuts.customviews.HandwritingCanvasView>(R.id.handwritingCanvasView)
             val overlays = listOf(textOverlayView, draggableTextOverlay, imageOverlayView, draggableImageOverlay, cropOverlayView, videoMaskOverlayView, hwCanvas)
             for (overlay in overlays) {
@@ -2346,6 +2365,17 @@ class VideoEditingActivity : AppCompatActivity() {
             playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             playerView.translationX = 0f
             playerView.translationY = 0f
+
+            val photoLp = photoSequencePreviewImageView?.layoutParams as? FrameLayout.LayoutParams
+            photoLp?.let {
+                it.width = FrameLayout.LayoutParams.MATCH_PARENT
+                it.height = FrameLayout.LayoutParams.MATCH_PARENT
+                it.gravity = Gravity.CENTER
+                photoSequencePreviewImageView?.layoutParams = it
+                photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.FIT_CENTER
+                photoSequencePreviewImageView?.translationX = 0f
+                photoSequencePreviewImageView?.translationY = 0f
+            }
 
             val hwCanvas = findViewById<com.tharunbirla.librecuts.customviews.HandwritingCanvasView>(R.id.handwritingCanvasView)
             val overlays = listOf(textOverlayView, draggableTextOverlay, imageOverlayView, draggableImageOverlay, cropOverlayView, videoMaskOverlayView, hwCanvas)
@@ -5673,11 +5703,28 @@ class VideoEditingActivity : AppCompatActivity() {
 
                     try {
                         val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        contentResolver.openInputStream(targetUri)?.use { input ->
-                            android.graphics.BitmapFactory.decodeStream(input, null, options)
-                        }
+                        android.graphics.BitmapFactory.decodeFile(cachedImageFile.absolutePath, options)
                         if (options.outWidth > 0 && options.outHeight > 0) {
-                            primaryVideoAspectRatio = options.outWidth.toFloat() / options.outHeight.toFloat()
+                            var imgW = options.outWidth
+                            var imgH = options.outHeight
+                            try {
+                                val exif = android.media.ExifInterface(cachedImageFile.absolutePath)
+                                val orientation = exif.getAttributeInt(
+                                    android.media.ExifInterface.TAG_ORIENTATION,
+                                    android.media.ExifInterface.ORIENTATION_NORMAL
+                                )
+                                if (orientation == android.media.ExifInterface.ORIENTATION_ROTATE_90 ||
+                                    orientation == android.media.ExifInterface.ORIENTATION_ROTATE_270 ||
+                                    orientation == android.media.ExifInterface.ORIENTATION_TRANSPOSE ||
+                                    orientation == android.media.ExifInterface.ORIENTATION_TRANSVERSE) {
+                                    val temp = imgW
+                                    imgW = imgH
+                                    imgH = temp
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Exif orientation read failed: ${e.message}")
+                            }
+                            primaryVideoAspectRatio = imgW.toFloat() / imgH.toFloat()
                         } else {
                             primaryVideoAspectRatio = 16f / 9f
                         }
@@ -5688,6 +5735,38 @@ class VideoEditingActivity : AppCompatActivity() {
                     val hasTrim = viewModel.project.value?.operations?.any { it is com.tharunbirla.librecuts.models.EditOperation.Trim } == true
                     if (!hasTrim) {
                         viewModel.updateMainVideoTrim(0L, 5000L)
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        triggerCanvasLayoutUpdate()
+                        viewModel.project.value?.let { renderTracks(it) }
+                        isVideoLoaded = true
+                        isImportLoading = false
+                        loadingScreen.visibility = View.GONE
+                        photoSequencePreviewImageView?.visibility = View.VISIBLE
+                        photoSequencePreviewImageView?.setImageURI(null)
+                        photoSequencePreviewImageView?.setImageURI(Uri.fromFile(cachedImageFile))
+                        playerView.visibility = View.INVISIBLE
+
+                        val totalDuration = getTotalSequenceDuration()
+                        customVideoSeeker.setVideoDuration(totalDuration)
+                        timeRulerView.setVideoDuration(totalDuration)
+                        updateDurationDisplay(0, totalDuration.toInt())
+
+                        if (!isInitialFitDone && totalDuration > 0L) {
+                            timelineHorizontalScroll.post {
+                                val scrollWidth = timelineHorizontalScroll.width.toFloat()
+                                if (scrollWidth > 0) {
+                                    val safeDuration = totalDuration
+                                    val newPixelsPerMs = (scrollWidth - 32.dpToPx()) / safeDuration
+                                    val density = resources.displayMetrics.density
+                                    pixelsPerMs = newPixelsPerMs.coerceIn(0.001f * density, 2.0f * density)
+                                    viewModel.project.value?.let { renderTracks(it) }
+                                    isInitialFitDone = true
+                                }
+                            }
+                        }
+                        updateUIInteractionState()
                     }
                 } else {
                     val videoFilePath = getFilePathFromUri(targetUri)
@@ -6132,7 +6211,7 @@ class VideoEditingActivity : AppCompatActivity() {
             activeSegmentViews.add(segmentView)
 
             val isPhoto = item.isImage || isImageUri(item.uri)
-            val effectiveMaxDur = if (isPhoto) maxOf(item.durationMs, maxOf(item.trimEndMs, 600000L)) else item.durationMs
+            val effectiveMaxDur = if (isPhoto) maxOf(item.durationMs, item.trimEndMs) else item.durationMs
             val stretchedMaxDurationMs = (effectiveMaxDur / item.speed).toLong()
             val stretchedDurationMs = (item.durationMs / item.speed).toLong()
             val stretchedTrimStartMs = (item.trimStartMs / item.speed).toLong()

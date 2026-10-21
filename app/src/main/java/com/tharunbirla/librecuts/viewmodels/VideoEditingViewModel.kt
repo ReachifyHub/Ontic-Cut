@@ -877,8 +877,27 @@ class VideoEditingViewModel : ViewModel() {
                     val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     android.graphics.BitmapFactory.decodeFile(sourceFilePath, opts)
                     if (opts.outWidth > 0 && opts.outHeight > 0) {
-                        mainWidth = opts.outWidth
-                        mainHeight = opts.outHeight
+                        var w = opts.outWidth
+                        var h = opts.outHeight
+                        try {
+                            val exif = android.media.ExifInterface(sourceFilePath)
+                            val orientation = exif.getAttributeInt(
+                                android.media.ExifInterface.TAG_ORIENTATION,
+                                android.media.ExifInterface.ORIENTATION_NORMAL
+                            )
+                            if (orientation == android.media.ExifInterface.ORIENTATION_ROTATE_90 ||
+                                orientation == android.media.ExifInterface.ORIENTATION_ROTATE_270 ||
+                                orientation == android.media.ExifInterface.ORIENTATION_TRANSPOSE ||
+                                orientation == android.media.ExifInterface.ORIENTATION_TRANSVERSE) {
+                                val temp = w
+                                w = h
+                                h = temp
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Exif orientation read failed: ${e.message}")
+                        }
+                        mainWidth = w
+                        mainHeight = h
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error extracting image dimensions: ${e.message}")
@@ -1232,9 +1251,8 @@ class VideoEditingViewModel : ViewModel() {
                     if (delayMs > 0) {
                         filters.add("adelay=$delayMs|$delayMs")
                     }
-                    if (audioOp.volume != 1.0f) {
-                        filters.add("volume=${audioOp.volume}")
-                    }
+                    val safeVol = audioOp.volume.coerceIn(0f, 2f)
+                    filters.add("volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}")
 
                     if (filters.isNotEmpty()) {
                         filterParts.add("[$inputIdx:a]${filters.joinToString(",")}$trackLabel")
@@ -1271,7 +1289,7 @@ class VideoEditingViewModel : ViewModel() {
                     
                     mixInputLabels[0] = mainAudioRef
                     val allInputs = mixInputLabels.joinToString("")
-                    filterParts.add("${allInputs}amix=inputs=${mixInputLabels.size}:duration=longest[outa]")
+                    filterParts.add("${allInputs}amix=inputs=${mixInputLabels.size}:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
                     currentAudioLabel = "[outa]"
                 } else {
                     filterParts.add("${mixInputLabels[0]}anullsink")
@@ -1282,7 +1300,7 @@ class VideoEditingViewModel : ViewModel() {
                         currentAudioLabel = "[outa]"
                     } else {
                         val allBg = mixInputLabels.joinToString("")
-                        filterParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest[outa]")
+                        filterParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
                         currentAudioLabel = "[outa]"
                     }
                 }
@@ -1458,9 +1476,8 @@ class VideoEditingViewModel : ViewModel() {
                     filters.add("adelay=$delayMs|$delayMs")
                 }
                 
-                if (audioOp.volume != 1.0f) {
-                    filters.add("volume=${audioOp.volume}")
-                }
+                val safeVol = audioOp.volume.coerceIn(0f, 2f)
+                filters.add("volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}")
 
                 if (filters.isNotEmpty()) {
                     filterComplexParts.add("[$inputIdx:a]${filters.joinToString(",")}$trackLabel")
@@ -1497,7 +1514,7 @@ class VideoEditingViewModel : ViewModel() {
 
                 val allInputs = mainAudioRef + mixInputLabels.joinToString("")
                 val totalInputs = 1 + mixInputLabels.size
-                filterComplexParts.add("${allInputs}amix=inputs=$totalInputs:duration=longest[outa]")
+                filterComplexParts.add("${allInputs}amix=inputs=$totalInputs:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
                 finalAudioLabel = "[outa]"
             } else {
                 if (mixInputLabels.size == 1) {
@@ -1506,7 +1523,7 @@ class VideoEditingViewModel : ViewModel() {
                     finalAudioLabel = "[outa]"
                 } else {
                     val allBg = mixInputLabels.joinToString("")
-                    filterComplexParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest[outa]")
+                    filterComplexParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
                     finalAudioLabel = "[outa]"
                 }
             }

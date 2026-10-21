@@ -538,7 +538,8 @@ class FFmpegRenderEngine(private val context: Context) {
             "-an"
         }
 
-        val command = "-y -ss $startSecs -t $durationSecs -i \"$sourceFilePath\" -filter:v \"setpts=${ptsMultiplier}*(PTS-STARTPTS),format=yuv420p\" -c:v libx264 -preset ultrafast $audioParams \"$outputFilePath\""
+        val videoFilter = "scale='min(1280,iw)':-2,setpts=${ptsMultiplier}*(PTS-STARTPTS),format=yuv420p"
+        val command = "-y -ss $startSecs -t $durationSecs -i \"$sourceFilePath\" -filter:v \"$videoFilter\" -c:v libx264 -preset ultrafast -crf 28 -tune fastdecode $audioParams \"$outputFilePath\""
         return executeCommand(command)
     }
 
