@@ -40,8 +40,24 @@ android {
         }
     }
 
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("KEYSTORE_PATH")
+            if (keystorePath && file(keystorePath).exists()) {
+                storeFile file(keystorePath)
+                storePassword System.getenv("STORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS")
+                keyPassword System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            def keystorePath = System.getenv("KEYSTORE_PATH")
+            if (keystorePath && file(keystorePath).exists()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
@@ -72,7 +88,7 @@ android {
             enable true
             reset()
             include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
-            universalApk false
+            universalApk true
         }
     }
 

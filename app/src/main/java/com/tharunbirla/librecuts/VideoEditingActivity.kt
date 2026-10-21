@@ -4767,11 +4767,6 @@ class VideoEditingActivity : AppCompatActivity() {
             return
         }
 
-        if (!project.hasOperations()) {
-            exportVideoFile(videoUri!!)
-            return
-        }
-
         // Warn but don't block — export will just skip text rendering if font is missing
         if (fontFilePath == null) {
             Log.w(TAG, "fontFilePath is null — text overlays will be skipped. " +

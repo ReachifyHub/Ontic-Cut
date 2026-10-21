@@ -1,0 +1,6 @@
+{
+  "name": "Ontic Cut",
+  "description": "Ontic Cut video editor with timeline editing, local media processing, speed controls, and export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

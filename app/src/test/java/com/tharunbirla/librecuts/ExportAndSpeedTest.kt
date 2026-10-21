@@ -19,7 +19,7 @@ class ExportAndSpeedTest {
     fun testTrimmedDurationWithSpeed() {
         // Speed 2.0x halves duration
         val item2x = EditOperation.MergeItem(
-            uri = Uri.EMPTY,
+            uri = android.net.DummyUri.INSTANCE,
             durationMs = 10000L,
             trimStartMs = 0L,
             trimEndMs = 10000L,
@@ -29,7 +29,7 @@ class ExportAndSpeedTest {
 
         // Speed 0.5x doubles duration
         val item05x = EditOperation.MergeItem(
-            uri = Uri.EMPTY,
+            uri = android.net.DummyUri.INSTANCE,
             durationMs = 10000L,
             trimStartMs = 0L,
             trimEndMs = 10000L,
@@ -39,7 +39,7 @@ class ExportAndSpeedTest {
 
         // Trimmed portion with speed
         val itemTrimmed = EditOperation.MergeItem(
-            uri = Uri.EMPTY,
+            uri = android.net.DummyUri.INSTANCE,
             durationMs = 10000L,
             trimStartMs = 2000L,
             trimEndMs = 6000L,

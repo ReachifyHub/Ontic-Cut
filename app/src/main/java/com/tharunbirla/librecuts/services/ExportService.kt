@@ -168,9 +168,25 @@ class ExportService : Service() {
     }
 
     private fun showCompletionNotification(title: String, message: String, videoUri: Uri?) {
+        val safeUri: Uri? = if (videoUri != null) {
+            if (videoUri.scheme == "file" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    androidx.core.content.FileProvider.getUriForFile(
+                        this,
+                        "${packageName}.fileprovider",
+                        File(videoUri.path ?: "")
+                    )
+                } catch (e: Exception) {
+                    videoUri
+                }
+            } else {
+                videoUri
+            }
+        } else null
+
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            if (videoUri != null) {
-                setDataAndType(videoUri, if (message.contains("Audio", true)) "audio/*" else "video/*")
+            if (safeUri != null) {
+                setDataAndType(safeUri, if (message.contains("Audio", true)) "audio/*" else "video/*")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             } else {
                 setClass(this@ExportService, MainActivity::class.java)
@@ -267,19 +283,17 @@ class ExportService : Service() {
 
     private fun saveToMediaStoreQPlus(videoFile: File, mimeType: String, fileName: String, isAudioOnly: Boolean): Uri? {
         return try {
+            val relativeDir = if (isAudioOnly) Environment.DIRECTORY_MUSIC + "/LibreCuts/" else Environment.DIRECTORY_MOVIES + "/LibreCuts/"
             val contentValues = android.content.ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                put(
-                    MediaStore.MediaColumns.RELATIVE_PATH,
-                    if (isAudioOnly) Environment.DIRECTORY_MUSIC + "/LibreCuts" else Environment.DIRECTORY_MOVIES + "/LibreCuts"
-                )
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             val collectionUri = if (isAudioOnly) {
-                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
             } else {
-                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             }
             val uri = contentResolver.insert(collectionUri, contentValues) ?: return null
             try {
@@ -339,15 +353,32 @@ class ExportService : Service() {
             }
 
             // Always scan the file so system MediaScanner indexes it immediately in Gallery
+            val latch = java.util.concurrent.CountDownLatch(1)
+            var scannedContentUri: Uri? = null
             android.media.MediaScannerConnection.scanFile(
                 applicationContext,
                 arrayOf(destFile.absolutePath),
                 arrayOf(mimeType)
             ) { path, scannedUri ->
                 Log.d(TAG, "Legacy MediaScanner finished for $path -> $scannedUri")
+                scannedContentUri = scannedUri
+                latch.countDown()
+            }
+            try {
+                latch.await(1500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                // proceed
             }
 
-            insertedUri ?: Uri.fromFile(destFile)
+            scannedContentUri ?: insertedUri ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    androidx.core.content.FileProvider.getUriForFile(this, "${packageName}.fileprovider", destFile)
+                } catch (e: Exception) {
+                    Uri.fromFile(destFile)
+                }
+            } else {
+                Uri.fromFile(destFile)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error saving video in legacy mode (API <= 28): ${e.message}", e)
             null
