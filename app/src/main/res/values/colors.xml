@@ -1,16 +1,26 @@
 <resources>
 
-    <!-- PRIMARY: Electric Pink -->
-    <color name="colorPrimary">#FF2A6D</color>
-    <color name="colorPrimaryVariant">#C81D52</color>
+    <!-- ONTIC CUT WARM BRAND PALETTE -->
+    <color name="onticCoral">#E85D4A</color>
+    <color name="onticOrange">#F58658</color>
+    <color name="onticPeach">#F7B08C</color>
+
+    <!-- PRIMARY: Warm Coral -->
+    <color name="colorPrimary">#E85D4A</color>
+    <color name="colorPrimaryVariant">#C44535</color>
     <color name="colorOnPrimary">#FFFFFF</color>
 
-    <!-- SECONDARY: Bright Pink Accent -->
-    <color name="colorSecondary">#FF2A6D</color>
-    <color name="colorSecondaryVariant">#C81D52</color>
+    <!-- SECONDARY: Creator Orange -->
+    <color name="colorSecondary">#F58658</color>
+    <color name="colorSecondaryVariant">#D36C40</color>
     <color name="colorOnSecondary">#FFFFFF</color>
 
-    <!-- BACKGROUND: OLED Black -->
+    <!-- TERTIARY: Peach Accent -->
+    <color name="tertiary">#F7B08C</color>
+    <color name="tertiaryContainer">#E85D4A</color>
+    <color name="onTertiary">#141418</color>
+
+    <!-- BACKGROUND: Premium Dark -->
     <color name="background">#000000</color>
     <color name="colorOnBackground">#F2F2F2</color>
 
@@ -20,7 +30,7 @@
 
     <!-- UI SPECIFIC -->
     <color name="statusBarColor">#000000</color>
-    <color name="navigationBarColor">#000000</color> <!-- Transparent/floating effect works better if base is black -->
+    <color name="navigationBarColor">#000000</color>
     <color name="cinemaBlack">#000000</color>
     <color name="textColor">#F2F2F2</color>
 
@@ -31,12 +41,8 @@
     <color name="surfaceVariant">#212128</color>
     <color name="floatingPanelBackground">#1A1A20</color>
 
-    <color name="primaryContainer">#FF2A6D</color>
+    <color name="primaryContainer">#E85D4A</color>
     <color name="onPrimaryContainer">#FFFFFF</color>
-
-    <color name="tertiary">#FFC107</color>
-    <color name="tertiaryContainer">#FFA000</color>
-    <color name="onTertiary">#FFFFFF</color>
 
     <!-- OUTLINES -->
     <color name="outline">#3F3F4A</color>
@@ -44,12 +50,12 @@
     <color name="iconSecondary">#8A8A93</color>
 
     <!-- TOOL COLORS -->
-    <color name="activeTool">#FF2A6D</color>
-    <color name="activeToolBackground">#2A1118</color> <!-- Subtle pink tint for active tool -->
+    <color name="activeTool">#E85D4A</color>
+    <color name="activeToolBackground">#2D1815</color> <!-- Subtle warm coral tint for active tool -->
     <color name="inactiveTool">#8A8A93</color>
     <color name="inactiveToolBackground">#111114</color>
 
-    <color name="toolTextActive">#FF2A6D</color>
+    <color name="toolTextActive">#F58658</color>
     <color name="toolTextInactive">#8A8A93</color>
 
     <color name="sliderHalo">#1A1A20</color>

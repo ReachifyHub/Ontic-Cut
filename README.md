@@ -1,38 +1,8 @@
-# LibreCuts
+# Ontic Cut
 
-<div align="center">
-  <img src="src/images/featureGraphic.png" alt="LibreCuts Banner" width="100%"/>
-  <br/>
-  <br/>
+**Ontic Cut** is a powerful video editing application for Android creators that prioritizes speed, precision, and privacy. Built for mobile workflow and content creation, it empowers users to trim, arrange, overlay, caption, and export watermark-free videos locally on their device.
 
-  <a href="https://github.com/sponsors/tharunbirla">
-    <img src="https://img.shields.io/badge/Sponsor_LibreCuts-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" height="35" alt="Sponsor tharunbirla" />
-  </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" height="35" alt="License" />
-  </a>
-  <br/>
-  <br/>
-  <a href="https://github.com/tharunbirla/LibreCuts/releases/latest">
-    <img src="src/images/badges/badge_github.png" alt="Get it on GitHub" height="96" />
-  </a>
-  <a href="https://f-droid.org/packages/com.tharunbirla.librecuts/">
-    <img src="src/images/badges/badge_fdroid.png" alt="Get it on F-Droid" height="96" />
-  </a>
-  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/tharunbirla/LibreCuts">
-    <img src="src/images/badges/badge_obtainium.png" height="96" alt="Get it on Obtainium" />
-  </a>
-  <a href="https://discord.gg/gwr3nE7YW">
-    <img src="src/images/badges/badge_discord.png" height="96" alt="Join Discord" />
-  </a>
-  <a href="https://hosted.weblate.org/engage/librecuts/">
-    <img src="https://hosted.weblate.org/widget/librecuts/librecuts/287x66-grey.png" height="96" alt="Translation status" />
-  </a>
-</div>
-
-<br/>
-
-**LibreCuts** is a free, open-source video editor for Android that prioritizes simplicity, efficiency, and privacy. Built for seamless performance, it empowers creators to easily select, edit, and export watermark-free videos locally on their device.
+> **Attribution & Heritage:** Ontic Cut is developed from the open-source [LibreCuts](https://github.com/tharunbirla/LibreCuts) project created by Tharun Birla and community contributors under the MIT License.
 
 ---
 
@@ -131,7 +101,7 @@ LibreCuts is built with passion and provided to the community for free. If this 
 
 ## 🔒 Permissions
 
-LibreCuts requires the following permissions to function properly:
+Ontic Cut requires the following permissions to function properly:
 
 - **READ_EXTERNAL_STORAGE**: To read videos from the device.
 - **WRITE_EXTERNAL_STORAGE**: (For older Android versions) To save edited videos.

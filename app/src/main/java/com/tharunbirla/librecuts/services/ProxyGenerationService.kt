@@ -126,7 +126,7 @@ class ProxyGenerationService : Service() {
 
     private fun buildNotification(title: String): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("LibreCuts")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(title)
             .setSmallIcon(R.drawable.ic_save_24) // Reusing save icon
             .setProgress(0, 0, true)

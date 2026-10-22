@@ -15,6 +15,7 @@ import kotlin.coroutines.resume
 import java.io.File
 
 import android.os.Build
+import androidx.core.content.pm.PackageInfoCompat
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -367,7 +368,8 @@ class FFmpegRenderEngine(private val context: Context) {
     ): String {
         val appVersion = try {
             val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            "${pInfo.versionName} (${pInfo.versionCode})"
+            val versionCode = PackageInfoCompat.getLongVersionCode(pInfo)
+            "${pInfo.versionName} ($versionCode)"
         } catch (e: Exception) {
             "1.0-beta"
         }
@@ -410,7 +412,7 @@ class FFmpegRenderEngine(private val context: Context) {
 
         val sb = StringBuilder()
         sb.appendLine("==================================================")
-        sb.appendLine("             LIBRECUTS TECHNICAL LOG             ")
+        sb.appendLine("             ONTIC CUT TECHNICAL LOG             ")
         sb.appendLine("==================================================")
         sb.appendLine("App Version : $appVersion")
         sb.appendLine("Device      : ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT})")

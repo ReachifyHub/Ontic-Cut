@@ -234,7 +234,7 @@ class ExportService : Service() {
     private fun saveVideoToGallery(videoFile: File, isAudioOnly: Boolean): Uri? {
         val mimeType = if (isAudioOnly) "audio/mpeg" else "video/mp4"
         val ext = if (isAudioOnly) ".mp3" else ".mp4"
-        val prefix = if (isAudioOnly) "LibreCuts_Audio_" else "LibreCuts_"
+        val prefix = if (isAudioOnly) "OnticCut_Audio_" else "OnticCut_"
         val fileName = "${prefix}${System.currentTimeMillis()}$ext"
         
         val sharedPreferences = getSharedPreferences("librecuts_prefs", Context.MODE_PRIVATE)
@@ -283,7 +283,7 @@ class ExportService : Service() {
 
     private fun saveToMediaStoreQPlus(videoFile: File, mimeType: String, fileName: String, isAudioOnly: Boolean): Uri? {
         return try {
-            val relativeDir = if (isAudioOnly) Environment.DIRECTORY_MUSIC + "/LibreCuts/" else Environment.DIRECTORY_MOVIES + "/LibreCuts/"
+            val relativeDir = if (isAudioOnly) Environment.DIRECTORY_MUSIC + "/OnticCut/" else Environment.DIRECTORY_MOVIES + "/OnticCut/"
             val contentValues = android.content.ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
@@ -324,11 +324,11 @@ class ExportService : Service() {
         return try {
             val targetDirType = if (isAudioOnly) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_MOVIES
             val publicDir = Environment.getExternalStoragePublicDirectory(targetDirType)
-            val libreCutsDir = File(publicDir, "LibreCuts")
-            if (!libreCutsDir.exists() && !libreCutsDir.mkdirs()) {
-                Log.w(TAG, "Directory ${libreCutsDir.absolutePath} could not be created or already exists")
+            val onticCutDir = File(publicDir, "OnticCut")
+            if (!onticCutDir.exists() && !onticCutDir.mkdirs()) {
+                Log.w(TAG, "Directory ${onticCutDir.absolutePath} could not be created or already exists")
             }
-            val destFile = File(libreCutsDir, fileName)
+            val destFile = File(onticCutDir, fileName)
             try {
                 videoFile.copyTo(destFile, overwrite = true)
             } catch (e: Exception) {
