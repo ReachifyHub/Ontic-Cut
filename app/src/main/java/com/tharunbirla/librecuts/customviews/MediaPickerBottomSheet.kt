@@ -24,6 +24,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.collection.LruCache
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
@@ -78,6 +79,9 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
     private var selectedAlbum: String = "All"
     private var currentMediaType: MediaType = MediaType.VIDEO
     private var adapter: MediaAdapter? = null
+
+    private val thumbnailCache = LruCache<Long, Bitmap>(100)
+    private val emptyThumbnailIds = java.util.Collections.synchronizedSet(mutableSetOf<Long>())
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -510,20 +514,26 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
                 tvAudioSubTitle.text = subText
                 tvAudioDuration.text = formatDuration(item.durationMs)
 
-                lifecycleScope.launch(Dispatchers.IO) {
-                    val albumArt = loadAudioAlbumArt(item)
-                    withContext(Dispatchers.Main) {
-                        if (itemView.tag == item.id) {
-                            if (albumArt != null) {
-                                ivAudioCover.setImageBitmap(albumArt)
-                                ivAudioCover.setPadding(0, 0, 0, 0)
-                                ivAudioCover.clearColorFilter()
-                            } else {
-                                ivAudioCover.setImageResource(R.drawable.ic_audio_24)
-                                val density = itemView.context.resources.displayMetrics.density
-                                val pad = (10 * density).toInt()
-                                ivAudioCover.setPadding(pad, pad, pad, pad)
-                                ivAudioCover.setColorFilter(android.graphics.Color.WHITE)
+                val cachedArt = thumbnailCache.get(item.id)
+                if (cachedArt != null) {
+                    ivAudioCover.setImageBitmap(cachedArt)
+                    ivAudioCover.setPadding(0, 0, 0, 0)
+                    ivAudioCover.clearColorFilter()
+                } else if (emptyThumbnailIds.contains(item.id)) {
+                    setAudioPlaceholder()
+                } else {
+                    setAudioPlaceholder()
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        val albumArt = loadAudioAlbumArt(item)
+                        withContext(Dispatchers.Main) {
+                            if (itemView.tag == item.id) {
+                                if (albumArt != null) {
+                                    ivAudioCover.setImageBitmap(albumArt)
+                                    ivAudioCover.setPadding(0, 0, 0, 0)
+                                    ivAudioCover.clearColorFilter()
+                                } else {
+                                    setAudioPlaceholder()
+                                }
                             }
                         }
                     }
@@ -532,8 +542,6 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
                 layoutGridContainer.visibility = View.VISIBLE
                 layoutAudioContainer.visibility = View.GONE
 
-                ivThumbnail.setImageBitmap(null)
-
                 if (item.type == MediaType.VIDEO) {
                     tvDuration.visibility = View.VISIBLE
                     tvDuration.text = formatDuration(item.durationMs)
@@ -541,15 +549,22 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
                     tvDuration.visibility = View.GONE
                 }
 
-                lifecycleScope.launch(Dispatchers.IO) {
-                    val bitmap = loadThumbnail(item)
-                    withContext(Dispatchers.Main) {
-                        if (itemView.tag == item.id) {
-                            if (bitmap != null) {
-                                ivThumbnail.setImageBitmap(bitmap)
-                            } else {
-                                val placeholder = if (item.type == MediaType.VIDEO) R.drawable.ic_play_24 else R.drawable.ic_image_24
-                                ivThumbnail.setImageResource(placeholder)
+                val cachedBmp = thumbnailCache.get(item.id)
+                if (cachedBmp != null) {
+                    ivThumbnail.setImageBitmap(cachedBmp)
+                } else {
+                    val placeholder = if (item.type == MediaType.VIDEO) R.drawable.ic_play_24 else R.drawable.ic_image_24
+                    ivThumbnail.setImageResource(placeholder)
+
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        val bitmap = loadThumbnail(item)
+                        withContext(Dispatchers.Main) {
+                            if (itemView.tag == item.id) {
+                                if (bitmap != null) {
+                                    ivThumbnail.setImageBitmap(bitmap)
+                                } else {
+                                    ivThumbnail.setImageResource(placeholder)
+                                }
                             }
                         }
                     }
@@ -561,37 +576,80 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
             }
         }
 
+        private fun setAudioPlaceholder() {
+            ivAudioCover.setImageResource(R.drawable.ic_audio_24)
+            val density = itemView.context.resources.displayMetrics.density
+            val pad = (10 * density).toInt()
+            ivAudioCover.setPadding(pad, pad, pad, pad)
+            ivAudioCover.setColorFilter(android.graphics.Color.WHITE)
+        }
+
         private fun loadAudioAlbumArt(item: MediaModel): Bitmap? {
             val context = itemView.context ?: return null
+            if (emptyThumbnailIds.contains(item.id)) return null
+
+            // On Android 10+ (API 29+), use ContentResolver.loadThumbnail
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    val bmp = context.contentResolver.loadThumbnail(item.uri, Size(300, 300), null)
+                    if (bmp != null) {
+                        thumbnailCache.put(item.id, bmp)
+                        return bmp
+                    }
+                } catch (_: Exception) {
+                    // Item might not have album art
+                }
+            }
+
+            var retriever: MediaMetadataRetriever? = null
             return try {
-                val retriever = MediaMetadataRetriever()
+                retriever = MediaMetadataRetriever()
                 if (item.localFile != null) {
                     retriever.setDataSource(item.localFile.absolutePath)
                 } else {
-                    retriever.setDataSource(context, item.uri)
+                    context.contentResolver.openFileDescriptor(item.uri, "r")?.use { pfd ->
+                        retriever.setDataSource(pfd.fileDescriptor)
+                    } ?: retriever.setDataSource(context, item.uri)
                 }
-                val artBytes = retriever.embeddedPicture
-                retriever.release()
-                if (artBytes != null) {
-                    BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size)
-                } else null
+                val artBytes = try {
+                    retriever.embeddedPicture
+                } catch (_: Exception) {
+                    null
+                }
+                if (artBytes != null && artBytes.isNotEmpty()) {
+                    val bmp = BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size)
+                    if (bmp != null) {
+                        thumbnailCache.put(item.id, bmp)
+                    }
+                    bmp
+                } else {
+                    emptyThumbnailIds.add(item.id)
+                    null
+                }
             } catch (e: Exception) {
+                emptyThumbnailIds.add(item.id)
                 null
+            } finally {
+                try {
+                    retriever?.release()
+                } catch (_: Exception) {}
             }
         }
 
         private fun loadThumbnail(item: MediaModel): Bitmap? {
             val context = itemView.context ?: return null
-            return try {
+            val bmp = try {
                 if (item.localFile != null) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         context.contentResolver.loadThumbnail(item.uri, Size(300, 300), null)
                     } else {
                         val retriever = MediaMetadataRetriever()
-                        retriever.setDataSource(item.localFile.absolutePath)
-                        val frame = retriever.frameAtTime
-                        retriever.release()
-                        frame
+                        try {
+                            retriever.setDataSource(item.localFile.absolutePath)
+                            retriever.frameAtTime
+                        } finally {
+                            retriever.release()
+                        }
                     }
                 } else {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -610,6 +668,10 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
             } catch (e: Exception) {
                 null
             }
+            if (bmp != null) {
+                thumbnailCache.put(item.id, bmp)
+            }
+            return bmp
         }
 
         private fun formatDuration(durationMs: Long): String {

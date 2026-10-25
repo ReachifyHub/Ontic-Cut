@@ -41,6 +41,12 @@ android {
     }
 
     signingConfigs {
+        debugConfig {
+            storeFile file("${rootDir}/debug.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }
         release {
             def keystorePath = System.getenv("KEYSTORE_PATH")
             if (keystorePath && file(keystorePath).exists()) {
@@ -53,6 +59,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debugConfig
+        }
         release {
             def keystorePath = System.getenv("KEYSTORE_PATH")
             if (keystorePath && file(keystorePath).exists()) {
@@ -71,6 +80,7 @@ android {
     }
     buildFeatures {
         viewBinding true
+        buildConfig true
     }
 
     testOptions {
@@ -80,26 +90,6 @@ android {
     packaging {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
-        }
-    }
-
-    splits {
-        abi {
-            enable true
-            reset()
-            include 'armeabi-v7a', 'arm64-v8a', 'x86_64'
-            universalApk true
-        }
-    }
-
-    applicationVariants.all { variant ->
-        def abiCodes = ['armeabi-v7a': 0, 'arm64-v8a': 1, 'x86_64': 2]
-
-        variant.outputs.each { output ->
-            def abi = output.getFilter(com.android.build.OutputFile.ABI)
-            if (abi != null && abiCodes.containsKey(abi)) {
-                output.versionCodeOverride = variant.versionCode + abiCodes.get(abi)
-            }
         }
     }
 }

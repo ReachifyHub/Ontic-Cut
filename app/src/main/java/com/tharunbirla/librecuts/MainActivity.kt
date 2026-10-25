@@ -34,6 +34,7 @@ import java.net.URL
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var projectAdapter: ProjectAdapter
     private val selectVideoLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
             if (uri != null) {
@@ -128,6 +129,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        setupProjectsList()
 
         binding.btnImport.setBounceClickListener {
             Log.d("ButtonClick", "Launching video selection.")
@@ -645,5 +648,159 @@ class MainActivity : AppCompatActivity() {
     private fun checkForUpdates() {
         showToast("Checking for updates in browser...")
         openUrl("https://github.com/tharunbirla/LibreCuts/releases/latest")
+    }
+
+    private fun setupProjectsList() {
+        projectAdapter = ProjectAdapter(
+            onProjectClick = { item ->
+                openSavedProject(item)
+            },
+            onProjectMenuClick = { anchorView, item ->
+                showProjectOptionsMenu(anchorView, item)
+            }
+        )
+        binding.rvProjects.apply {
+            layoutManager = androidx.recyclerview.widget.LinearLayoutManager(this@MainActivity)
+            adapter = projectAdapter
+        }
+        loadSavedProjects()
+    }
+
+    private fun showProjectOptionsMenu(anchorView: View, item: com.tharunbirla.librecuts.utils.ProjectManager.SavedProjectItem) {
+        val popup = androidx.appcompat.widget.PopupMenu(this, anchorView)
+        popup.menuInflater.inflate(R.menu.menu_project_item, popup.menu)
+        popup.setOnMenuItemClickListener { menuItem ->
+            when (menuItem.itemId) {
+                R.id.action_rename -> {
+                    showRenameProjectDialog(item)
+                    true
+                }
+                R.id.action_duplicate -> {
+                    duplicateProject(item)
+                    true
+                }
+                R.id.action_delete -> {
+                    showDeleteProjectDialog(item)
+                    true
+                }
+                else -> false
+            }
+        }
+        popup.show()
+    }
+
+    private fun showRenameProjectDialog(item: com.tharunbirla.librecuts.utils.ProjectManager.SavedProjectItem) {
+        val input = android.widget.EditText(this).apply {
+            setText(item.name)
+            setSelection(item.name.length)
+            setSingleLine(true)
+            val padding = (16 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding, padding, padding)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.textColor))
+        }
+
+        val container = android.widget.FrameLayout(this).apply {
+            val hPadding = (24 * resources.displayMetrics.density).toInt()
+            val vPadding = (8 * resources.displayMetrics.density).toInt()
+            setPadding(hPadding, vPadding, hPadding, vPadding)
+            addView(input)
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_rename_title)
+            .setView(container)
+            .setPositiveButton(R.string.done) { _, _ ->
+                val newName = input.text.toString().trim()
+                if (newName.isNotBlank() && newName != item.name) {
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        val renamedFile = com.tharunbirla.librecuts.utils.ProjectManager.renameProject(
+                            this@MainActivity,
+                            item.file,
+                            newName
+                        )
+                        withContext(Dispatchers.Main) {
+                            if (renamedFile != null) {
+                                showToast(getString(R.string.toast_project_renamed))
+                                loadSavedProjects()
+                            } else {
+                                showToast(getString(R.string.toast_rename_failed))
+                            }
+                        }
+                    }
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun duplicateProject(item: com.tharunbirla.librecuts.utils.ProjectManager.SavedProjectItem) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val duplicated = com.tharunbirla.librecuts.utils.ProjectManager.duplicateProject(
+                this@MainActivity,
+                item.file
+            )
+            withContext(Dispatchers.Main) {
+                if (duplicated != null) {
+                    showToast(getString(R.string.toast_project_duplicated))
+                    loadSavedProjects()
+                }
+            }
+        }
+    }
+
+    private fun showDeleteProjectDialog(item: com.tharunbirla.librecuts.utils.ProjectManager.SavedProjectItem) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_delete_title)
+            .setMessage(getString(R.string.dialog_delete_message, item.name))
+            .setPositiveButton(R.string.delete) { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val deleted = com.tharunbirla.librecuts.utils.ProjectManager.deleteProject(
+                        this@MainActivity,
+                        item.file
+                    )
+                    withContext(Dispatchers.Main) {
+                        if (deleted) {
+                            showToast(getString(R.string.toast_project_deleted))
+                            loadSavedProjects()
+                        }
+                    }
+                }
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun loadSavedProjects() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val projects = com.tharunbirla.librecuts.utils.ProjectManager.listSavedProjects(this@MainActivity)
+            withContext(Dispatchers.Main) {
+                if (projects.isEmpty()) {
+                    binding.layoutProjectsEmpty.visibility = View.VISIBLE
+                    binding.rvProjects.visibility = View.GONE
+                    binding.tvProjectsCount.visibility = View.GONE
+                } else {
+                    binding.layoutProjectsEmpty.visibility = View.GONE
+                    binding.rvProjects.visibility = View.VISIBLE
+                    binding.tvProjectsCount.visibility = View.VISIBLE
+                    binding.tvProjectsCount.text = "${projects.size} ${if (projects.size == 1) "project" else "projects"}"
+                    projectAdapter.submitList(projects)
+                }
+            }
+        }
+    }
+
+    private fun openSavedProject(item: com.tharunbirla.librecuts.utils.ProjectManager.SavedProjectItem) {
+        val uri = com.tharunbirla.librecuts.utils.ProjectManager.getProjectUri(this, item.file)
+        val intent = Intent(this, VideoEditingActivity::class.java).apply {
+            putExtra("PROJECT_URI", uri)
+            data = uri
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        }
+        startActivity(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        loadSavedProjects()
     }
 }

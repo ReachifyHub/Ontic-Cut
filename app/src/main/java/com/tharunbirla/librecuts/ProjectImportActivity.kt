@@ -218,8 +218,9 @@ class ProjectImportActivity : AppCompatActivity() {
     private fun loadRecipe() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                contentResolver.openInputStream(projectUri!!)?.use { inputStream ->
-                    editRecipe = inputStream.bufferedReader().use { reader ->
+                val inputStream = com.tharunbirla.librecuts.utils.ProjectManager.openProjectInputStream(this@ProjectImportActivity, projectUri!!)
+                inputStream?.use { stream ->
+                    editRecipe = stream.bufferedReader().use { reader ->
                         ProjectSerializer.deserialize(reader)
                     }
                 }

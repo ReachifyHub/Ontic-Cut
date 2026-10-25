@@ -515,6 +515,71 @@ class VideoEditingActivity : AppCompatActivity() {
         }
     }
 
+    private var currentProjectFile: File? = null
+    private var currentProjectUri: Uri? = null
+
+    private fun saveCurrentProjectToLibrary(quitAfterSave: Boolean = false) {
+        val project = viewModel.project.value
+        if (project == null) {
+            Toast.makeText(this, "No active project to save", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val currentDuration = getTotalSequenceDuration()
+        val currentClips = maxOf(1, getSequenceItems().size)
+        val thumbSourceUri = videoUri ?: (if (::tempInputFile.isInitialized && tempInputFile.exists()) Uri.fromFile(tempInputFile) else null)
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val desiredName = if (currentProjectFile != null) {
+                    currentProjectFile!!.nameWithoutExtension
+                } else {
+                    val raw = project.sourceName.substringBeforeLast(".")
+                    if (raw.isNotBlank() && !raw.equals("video", ignoreCase = true)) {
+                        raw
+                    } else {
+                        "Project"
+                    }
+                }
+
+                val recipe = com.tharunbirla.librecuts.models.EditRecipe.fromVideoProject(
+                    desiredName,
+                    project,
+                    durationMs = currentDuration,
+                    clipCount = currentClips
+                )
+                val savedFile = com.tharunbirla.librecuts.utils.ProjectManager.saveProject(
+                    this@VideoEditingActivity,
+                    recipe,
+                    currentProjectFile
+                )
+                currentProjectFile = savedFile
+                currentProjectUri = com.tharunbirla.librecuts.utils.ProjectManager.getProjectUri(this@VideoEditingActivity, savedFile)
+
+                if (thumbSourceUri != null) {
+                    com.tharunbirla.librecuts.utils.ProjectManager.extractAndSaveThumbnail(
+                        this@VideoEditingActivity,
+                        thumbSourceUri,
+                        savedFile
+                    )
+                }
+
+                withContext(Dispatchers.Main) {
+                    viewModel.markProjectSaved()
+                    Toast.makeText(this@VideoEditingActivity, "Project saved: ${savedFile.nameWithoutExtension}", Toast.LENGTH_SHORT).show()
+                    if (quitAfterSave) {
+                        finish()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save project to library", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(this@VideoEditingActivity, "Failed to save project: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
     private var activeFontSelectionCallback: ((com.tharunbirla.librecuts.utils.FontItem) -> Unit)? = null
 
     private val importFontLauncher = registerForActivityResult(
@@ -4769,17 +4834,27 @@ class VideoEditingActivity : AppCompatActivity() {
 
     private fun processAudioSelected(audioUri: Uri) {
         lifecycleScope.launch {
-            val tempFile = withContext(Dispatchers.IO) { copyContentUriToTempFile(audioUri, "audio", ".m4a") }
+            val tempFile = withContext(Dispatchers.IO) { copyContentUriToTempFile(audioUri, "audio", ".mp3") }
             if (tempFile != null) {
                 val tempUri = Uri.fromFile(tempFile)
                 val realDurationMs = withContext(Dispatchers.IO) {
+                    var d = 0L
                     try {
                         val r = android.media.MediaMetadataRetriever()
                         r.setDataSource(this@VideoEditingActivity, tempUri)
-                        val d = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
+                        d = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
                         r.release()
-                        d
-                    } catch(e: Exception) { 0L }
+                    } catch(_: Exception) {}
+                    if (d <= 0L) {
+                        try {
+                            val mp = android.media.MediaPlayer()
+                            mp.setDataSource(tempFile.absolutePath)
+                            mp.prepare()
+                            d = mp.duration.toLong()
+                            mp.release()
+                        } catch (_: Exception) {}
+                    }
+                    d
                 }
                 val totalSeqDur = getTotalSequenceDuration()
                 val endGlobalMs = if (realDurationMs > 0) minOf(totalSeqDur, realDurationMs) else totalSeqDur
@@ -5000,9 +5075,16 @@ class VideoEditingActivity : AppCompatActivity() {
             activeDirectoryPathView = null
         }
 
-        sheetView.findViewById<View>(R.id.btnSaveProject)?.setBounceClickListener {
-            bottomSheetDialog.dismiss()
-            saveProjectLauncher.launch("project.lcprj")
+        sheetView.findViewById<View>(R.id.btnSaveProject)?.let { btnSave ->
+            btnSave.setBounceClickListener {
+                bottomSheetDialog.dismiss()
+                saveCurrentProjectToLibrary()
+            }
+            btnSave.setOnLongClickListener {
+                bottomSheetDialog.dismiss()
+                saveProjectLauncher.launch("project.lcprj")
+                true
+            }
         }
 
         bottomSheetDialog.setContentView(sheetView)
@@ -5180,6 +5262,8 @@ class VideoEditingActivity : AppCompatActivity() {
     private fun setupExoPlayer() {
         val projectUri = intent.getParcelableExtra<Uri>("PROJECT_URI")
         if (projectUri != null) {
+            currentProjectUri = projectUri
+            currentProjectFile = com.tharunbirla.librecuts.utils.ProjectManager.findProjectFileByUri(this, projectUri)
             try {
                 contentResolver.takePersistableUriPermission(
                     projectUri,
@@ -5190,13 +5274,19 @@ class VideoEditingActivity : AppCompatActivity() {
             }
 
             try {
-                contentResolver.openInputStream(projectUri)?.use { inputStream ->
-                    val editRecipe = inputStream.bufferedReader().use { reader ->
-                        com.tharunbirla.librecuts.utils.ProjectSerializer.deserialize(reader)
+                val inputStream = com.tharunbirla.librecuts.utils.ProjectManager.openProjectInputStream(this, projectUri)
+                if (inputStream != null) {
+                    inputStream.use { stream ->
+                        val editRecipe = stream.bufferedReader().use { reader ->
+                            com.tharunbirla.librecuts.utils.ProjectSerializer.deserialize(reader)
+                        }
+                        val project = editRecipe.toVideoProject()
+                        viewModel.loadProject(project)
+                        videoUri = project.sourceUri
                     }
-                    val project = editRecipe.toVideoProject()
-                    viewModel.loadProject(project)
-                    videoUri = project.sourceUri
+                } else {
+                    Log.e(TAG, "Could not open stream for project: $projectUri")
+                    Toast.makeText(this, "Could not open project", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to load project", e)
@@ -5704,8 +5794,25 @@ class VideoEditingActivity : AppCompatActivity() {
         val audioOps = project.operations.filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.AddBackgroundAudio>()
         val isMasterMuted = if (::player.isInitialized) player.volume == 0f else false
 
+        // Clean up removed audio players
+        val activeOpIds = audioOps.map { it.id }.toSet()
+        val iter = bgAudioPlayerMap.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            if (entry.key !in activeOpIds) {
+                entry.value.release()
+                iter.remove()
+            }
+        }
+
         for (op in audioOps) {
-            val bgPlayer = bgAudioPlayerMap[op.id] ?: continue
+            val bgPlayer = bgAudioPlayerMap.getOrPut(op.id) {
+                com.google.android.exoplayer2.ExoPlayer.Builder(this).build().apply {
+                    val mediaItem = com.google.android.exoplayer2.MediaItem.fromUri(op.audioUri)
+                    setMediaItem(mediaItem)
+                    prepare()
+                }
+            }
             val effectiveVol = if (isMasterMuted) 0f else op.volume.coerceIn(0f, 1f)
             if (bgPlayer.volume != effectiveVol) {
                 bgPlayer.volume = effectiveVol
@@ -7836,6 +7943,7 @@ class VideoEditingActivity : AppCompatActivity() {
         if (::player.isInitialized) {
             player.pause()
         }
+        pauseAllBgAudio()
         activeRenderJobs.forEach { it.cancel() }
         activeRenderJobs.clear()
         frameExtractionJob?.cancel()
@@ -7855,6 +7963,7 @@ class VideoEditingActivity : AppCompatActivity() {
         draggableTextOverlay?.deactivate()
         draggableImageOverlay?.deactivate()
         previewFile?.delete()
+        releaseAllBgAudio()
         super.onDestroy()
         if (::player.isInitialized) {
             player.release()
@@ -8150,8 +8259,7 @@ class VideoEditingActivity : AppCompatActivity() {
 
         view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnSaveAndQuit).setBounceClickListener {
             bottomSheet.dismiss()
-            shouldQuitAfterSave = true
-            saveProjectLauncher.launch("project.lcprj")
+            saveCurrentProjectToLibrary(quitAfterSave = true)
         }
 
         view.findViewById<com.google.android.material.button.MaterialButton>(R.id.btnKeepEditing).setBounceClickListener {

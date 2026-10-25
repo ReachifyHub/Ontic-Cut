@@ -96,7 +96,9 @@ data class EditRecipe(
     val scrubProxyUri: Uri? = null,
     val operations: List<EditOperation> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
-    val lastModifiedAt: Long = System.currentTimeMillis()
+    val lastModifiedAt: Long = System.currentTimeMillis(),
+    val durationMs: Long = 0L,
+    val clipCount: Int = 1
 ) : Serializable {
     
     /**
@@ -117,7 +119,12 @@ data class EditRecipe(
         /**
          * Create an EditRecipe from a VideoProject.
          */
-        fun fromVideoProject(projectName: String, project: VideoProject): EditRecipe {
+        fun fromVideoProject(projectName: String, project: VideoProject, durationMs: Long = 0L, clipCount: Int = 1): EditRecipe {
+            val mergeOps = project.operations.filterIsInstance<EditOperation.Merge>()
+            val calculatedClips = 1 + mergeOps.sumOf { it.items.size }
+            val finalClipCount = if (clipCount > 1) clipCount else calculatedClips
+            val calculatedDuration = if (durationMs > 0L) durationMs else (project.getDurationAfterTrims() ?: 0L)
+
             return EditRecipe(
                 projectName = projectName,
                 sourceUri = project.sourceUri,
@@ -125,7 +132,9 @@ data class EditRecipe(
                 scrubProxyUri = project.scrubProxyUri,
                 operations = project.operations,
                 createdAt = project.createdAt,
-                lastModifiedAt = project.lastModifiedAt
+                lastModifiedAt = project.lastModifiedAt,
+                durationMs = calculatedDuration,
+                clipCount = finalClipCount
             )
         }
     }
