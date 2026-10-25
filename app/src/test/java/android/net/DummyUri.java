@@ -7,19 +7,33 @@ import java.util.List;
 public class DummyUri extends Uri {
     public static final DummyUri INSTANCE = new DummyUri();
 
+    private final String customPath;
+
+    public DummyUri() {
+        this.customPath = "/dummy";
+    }
+
+    public DummyUri(String customPath) {
+        this.customPath = customPath != null ? customPath : "/dummy";
+    }
+
+    public static DummyUri fromPath(String path) {
+        return new DummyUri(path);
+    }
+
     @Override public boolean isHierarchical() { return true; }
     @Override public boolean isRelative() { return false; }
     @Override public String getScheme() { return "file"; }
-    @Override public String getSchemeSpecificPart() { return ""; }
-    @Override public String getEncodedSchemeSpecificPart() { return ""; }
+    @Override public String getSchemeSpecificPart() { return customPath; }
+    @Override public String getEncodedSchemeSpecificPart() { return customPath; }
     @Override public String getAuthority() { return ""; }
     @Override public String getEncodedAuthority() { return ""; }
     @Override public String getUserInfo() { return null; }
     @Override public String getEncodedUserInfo() { return null; }
     @Override public String getHost() { return null; }
     @Override public int getPort() { return -1; }
-    @Override public String getPath() { return "/dummy"; }
-    @Override public String getEncodedPath() { return "/dummy"; }
+    @Override public String getPath() { return customPath; }
+    @Override public String getEncodedPath() { return customPath; }
     @Override public String getQuery() { return null; }
     @Override public String getEncodedQuery() { return null; }
     @Override public String getFragment() { return null; }

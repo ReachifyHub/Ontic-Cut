@@ -243,6 +243,32 @@ class VideoEditingActivity : AppCompatActivity() {
             }
         }
     }
+
+    private val transcriptionReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_PROGRESS -> {
+                    val progress = intent.getIntExtra(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.EXTRA_PROGRESS, 0)
+                    val status = intent.getStringExtra(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.EXTRA_STATUS_TEXT) ?: ""
+                    Log.d(TAG, "Transcription progress: $progress% - $status")
+                }
+                com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_SUCCESS -> {
+                    val filePath = intent.getStringExtra(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.EXTRA_TRANSCRIPTION_FILE_PATH)
+                    Log.i(TAG, "Voiceover transcribed successfully: $filePath")
+                    Toast.makeText(this@VideoEditingActivity, "Voiceover transcription saved", Toast.LENGTH_SHORT).show()
+                }
+                com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_BLOCKED_AUTH -> {
+                    val msg = intent.getStringExtra(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.EXTRA_MESSAGE)
+                        ?: "Transcription blocked: Valid user JWT is not yet available. Authentication UI is pending."
+                    Log.w(TAG, msg)
+                }
+                com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_FAILURE -> {
+                    val error = intent.getStringExtra(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.EXTRA_ERROR) ?: "Transcription error"
+                    Log.e(TAG, "Voiceover transcription failed: $error")
+                }
+            }
+        }
+    }
     private var activeDirectoryTitleView: TextView? = null
     private var activeDirectoryPathView: TextView? = null
 
@@ -634,6 +660,16 @@ class VideoEditingActivity : AppCompatActivity() {
         androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).registerReceiver(
             proxyReceiver,
             android.content.IntentFilter(com.tharunbirla.librecuts.services.ProxyGenerationService.ACTION_PROXY_GENERATED)
+        )
+
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).registerReceiver(
+            transcriptionReceiver,
+            android.content.IntentFilter().apply {
+                addAction(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_PROGRESS)
+                addAction(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_SUCCESS)
+                addAction(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_FAILURE)
+                addAction(com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.ACTION_TRANSCRIPTION_BLOCKED_AUTH)
+            }
         )
 
         // Register back-press callback to prompt for quit confirmation
@@ -3148,6 +3184,16 @@ class VideoEditingActivity : AppCompatActivity() {
                             endTimeMs = voiceOverStartTimeMs + durationMs,
                             internalStartMs = 0L,
                             internalEndMs = durationMs
+                        )
+
+                        // Request voiceover transcription via background worker/service
+                        val durationSecs = ((durationMs + 999) / 1000).toInt().coerceAtLeast(1)
+                        val projName = currentProjectFile?.nameWithoutExtension ?: viewModel.project.value?.sourceName
+                        com.tharunbirla.librecuts.services.VoiceoverTranscriptionService.startTranscription(
+                            context = this@VideoEditingActivity,
+                            audioUri = Uri.fromFile(file),
+                            audioDurationSeconds = durationSecs,
+                            projectName = projName
                         )
                     }
                 }
@@ -8000,6 +8046,7 @@ class VideoEditingActivity : AppCompatActivity() {
         }
         androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).unregisterReceiver(exportReceiver)
         androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).unregisterReceiver(proxyReceiver)
+        androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).unregisterReceiver(transcriptionReceiver)
         frameExtractionJob?.cancel()
         previewJob?.cancel()
         clearFrameCache()
