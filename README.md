@@ -2,7 +2,7 @@
 
 **Ontic Cut** is a powerful video editing application for Android creators that prioritizes speed, precision, and privacy. Built for mobile workflow and content creation, it empowers users to trim, arrange, overlay, caption, and export watermark-free videos locally on their device.
 
-> **Attribution & Heritage:** Ontic Cut is developed from the open-source [LibreCuts](https://github.com/tharunbirla/LibreCuts) project created by Tharun Birla and community contributors under the MIT License.
+> **Attribution & Heritage:** Ontic Cut is developed from the open-source [OnticCut](https://github.com/ReachifyHub/Ontic-Cut/edit/main/README.md) project created by Tharun Birla and community contributors under the MIT License.
 
 ---
 
