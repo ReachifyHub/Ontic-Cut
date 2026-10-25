@@ -26,7 +26,7 @@ android {
         minSdk 26
         targetSdk 34
         versionCode project.hasProperty('versionCode') ? project.property('versionCode').toInteger() : 10
-        versionName "1.0-beta7"
+        versionName "1.0-beta8"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
