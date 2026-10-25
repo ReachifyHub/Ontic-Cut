@@ -3307,6 +3307,11 @@ class VideoEditingActivity : AppCompatActivity() {
             onMediaSelectedListener = { uri ->
                 showImageOverlayConfig(uri)
             }
+            onMultipleMediaSelectedListener = { uris ->
+                if (uris.isNotEmpty()) {
+                    showImageOverlayConfig(uris.first())
+                }
+            }
             onBrowseSystemFoldersRequested = {
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     type = "*/*"
@@ -4535,6 +4540,9 @@ class VideoEditingActivity : AppCompatActivity() {
             onMediaSelectedListener = { uri ->
                 processMergeVideoUris(listOf(uri))
             }
+            onMultipleMediaSelectedListener = { uris ->
+                processMergeVideoUris(uris)
+            }
             onBrowseSystemFoldersRequested = {
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                     type = "*/*"
@@ -4561,10 +4569,19 @@ class VideoEditingActivity : AppCompatActivity() {
         lifecycleScope.launch {
             val mergeItems = withContext(Dispatchers.IO) {
                 selectedVideoUris.mapNotNull { uri ->
+                    if (uri.scheme == "content") {
+                        try {
+                            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        } catch (_: Exception) {}
+                    }
                     if (isImageUri(uri)) {
                         val ext = if (uri.path?.endsWith(".png", true) == true) ".png" else ".jpg"
-                        val cachedFile = copyContentUriToTempFile(uri, "merge_image", ext)
-                        val itemUri = if (cachedFile != null) Uri.fromFile(cachedFile) else uri
+                        val itemUri = if (selectedVideoUris.size > 5) {
+                            uri
+                        } else {
+                            val cachedFile = copyContentUriToTempFile(uri, "merge_image", ext)
+                            if (cachedFile != null) Uri.fromFile(cachedFile) else uri
+                        }
                         com.tharunbirla.librecuts.models.EditOperation.MergeItem(
                             uri = itemUri,
                             durationMs = 5000L,
@@ -4573,31 +4590,33 @@ class VideoEditingActivity : AppCompatActivity() {
                             isImage = true
                         )
                     } else {
-                        val tempFile = copyContentUriToTempFile(uri, "merge_video", ".mp4")
-                        if (tempFile != null) {
-                            val tempUri = Uri.fromFile(tempFile)
-                            val duration = try {
-                                val retriever = MediaMetadataRetriever()
-                                try {
-                                    retriever.setDataSource(tempFile.absolutePath)
-                                    val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                                    durStr?.toLong() ?: 0L
-                                } finally {
-                                    retriever.release()
-                                }
-                            } catch (e: Exception) {
-                                0L
+                        val duration = try {
+                            val retriever = MediaMetadataRetriever()
+                            try {
+                                retriever.setDataSource(this@VideoEditingActivity, uri)
+                                val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                                durStr?.toLong() ?: 0L
+                            } finally {
+                                retriever.release()
                             }
-                            val isImg = isImageUri(uri) || duration <= 0L
-                            val itemDur = if (isImg) 5000L else duration
-                            com.tharunbirla.librecuts.models.EditOperation.MergeItem(
-                                uri = tempUri,
-                                durationMs = itemDur,
-                                trimStartMs = 0L,
-                                trimEndMs = if (isImg) 5000L else itemDur,
-                                isImage = isImg
-                            )
-                        } else null
+                        } catch (e: Exception) {
+                            0L
+                        }
+                        val isImg = isImageUri(uri) || duration <= 0L
+                        val itemDur = if (isImg) 5000L else duration
+                        val itemUri = if (selectedVideoUris.size > 5) {
+                            uri
+                        } else {
+                            val tempFile = copyContentUriToTempFile(uri, "merge_video", ".mp4")
+                            if (tempFile != null) Uri.fromFile(tempFile) else uri
+                        }
+                        com.tharunbirla.librecuts.models.EditOperation.MergeItem(
+                            uri = itemUri,
+                            durationMs = itemDur,
+                            trimStartMs = 0L,
+                            trimEndMs = if (isImg) 5000L else itemDur,
+                            isImage = isImg
+                        )
                     }
                 }
             }
@@ -4654,6 +4673,14 @@ class VideoEditingActivity : AppCompatActivity() {
             showAudioTab = false
             onMediaSelectedListener = { uri ->
                 handleMainSelectedVideo(uri)
+            }
+            onMultipleMediaSelectedListener = { uris ->
+                if (uris.isNotEmpty()) {
+                    handleMainSelectedVideo(uris.first())
+                    if (uris.size > 1) {
+                        processMergeVideoUris(uris.drop(1))
+                    }
+                }
             }
             onBrowseSystemFoldersRequested = {
                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -5283,6 +5310,17 @@ class VideoEditingActivity : AppCompatActivity() {
                         val project = editRecipe.toVideoProject()
                         viewModel.loadProject(project)
                         videoUri = project.sourceUri
+                        for (op in project.operations) {
+                            if (op is com.tharunbirla.librecuts.models.EditOperation.Merge) {
+                                for (item in op.items) {
+                                    if (item.uri.scheme == "content") {
+                                        try {
+                                            contentResolver.takePersistableUriPermission(item.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        } catch (_: Exception) {}
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     Log.e(TAG, "Could not open stream for project: $projectUri")
@@ -5394,6 +5432,12 @@ class VideoEditingActivity : AppCompatActivity() {
             if (projectUri == null) {
                 val displayName = videoUri!!.lastPathSegment ?: "video"
                 viewModel.initializeProject(videoUri!!, displayName)
+
+                val extraUris = intent.getParcelableArrayListExtra<Uri>("EXTRA_MEDIA_URIS")
+                if (!extraUris.isNullOrEmpty()) {
+                    intent.removeExtra("EXTRA_MEDIA_URIS")
+                    processMergeVideoUris(extraUris)
+                }
             }
         }
     }

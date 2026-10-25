@@ -37,6 +37,10 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
+import android.content.Intent
+import android.widget.Toast
+import com.tharunbirla.librecuts.utils.FolderMediaScanner
+
 class MediaPickerBottomSheet : BottomSheetDialogFragment() {
 
     enum class MediaType { VIDEO, IMAGE, AUDIO }
@@ -57,7 +61,11 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
     var showCategoryTabs: Boolean = false
     var showAudioTab: Boolean = true
     var onMediaSelectedListener: ((Uri) -> Unit)? = null
+    var onMultipleMediaSelectedListener: ((List<Uri>) -> Unit)? = null
     var onBrowseSystemFoldersRequested: (() -> Unit)? = null
+
+    private var isMultiSelectMode: Boolean = false
+    private val selectedItems = linkedSetOf<MediaModel>()
 
     private lateinit var rvMediaGrid: RecyclerView
     private lateinit var pbLoading: ProgressBar
@@ -65,6 +73,14 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
     private lateinit var tvEmptyState: TextView
     private lateinit var btnGrantPermission: View
     private lateinit var btnSystemPickerFallback: View
+    private lateinit var btnSelectFolder: View
+    private lateinit var btnSelectFolderFallback: View
+    private lateinit var btnToggleMultiSelect: com.google.android.material.button.MaterialButton
+    private lateinit var layoutMultiSelectBar: View
+    private lateinit var tvSelectedCount: TextView
+    private lateinit var btnClearSelection: View
+    private lateinit var btnImportSelected: com.google.android.material.button.MaterialButton
+
     private lateinit var layoutTabsContainer: View
     private lateinit var chipGroupFilter: ChipGroup
     private lateinit var chipVideos: Chip
@@ -82,6 +98,14 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
 
     private val thumbnailCache = LruCache<Long, Bitmap>(100)
     private val emptyThumbnailIds = java.util.Collections.synchronizedSet(mutableSetOf<Long>())
+
+    private val openFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        if (treeUri != null) {
+            handleFolderSelected(treeUri)
+        }
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -119,6 +143,14 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
         tvEmptyState = view.findViewById(R.id.tvEmptyState)
         btnGrantPermission = view.findViewById(R.id.btnGrantPermission)
         btnSystemPickerFallback = view.findViewById(R.id.btnSystemPickerFallback)
+        btnSelectFolder = view.findViewById(R.id.btnSelectFolder)
+        btnSelectFolderFallback = view.findViewById(R.id.btnSelectFolderFallback)
+        btnToggleMultiSelect = view.findViewById(R.id.btnToggleMultiSelect)
+        layoutMultiSelectBar = view.findViewById(R.id.layoutMultiSelectBar)
+        tvSelectedCount = view.findViewById(R.id.tvSelectedCount)
+        btnClearSelection = view.findViewById(R.id.btnClearSelection)
+        btnImportSelected = view.findViewById(R.id.btnImportSelected)
+
         layoutTabsContainer = view.findViewById(R.id.layoutTabsContainer)
         chipGroupFilter = view.findViewById(R.id.chipGroupFilter)
         chipVideos = view.findViewById(R.id.chipVideos)
@@ -135,6 +167,7 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
 
         adapter = MediaAdapter(displayedItems) { selectedItem ->
             onMediaSelectedListener?.invoke(selectedItem.uri)
+            onMultipleMediaSelectedListener?.invoke(listOf(selectedItem.uri))
             dismiss()
         }
         rvMediaGrid.adapter = adapter
@@ -146,6 +179,35 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
         btnSystemPickerFallback.setOnClickListener {
             dismiss()
             onBrowseSystemFoldersRequested?.invoke()
+        }
+
+        btnSelectFolder.setOnClickListener {
+            openFolderLauncher.launch(null)
+        }
+
+        btnSelectFolderFallback.setOnClickListener {
+            openFolderLauncher.launch(null)
+        }
+
+        btnToggleMultiSelect.setOnClickListener {
+            setMultiSelectMode(!isMultiSelectMode)
+        }
+
+        btnClearSelection.setOnClickListener {
+            selectedItems.clear()
+            updateMultiSelectUI()
+            adapter?.notifyDataSetChanged()
+        }
+
+        btnImportSelected.setOnClickListener {
+            if (selectedItems.isNotEmpty()) {
+                val uris = selectedItems.map { it.uri }
+                dismiss()
+                onMultipleMediaSelectedListener?.invoke(uris)
+                if (onMultipleMediaSelectedListener == null) {
+                    onMediaSelectedListener?.invoke(uris.first())
+                }
+            }
         }
 
         when (currentMediaType) {
@@ -177,6 +239,78 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
 
         tvSelectedAlbumName.text = getDefaultAlbumTitle(currentMediaType)
         checkPermissionsAndLoadMedia()
+    }
+
+    private fun handleFolderSelected(treeUri: Uri) {
+        val ctx = context ?: return
+        try {
+            val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            ctx.contentResolver.takePersistableUriPermission(treeUri, takeFlags)
+        } catch (e: Exception) {
+            android.util.Log.d("MediaPicker", "Could not take persistable permission: ${e.message}")
+        }
+
+        pbLoading.visibility = View.VISIBLE
+        tvEmptyState.text = getString(R.string.str_scanning_folder)
+        layoutEmptyContainer.visibility = View.VISIBLE
+        btnGrantPermission.visibility = View.GONE
+        btnSystemPickerFallback.visibility = View.GONE
+        btnSelectFolderFallback.visibility = View.GONE
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val mediaFiles = FolderMediaScanner.scanAndSortMedia(ctx, treeUri)
+            withContext(Dispatchers.Main) {
+                if (!isAdded) return@withContext
+                pbLoading.visibility = View.GONE
+                layoutEmptyContainer.visibility = View.GONE
+
+                if (mediaFiles.isEmpty()) {
+                    Toast.makeText(
+                        ctx,
+                        R.string.str_no_supported_images_in_folder,
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    val uris = mediaFiles.map { it.uri }
+                    dismiss()
+                    onMultipleMediaSelectedListener?.invoke(uris)
+                    if (onMultipleMediaSelectedListener == null) {
+                        onMediaSelectedListener?.invoke(uris.first())
+                    }
+                }
+            }
+        }
+    }
+
+    private fun setMultiSelectMode(enabled: Boolean) {
+        isMultiSelectMode = enabled
+        btnToggleMultiSelect.text = if (enabled) getString(R.string.str_cancel_selection) else getString(R.string.str_select_multiple)
+        layoutMultiSelectBar.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (!enabled) {
+            selectedItems.clear()
+            adapter?.notifyDataSetChanged()
+        } else {
+            updateMultiSelectUI()
+        }
+    }
+
+    private fun toggleSelection(item: MediaModel) {
+        if (selectedItems.contains(item)) {
+            selectedItems.remove(item)
+        } else {
+            selectedItems.add(item)
+        }
+        updateMultiSelectUI()
+        val index = displayedItems.indexOf(item)
+        if (index != -1) {
+            adapter?.notifyItemChanged(index)
+        }
+    }
+
+    private fun updateMultiSelectUI() {
+        tvSelectedCount.text = getString(R.string.str_selected_count, selectedItems.size)
+        btnImportSelected.text = getString(R.string.str_import_count, selectedItems.size)
+        btnImportSelected.isEnabled = selectedItems.isNotEmpty()
     }
 
     private fun updateLayoutManagerForType(type: MediaType) {
@@ -246,11 +380,12 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
     private fun showAlbumPopupMenu(anchorView: View) {
         val popup = PopupMenu(requireContext(), anchorView)
         popup.menu.add(0, 0, 0, getDefaultAlbumTitle(currentMediaType))
+        popup.menu.add(0, 9999, 1, "📁 Select Folder…")
 
         val bucketNames = albumBuckets.keys.sorted()
         bucketNames.forEachIndexed { index, bucketName ->
             val count = albumBuckets[bucketName]?.size ?: 0
-            popup.menu.add(1, index + 1, index + 1, "$bucketName ($count)")
+            popup.menu.add(1, index + 1, index + 2, "$bucketName ($count)")
         }
 
         popup.setOnMenuItemClickListener { menuItem ->
@@ -258,6 +393,8 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
                 selectedAlbum = "All"
                 tvSelectedAlbumName.text = getDefaultAlbumTitle(currentMediaType)
                 filterDisplayedItemsByAlbum("All")
+            } else if (menuItem.itemId == 9999) {
+                openFolderLauncher.launch(null)
             } else {
                 val bucketName = bucketNames.getOrNull(menuItem.itemId - 1)
                 if (bucketName != null) {
@@ -495,6 +632,7 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
         val layoutGridContainer: View = itemView.findViewById(R.id.layoutGridContainer)
         val ivThumbnail: ImageView = itemView.findViewById(R.id.ivThumbnail)
         val tvDuration: TextView = itemView.findViewById(R.id.tvDuration)
+        val ivSelectedCheck: View? = itemView.findViewById(R.id.ivSelectedCheck)
 
         val layoutAudioContainer: View = itemView.findViewById(R.id.layoutAudioContainer)
         val ivAudioCover: com.google.android.material.imageview.ShapeableImageView = itemView.findViewById(R.id.ivAudioCover)
@@ -504,6 +642,15 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
 
         fun bind(item: MediaModel, onItemClick: (MediaModel) -> Unit) {
             itemView.tag = item.id
+
+            val isSelected = selectedItems.contains(item)
+            if (isSelected) {
+                ivSelectedCheck?.visibility = View.VISIBLE
+                layoutGridContainer.setBackgroundResource(R.drawable.bg_track_selected)
+            } else {
+                ivSelectedCheck?.visibility = View.GONE
+                layoutGridContainer.background = null
+            }
 
             if (item.type == MediaType.AUDIO) {
                 layoutGridContainer.visibility = View.GONE
@@ -572,7 +719,21 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
             }
 
             itemView.setOnClickListener {
-                onItemClick(item)
+                if (isMultiSelectMode) {
+                    toggleSelection(item)
+                } else {
+                    onItemClick(item)
+                }
+            }
+
+            itemView.setOnLongClickListener {
+                if (!isMultiSelectMode) {
+                    setMultiSelectMode(true)
+                    toggleSelection(item)
+                    true
+                } else {
+                    false
+                }
             }
         }
 

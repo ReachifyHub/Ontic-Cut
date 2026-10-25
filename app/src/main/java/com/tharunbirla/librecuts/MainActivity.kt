@@ -36,16 +36,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var projectAdapter: ProjectAdapter
     private val selectVideoLauncher =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-            if (uri != null) {
-                try {
-                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    contentResolver.takePersistableUriPermission(uri, takeFlags)
-                } catch (e: Exception) {
-                    Log.e("VideoSelection", "Could not take persistable permission", e)
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri>? ->
+            if (!uris.isNullOrEmpty()) {
+                val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                for (uri in uris) {
+                    try {
+                        contentResolver.takePersistableUriPermission(uri, takeFlags)
+                    } catch (e: Exception) {
+                        Log.e("VideoSelection", "Could not take persistable permission", e)
+                    }
                 }
-                Log.d("VideoSelection", "Video selected: $uri")
-                navigateToEditingScreen(uri)
+                Log.d("VideoSelection", "Media selected: ${uris.size} item(s)")
+                navigateToEditingScreen(uris)
             } else {
                 Log.e("VideoSelectionError", "No video selected")
             }
@@ -545,6 +547,19 @@ class MainActivity : AppCompatActivity() {
                 }
                 navigateToEditingScreen(uri)
             }
+            onMultipleMediaSelectedListener = { uris ->
+                if (uris.isNotEmpty()) {
+                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    for (u in uris) {
+                        try {
+                            contentResolver.takePersistableUriPermission(u, takeFlags)
+                        } catch (e: Exception) {
+                            Log.d("VideoSelection", "Could not take persistable permission: ${e.message}")
+                        }
+                    }
+                    navigateToEditingScreen(uris)
+                }
+            }
             onBrowseSystemFoldersRequested = {
                 selectVideoLauncher.launch(arrayOf("video/*", "image/*"))
             }
@@ -553,10 +568,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun navigateToEditingScreen(videoUri: Uri) {
-        Log.d("Navigation", "Navigating to editing screen with URI: $videoUri")
+        navigateToEditingScreen(listOf(videoUri))
+    }
+
+    private fun navigateToEditingScreen(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        Log.d("Navigation", "Navigating to editing screen with ${uris.size} media URI(s)")
+        val firstUri = uris.first()
         val intent = Intent(this, VideoEditingActivity::class.java).apply {
-            putExtra("VIDEO_URI", videoUri)
-            data = videoUri
+            putExtra("VIDEO_URI", firstUri)
+            if (uris.size > 1) {
+                putParcelableArrayListExtra("EXTRA_MEDIA_URIS", ArrayList(uris.drop(1)))
+            }
+            data = firstUri
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(intent)

@@ -189,4 +189,12 @@
     <string name="toast_project_duplicated">Project duplicated</string>
     <string name="toast_project_deleted">Project deleted</string>
     <string name="toast_rename_failed">Failed to rename project</string>
+    <string name="str_select_folder">Select Folder</string>
+    <string name="str_import_folder">Import Folder</string>
+    <string name="str_no_supported_images_in_folder">No supported images found in this folder</string>
+    <string name="str_select_multiple">Select</string>
+    <string name="str_cancel_selection">Cancel</string>
+    <string name="str_selected_count">%1$d selected</string>
+    <string name="str_import_count">Import (%1$d)</string>
+    <string name="str_scanning_folder">Scanning folder…</string>
 </resources>

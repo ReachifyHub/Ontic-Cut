@@ -57,16 +57,53 @@
                 app:tint="@color/colorOnSurface" />
         </LinearLayout>
 
-        <ImageView
-            android:id="@+id/btnCloseSheet"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
             android:layout_alignParentEnd="true"
             android:layout_centerVertical="true"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:padding="4dp"
-            android:src="@drawable/ic_close_24"
-            app:tint="@color/iconSecondary" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSelectFolder"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:paddingStart="8dp"
+                android:paddingEnd="10dp"
+                android:text="@string/str_select_folder"
+                android:textColor="@color/colorOnSurface"
+                android:textSize="12sp"
+                app:icon="@drawable/ic_folder_24"
+                app:iconSize="16dp"
+                app:iconTint="@color/colorPrimary"
+                android:layout_marginEnd="4dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnToggleMultiSelect"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:paddingStart="8dp"
+                android:paddingEnd="8dp"
+                android:text="@string/str_select_multiple"
+                android:textSize="12sp"
+                android:layout_marginEnd="4dp" />
+
+            <ImageView
+                android:id="@+id/btnCloseSheet"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:padding="4dp"
+                android:src="@drawable/ic_close_24"
+                app:tint="@color/iconSecondary" />
+        </LinearLayout>
     </RelativeLayout>
 
     <!-- Filter Tabs (Videos, Photos, Audio) -->
@@ -169,7 +206,59 @@
                 android:layout_marginTop="8dp"
                 android:text="Browse System Folders"
                 app:cornerRadius="8dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSelectFolderFallback"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/str_select_folder"
+                app:icon="@drawable/ic_folder_24"
+                app:cornerRadius="8dp" />
         </LinearLayout>
     </FrameLayout>
+
+    <!-- Multi-selection Bottom Action Bar -->
+    <LinearLayout
+        android:id="@+id/layoutMultiSelectBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingTop="8dp"
+        android:paddingBottom="4dp"
+        android:paddingHorizontal="4dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tvSelectedCount"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="0 selected"
+            android:textColor="@color/colorOnSurface"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:paddingStart="4dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnClearSelection"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/str_clear"
+            android:textSize="13sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnImportSelected"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="Import (0)"
+            android:textSize="13sp"
+            android:enabled="false"
+            app:cornerRadius="8dp" />
+    </LinearLayout>
 
 </LinearLayout>
