@@ -13,6 +13,9 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import com.tharunbirla.librecuts.autoassemble.AutoAssembleManager
+import com.tharunbirla.librecuts.autoassemble.AutoAssembleResult
+import com.tharunbirla.librecuts.models.SceneBoundary
 import com.tharunbirla.librecuts.utils.setBounceClickListener
 import com.tharunbirla.librecuts.utils.performHapticLight
 import com.tharunbirla.librecuts.utils.performHapticClick
@@ -759,6 +762,11 @@ class VideoEditingActivity : AppCompatActivity() {
                     viewModel.addMuteAudioOperation()
                 }
             }
+        }
+
+        val btnAutoAssemble = findViewById<ImageButton>(R.id.btnAutoAssemble)
+        btnAutoAssemble?.setBounceClickListener {
+            handleAutoAssembleClick()
         }
 
         val btnCaptureFrame = findViewById<ImageButton>(R.id.btnCaptureFrame)
@@ -3223,6 +3231,160 @@ class VideoEditingActivity : AppCompatActivity() {
         bottomSheet.show()
     }
 
+    private fun handleAutoAssembleClick() {
+        val sequenceItems = getSequenceItems()
+        val hasVisuals = sequenceItems.isNotEmpty() || (viewModel.project.value?.operations?.any { it is EditOperation.AddImageOverlay } == true)
+        val audioOps = viewModel.project.value?.operations?.filterIsInstance<EditOperation.AddBackgroundAudio>() ?: emptyList()
+        val hasAudio = audioOps.isNotEmpty()
+
+        val autoAssembleManager = AutoAssembleManager(this)
+        val check = autoAssembleManager.validatePreconditions(hasVisuals, hasAudio)
+
+        if (!check.isValid) {
+            Toast.makeText(this, check.errorMessage ?: getString(R.string.str_auto_assemble_prerequisite_missing), Toast.LENGTH_LONG).show()
+            return
+        }
+
+        // Identify primary voiceover audio track
+        val primaryAudioOp = audioOps.firstOrNull { it.audioUri.toString().contains("voice", ignoreCase = true) }
+            ?: audioOps.first()
+
+        showAutoAssembleBottomSheet(primaryAudioOp, sequenceItems.size)
+    }
+
+    private fun showAutoAssembleBottomSheet(
+        primaryAudioOp: EditOperation.AddBackgroundAudio,
+        visualsCount: Int
+    ) {
+        val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.bottom_sheet_auto_assemble, null)
+        bottomSheet.setContentView(view)
+
+        val btnClose = view.findViewById<ImageButton>(R.id.btnCloseAutoAssemble)
+        val tvVoiceoverName = view.findViewById<TextView>(R.id.tvVoiceoverTrackName)
+        val tvVoiceoverDuration = view.findViewById<TextView>(R.id.tvVoiceoverTrackDuration)
+        val tvVisualsCount = view.findViewById<TextView>(R.id.tvVisualsCount)
+        val etScriptMap = view.findViewById<android.widget.EditText>(R.id.etScriptMap)
+        val btnPasteSample = view.findViewById<TextView>(R.id.btnPasteSampleScript)
+        val btnClear = view.findViewById<TextView>(R.id.btnClearScript)
+        val btnCalculate = view.findViewById<Button>(R.id.btnCalculateScenes)
+        val layoutProgress = view.findViewById<View>(R.id.layoutAutoAssembleProgress)
+        val tvStatus = view.findViewById<TextView>(R.id.tvAutoAssembleStatus)
+        val layoutError = view.findViewById<View>(R.id.layoutAutoAssembleError)
+        val tvError = view.findViewById<TextView>(R.id.tvAutoAssembleError)
+        val layoutResults = view.findViewById<View>(R.id.layoutAutoAssembleResults)
+        val tvResultsSummary = view.findViewById<TextView>(R.id.tvResultsSummary)
+        val tvCacheBadge = view.findViewById<TextView>(R.id.tvResultsCacheBadge)
+        val layoutScenesContainer = view.findViewById<LinearLayout>(R.id.layoutScenesContainer)
+
+        val audioFileName = primaryAudioOp.audioUri.lastPathSegment ?: "voiceover.m4a"
+        tvVoiceoverName.text = "Voiceover: $audioFileName"
+
+        val durationMs = if (primaryAudioOp.originalDurationMs > 0) {
+            primaryAudioOp.originalDurationMs
+        } else if (primaryAudioOp.internalEndMs > primaryAudioOp.internalStartMs) {
+            primaryAudioOp.internalEndMs - primaryAudioOp.internalStartMs
+        } else {
+            3000L
+        }
+        val durationSecs = ((durationMs + 999) / 1000).toInt().coerceAtLeast(1)
+        val mins = (durationMs / 1000) / 60
+        val secs = (durationMs / 1000) % 60
+        tvVoiceoverDuration.text = String.format("%d:%02d", mins, secs)
+        tvVisualsCount.text = "Visuals: $visualsCount clip(s) on timeline"
+
+        btnClose.setBounceClickListener {
+            bottomSheet.dismiss()
+        }
+
+        btnPasteSample.setBounceClickListener {
+            etScriptMap.setText(getString(R.string.str_script_map_hint))
+        }
+
+        btnClear.setBounceClickListener {
+            etScriptMap.setText("")
+        }
+
+        btnCalculate.setBounceClickListener {
+            val scriptText = etScriptMap.text.toString().trim()
+            if (scriptText.isEmpty()) {
+                Toast.makeText(this, R.string.str_empty_script_error, Toast.LENGTH_SHORT).show()
+                return@setBounceClickListener
+            }
+
+            // Hide keyboard
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(etScriptMap.windowToken, 0)
+
+            layoutProgress.visibility = View.VISIBLE
+            layoutError.visibility = View.GONE
+            layoutResults.visibility = View.GONE
+            btnCalculate.isEnabled = false
+            tvStatus.text = getString(R.string.str_calculating_scenes)
+
+            lifecycleScope.launch {
+                val projName = currentProjectFile?.nameWithoutExtension ?: viewModel.project.value?.sourceName
+                val manager = AutoAssembleManager(this@VideoEditingActivity)
+                val result = manager.executeAutoAssemble(
+                    rawScriptMap = scriptText,
+                    audioUri = primaryAudioOp.audioUri,
+                    audioDurationSeconds = durationSecs,
+                    projectName = projName,
+                    onProgress = { progress, statusMessage ->
+                        runOnUiThread {
+                            tvStatus.text = "$statusMessage ($progress%)"
+                        }
+                    }
+                )
+
+                layoutProgress.visibility = View.GONE
+                btnCalculate.isEnabled = true
+
+                when (result) {
+                    is AutoAssembleResult.Success -> {
+                        layoutError.visibility = View.GONE
+                        layoutResults.visibility = View.VISIBLE
+                        tvCacheBadge.visibility = if (result.wasCached) View.VISIBLE else View.GONE
+                        tvResultsSummary.text = getString(R.string.str_scenes_calculated, result.boundaries.size)
+
+                        layoutScenesContainer.removeAllViews()
+                        for (boundary in result.boundaries) {
+                            val itemView = layoutInflater.inflate(R.layout.item_scene_boundary, layoutScenesContainer, false)
+                            val tvNum = itemView.findViewById<TextView>(R.id.tvSceneNumber)
+                            val tvTitle = itemView.findViewById<TextView>(R.id.tvSceneTitle)
+                            val tvBadge = itemView.findViewById<TextView>(R.id.tvSceneStatusBadge)
+                            val tvRange = itemView.findViewById<TextView>(R.id.tvSceneTimeRange)
+                            val tvSnippet = itemView.findViewById<TextView>(R.id.tvSceneScriptSnippet)
+
+                            tvNum.text = boundary.sceneIndex.toString()
+                            tvTitle.text = boundary.sceneTitle
+                            tvRange.text = boundary.formatTimeRange()
+                            if (boundary.isMatched) {
+                                tvBadge.text = "✓ Matched"
+                                tvBadge.setTextColor(getColor(R.color.colorPrimary))
+                            } else {
+                                tvBadge.text = "⚠ Unmatched"
+                                tvBadge.setTextColor(getColor(android.R.color.holo_red_light))
+                            }
+                            tvSnippet.text = boundary.scriptText
+                            layoutScenesContainer.addView(itemView)
+                        }
+                    }
+                    is AutoAssembleResult.BlockedAuth -> {
+                        layoutError.visibility = View.VISIBLE
+                        tvError.text = result.message
+                    }
+                    is AutoAssembleResult.Error -> {
+                        layoutError.visibility = View.VISIBLE
+                        tvError.text = result.message
+                    }
+                }
+            }
+        }
+
+        bottomSheet.show()
+    }
+
     private fun subtitlesAction() {
         enterSubtitlesEditingMode()
     }
@@ -4485,6 +4647,10 @@ class VideoEditingActivity : AppCompatActivity() {
             this.alpha = alpha
         }
         findViewById<View>(R.id.btnCaptureFrame)?.apply {
+            isEnabled = enabled
+            this.alpha = alpha
+        }
+        findViewById<View>(R.id.btnAutoAssemble)?.apply {
             isEnabled = enabled
             this.alpha = alpha
         }

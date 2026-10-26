@@ -197,4 +197,18 @@
     <string name="str_selected_count">%1$d selected</string>
     <string name="str_import_count">Import (%1$d)</string>
     <string name="str_scanning_folder">Scanning folder…</string>
+    <string name="str_auto_assemble">Auto Assemble</string>
+    <string name="str_auto_assemble_desc">Align scene timestamps from your script map with voiceover audio</string>
+    <string name="str_auto_assemble_prerequisite_missing">Auto Assemble requires both visuals and a voiceover on the timeline.</string>
+    <string name="str_auto_assemble_visuals_missing">Auto Assemble requires at least one visual asset (video or image) on the timeline.</string>
+    <string name="str_auto_assemble_audio_missing">Auto Assemble requires at least one voiceover audio track on the timeline.</string>
+    <string name="str_script_map">Script Map</string>
+    <string name="str_script_map_hint">Scene 1: Welcome to the channel.\nScene 2: Today we will discuss history.</string>
+    <string name="str_calculate_scenes">Calculate Scenes</string>
+    <string name="str_calculating_scenes">Calculating scenes…</string>
+    <string name="str_scenes_calculated">Calculated %1$d scene boundaries</string>
+    <string name="str_sign_in_required_auto_assemble">Please sign in to use Auto Assemble.</string>
+    <string name="str_paste_sample_script">Paste Sample</string>
+    <string name="str_clear_script">Clear</string>
+    <string name="str_empty_script_error">Please enter or paste your script map before calculating scenes.</string>
 </resources>

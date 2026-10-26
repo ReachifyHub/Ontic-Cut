@@ -357,6 +357,17 @@
                     android:gravity="end|center_vertical">
 
                     <ImageButton
+                        android:id="@+id/btnAutoAssemble"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:background="@android:color/transparent"
+                        android:src="@drawable/ic_bolt_24"
+                        android:padding="8dp"
+                        android:scaleType="fitCenter"
+                        android:contentDescription="@string/str_auto_assemble"
+                        app:tint="@color/colorOnSecondary" />
+
+                    <ImageButton
                         android:id="@+id/btnCaptureFrame"
                         android:layout_width="40dp"
                         android:layout_height="40dp"

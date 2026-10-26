@@ -185,7 +185,8 @@ class VoiceoverTranscriptionPipeline(
                 projectName = projectName,
                 audioFileName = localAudioFile.name,
                 audioDurationSeconds = audioDurationSeconds,
-                response = transcriptionResponse
+                response = transcriptionResponse,
+                audioUri = audioUri.toString()
             )
         } catch (e: Exception) {
             Log.e(TAG, "Step 7 failed - Local saving error: ${e.message}", e)

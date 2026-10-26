@@ -55,7 +55,8 @@ class TranscriptionStorageManager {
         audioFileName: String,
         audioDurationSeconds: Int,
         response: TranscriptionResponse,
-        targetDir: File? = null
+        targetDir: File? = null,
+        audioUri: String? = null
     ): File {
         val dir = targetDir ?: getTranscriptionsDirectory(context)
         val safeProjectName = (projectName ?: "Voiceover")
@@ -87,6 +88,9 @@ class TranscriptionStorageManager {
         // Add local metadata headers
         rootObject.addProperty("_project_name", projectName ?: "Untitled")
         rootObject.addProperty("_audio_file_name", audioFileName)
+        if (!audioUri.isNullOrEmpty()) {
+            rootObject.addProperty("_audio_uri", audioUri)
+        }
         rootObject.addProperty("_audio_duration_seconds", audioDurationSeconds)
         rootObject.addProperty("_saved_at_ms", timestamp)
 
