@@ -519,6 +519,33 @@ class VideoEditingActivity : AppCompatActivity() {
     private var shouldQuitAfterSave = false
     private val autoAssembleManager by lazy { AutoAssembleManager(this) }
 
+    private val missingMediaUris = mutableSetOf<Uri>()
+    private var lastDisplayedImageUri: Uri? = null
+    private var previewPreloadJob: kotlinx.coroutines.Job? = null
+
+    private val regrantFolderLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        if (treeUri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                val curProj = viewModel.project.value
+                if (curProj != null) {
+                    val report = com.tharunbirla.librecuts.utils.ImagePreviewCache.validateProjectMedia(this, curProj)
+                    missingMediaUris.clear()
+                    missingMediaUris.addAll(report.missingUris)
+                    renderTracks(curProj)
+                    Toast.makeText(this, "Folder access restored. Assets reloaded.", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to persist regranted tree permission: ${e.message}")
+            }
+        }
+    }
+
     private val saveProjectLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri: Uri? ->
@@ -3683,6 +3710,9 @@ class VideoEditingActivity : AppCompatActivity() {
                             .setTitle(if (creditErr != null) "Credit Limit" else "Transcription Failed")
                             .setMessage(errMsg)
                             .setPositiveButton(android.R.string.ok, null)
+                            .setNeutralButton(R.string.str_retry) { _, _ ->
+                                executeTranscriptionForCaptions(audioOp)
+                            }
                             .show()
                     }
                 }
@@ -5495,6 +5525,27 @@ class VideoEditingActivity : AppCompatActivity() {
             var tempOutputFile: File? = null
             var concatFile: File? = null
             try {
+                // Autosave project state before export
+                try {
+                    val curProj = viewModel.project.value
+                    if (curProj != null) {
+                        val recipe = com.tharunbirla.librecuts.models.EditRecipe.fromVideoProject(
+                            currentProjectFile?.nameWithoutExtension ?: curProj.sourceName,
+                            curProj,
+                            durationMs = getTotalSequenceDuration(),
+                            clipCount = getSequenceItems().size
+                        )
+                        val target = currentProjectFile ?: com.tharunbirla.librecuts.utils.ProjectManager.generateUniqueProjectFile(this@VideoEditingActivity, recipe.projectName)
+                        withContext(Dispatchers.IO) {
+                            com.tharunbirla.librecuts.utils.ProjectManager.saveProject(this@VideoEditingActivity, recipe, target)
+                        }
+                        currentProjectFile = target
+                        viewModel.markProjectSaved()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Autosave before export failed: ${e.message}")
+                }
+
                 viewModel.startExport()
 
                 val sourceFilePath = tempInputFile.absolutePath
@@ -5857,40 +5908,98 @@ class VideoEditingActivity : AppCompatActivity() {
                 Log.d(TAG, "Could not take persistable URI permission for projectUri: ${e.message}")
             }
 
-            try {
-                val inputStream = com.tharunbirla.librecuts.utils.ProjectManager.openProjectInputStream(this, projectUri)
-                if (inputStream != null) {
-                    inputStream.use { stream ->
-                        val editRecipe = stream.bufferedReader().use { reader ->
-                            com.tharunbirla.librecuts.utils.ProjectSerializer.deserialize(reader)
+            showLoading("Loading...")
+            lifecycleScope.launch {
+                val editRecipe = withContext(Dispatchers.IO) {
+                    try {
+                        val inputStream = com.tharunbirla.librecuts.utils.ProjectManager.openProjectInputStream(this@VideoEditingActivity, projectUri)
+                        inputStream?.use { stream ->
+                            stream.bufferedReader().use { reader ->
+                                com.tharunbirla.librecuts.utils.ProjectSerializer.deserialize(reader)
+                            }
                         }
-                        val project = editRecipe.toVideoProject()
-                        viewModel.loadProject(project)
-                        videoUri = project.sourceUri
-                        for (op in project.operations) {
-                            if (op is com.tharunbirla.librecuts.models.EditOperation.Merge) {
-                                for (item in op.items) {
-                                    if (item.uri.scheme == "content") {
-                                        try {
-                                            contentResolver.takePersistableUriPermission(item.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                        } catch (_: Exception) {}
-                                    }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to load project from stream", e)
+                        null
+                    }
+                }
+
+                if (editRecipe != null) {
+                    val project = editRecipe.toVideoProject()
+                    viewModel.loadProject(project)
+                    videoUri = project.sourceUri
+
+                    for (op in project.operations) {
+                        if (op is com.tharunbirla.librecuts.models.EditOperation.Merge) {
+                            for (item in op.items) {
+                                if (item.uri.scheme == "content") {
+                                    try {
+                                        contentResolver.takePersistableUriPermission(item.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    } catch (_: Exception) {}
                                 }
                             }
                         }
                     }
+
+                    // Validate media accessibility
+                    val report = withContext(Dispatchers.IO) {
+                        com.tharunbirla.librecuts.utils.ImagePreviewCache.validateProjectMedia(this@VideoEditingActivity, project)
+                    }
+
+                    missingMediaUris.clear()
+                    missingMediaUris.addAll(report.missingUris)
+
+                    if (report.hasPermissionRevocation) {
+                        MaterialAlertDialogBuilder(this@VideoEditingActivity)
+                            .setTitle(R.string.str_lost_folder_permission_title)
+                            .setMessage(R.string.str_lost_folder_permission_msg)
+                            .setPositiveButton(R.string.str_regrant_access) { _, _ ->
+                                try {
+                                    regrantFolderLauncher.launch(null)
+                                } catch (e: Exception) {
+                                    Toast.makeText(this@VideoEditingActivity, "Failed to launch folder picker", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .show()
+                    } else if (report.missingUris.isNotEmpty()) {
+                        MaterialAlertDialogBuilder(this@VideoEditingActivity)
+                            .setTitle(R.string.str_missing_media_title)
+                            .setMessage(getString(R.string.str_missing_media_msg, report.missingUris.size))
+                            .setPositiveButton(android.R.string.ok, null)
+                            .show()
+                    }
+
+                    // Background preview cache warming
+                    val imageUris = mutableListOf<Uri>()
+                    if (isImageUri(project.sourceUri)) imageUris.add(project.sourceUri)
+                    for (op in project.operations) {
+                        if (op is com.tharunbirla.librecuts.models.EditOperation.Merge) {
+                            imageUris.addAll(op.items.filter { it.isImage || isImageUri(it.uri) }.map { it.uri })
+                        }
+                    }
+                    if (imageUris.isNotEmpty()) {
+                        previewPreloadJob?.cancel()
+                        previewPreloadJob = lifecycleScope.launch(Dispatchers.IO) {
+                            com.tharunbirla.librecuts.utils.ImagePreviewCache.preloadPreviewAssets(this@VideoEditingActivity, imageUris)
+                        }
+                    }
+
+                    initPlayerAndData(projectUri)
                 } else {
                     Log.e(TAG, "Could not open stream for project: $projectUri")
-                    Toast.makeText(this, "Could not open project", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@VideoEditingActivity, "Could not open project", Toast.LENGTH_SHORT).show()
+                    loadingScreen.visibility = View.GONE
+                    finish()
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to load project", e)
-                Toast.makeText(this, "Failed to load project", Toast.LENGTH_SHORT).show()
             }
         } else {
             videoUri = intent.getParcelableExtra("VIDEO_URI")
+            initPlayerAndData(null)
         }
+    }
 
+    private fun initPlayerAndData(projectUri: Uri?) {
         if (videoUri != null && videoUri?.scheme == "content") {
             try {
                 contentResolver.takePersistableUriPermission(videoUri!!, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -5913,11 +6022,6 @@ class VideoEditingActivity : AppCompatActivity() {
                         isProgrammaticScroll = true
                         timelineHorizontalScroll.scrollTo((getTotalSequenceDuration() * pixelsPerMs).toInt(), 0)
                         isProgrammaticScroll = false
-
-                        // OPTIONAL: If you want the seeker to jump back to 0 immediately
-                        // once it finishes, uncomment the next lines:
-                        // player.seekTo(0)
-                        // customVideoSeeker.setSeekPosition(0f)
 
                         pauseAllBgAudio()
                         stopProgressUpdater()
@@ -5944,8 +6048,6 @@ class VideoEditingActivity : AppCompatActivity() {
                             }
                         }
 
-                        // We no longer rely on dynamic ExoPlayer video size for overlays.
-                        // Overlays will be sized to match the canvasContainer, which reflects the final output canvas.
                         updateUIInteractionState()
                     }
                 }
@@ -5961,12 +6063,9 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
 
                 override fun onVideoSizeChanged(videoSize: com.google.android.exoplayer2.video.VideoSize) {
-                    // Do nothing here for overlays because ExoPlayer's surface changes size dynamically when clips 
-                    // have different aspect ratios, but we want our overlays to stick to the primary video's canvas.
                 }
 
                 override fun onPositionDiscontinuity(reason: Int) {
-                    // Update UI immediately on manual seek
                     if (isVideoLoaded) {
                         syncUiWithPlayer()
                     }
@@ -5975,13 +6074,18 @@ class VideoEditingActivity : AppCompatActivity() {
                 override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
                     super.onPlayerError(error)
                     Log.e(TAG, "ExoPlayer Error: ${error.message}", error)
-                    showError("Unsupported video format or corrupted file.")
-                    isImportLoading = false
-                    isVideoLoaded = true // Prevent UI loop from showing loading screen again
-                    loadingScreen.visibility = View.GONE
-                    
-                    // Exit the editing activity since the main video cannot be played
-                    finish()
+                    if (videoUri != null && missingMediaUris.contains(videoUri)) {
+                        Log.w(TAG, "Playback error caused by known missing media; continuing editing")
+                        isVideoLoaded = true
+                        isImportLoading = false
+                        loadingScreen.visibility = View.GONE
+                    } else {
+                        showError("Unsupported video format or corrupted file.")
+                        isImportLoading = false
+                        isVideoLoaded = true
+                        loadingScreen.visibility = View.GONE
+                        finish()
+                    }
                 }
             })
 
@@ -6267,7 +6371,15 @@ class VideoEditingActivity : AppCompatActivity() {
                 if (activeItem.isImage || isImageUri(activeItem.uri)) {
                     photoSequencePreviewImageView?.visibility = View.VISIBLE
                     playerView.visibility = View.INVISIBLE
-                    photoSequencePreviewImageView?.setImageURI(activeItem.uri)
+                    if (lastDisplayedImageUri != activeItem.uri) {
+                        lastDisplayedImageUri = activeItem.uri
+                        val previewBmp = com.tharunbirla.librecuts.utils.ImagePreviewCache.getPreviewBitmap(this, activeItem.uri)
+                        if (previewBmp != null) {
+                            photoSequencePreviewImageView?.setImageBitmap(previewBmp)
+                        } else {
+                            photoSequencePreviewImageView?.setImageURI(activeItem.uri)
+                        }
+                    }
                     photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.CENTER_CROP
 
                     val motionType = activeItem.motionEffect
@@ -6344,6 +6456,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         photoSequencePreviewImageView?.translationY = 0f
                     }
                 } else {
+                    lastDisplayedImageUri = null
                     photoSequencePreviewImageView?.visibility = View.GONE
                     photoSequencePreviewImageView?.scaleX = 1f
                     photoSequencePreviewImageView?.scaleY = 1f
@@ -6573,6 +6686,15 @@ class VideoEditingActivity : AppCompatActivity() {
                     val ext = if (targetUri.path?.endsWith(".png", true) == true) ".png" else ".jpg"
                     val cachedImageFile = copyContentUriToTempFile(targetUri, "main_image", ext)
                         ?: File(cacheDir, "main_image_${System.currentTimeMillis()}$ext")
+                    if (!cachedImageFile.exists()) {
+                        try {
+                            val dummyBmp = android.graphics.Bitmap.createBitmap(16, 9, android.graphics.Bitmap.Config.RGB_565)
+                            java.io.FileOutputStream(cachedImageFile).use { out ->
+                                dummyBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, out)
+                            }
+                            dummyBmp.recycle()
+                        } catch (_: Exception) {}
+                    }
                     tempInputFile = cachedImageFile
                     videoFileName = cachedImageFile.name
                     originalMainVideoDurationMs = 5000L
@@ -6621,7 +6743,13 @@ class VideoEditingActivity : AppCompatActivity() {
                         loadingScreen.visibility = View.GONE
                         photoSequencePreviewImageView?.visibility = View.VISIBLE
                         photoSequencePreviewImageView?.setImageURI(null)
-                        photoSequencePreviewImageView?.setImageURI(Uri.fromFile(cachedImageFile))
+                        val previewBmp = com.tharunbirla.librecuts.utils.ImagePreviewCache.decodeDownsampledBitmap(this@VideoEditingActivity, Uri.fromFile(cachedImageFile), 1280, 720)
+                        if (previewBmp != null) {
+                            photoSequencePreviewImageView?.setImageBitmap(previewBmp)
+                            com.tharunbirla.librecuts.utils.ImagePreviewCache.putPreviewBitmap(targetUri, previewBmp)
+                        } else {
+                            photoSequencePreviewImageView?.setImageURI(Uri.fromFile(cachedImageFile))
+                        }
                         playerView.visibility = View.INVISIBLE
 
                         val totalDuration = getTotalSequenceDuration()
@@ -7106,13 +7234,12 @@ class VideoEditingActivity : AppCompatActivity() {
                 lm.scrollToPositionWithOffset(0, -(stretchedTrimStartMs * pixelsPerMs).toInt())
             }
 
+            val missingBadge = segmentView.findViewById<View>(R.id.layoutMissingMediaIndicator)
+            missingBadge?.visibility = if (missingMediaUris.contains(item.uri)) View.VISIBLE else View.GONE
+
             if (isPhoto) {
                 lifecycleScope.launch(Dispatchers.IO) {
-                    val bmp = try {
-                        contentResolver.openInputStream(item.uri)?.use { input ->
-                            android.graphics.BitmapFactory.decodeStream(input)
-                        }
-                    } catch (e: Exception) { null }
+                    val bmp = com.tharunbirla.librecuts.utils.ImagePreviewCache.decodeThumbnail(this@VideoEditingActivity, item.uri, 120, 120)
                     if (bmp != null) {
                         withContext(Dispatchers.Main) {
                             adapter.updateFrames(List(15) { bmp })

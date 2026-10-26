@@ -84,9 +84,14 @@ class TimeRulerView @JvmOverloads constructor(
         val textY = 12f * density // Draw text near the top
         val tickBottom = heightVal - 2f * density
 
-        // Draw minor and major ticks
-        var currentMs = 0L
-        while (currentMs <= videoDurationMs) {
+        // Restrict ticks loop to visible canvas bounds for instant 60fps scrolling on large timelines
+        val clipLeft = canvas.clipBounds.left.toFloat()
+        val clipRight = canvas.clipBounds.right.toFloat()
+        val startVisibleMs = maxOf(0L, ((clipLeft - 50f) * msPerPixel).toLong() / minorStepMs * minorStepMs)
+        val endVisibleMs = minOf(videoDurationMs, ((clipRight + 50f) * msPerPixel).toLong() + minorStepMs)
+
+        var currentMs = startVisibleMs
+        while (currentMs <= endVisibleMs) {
             val x = currentMs / msPerPixel
 
             if (currentMs % stepMs == 0L) {

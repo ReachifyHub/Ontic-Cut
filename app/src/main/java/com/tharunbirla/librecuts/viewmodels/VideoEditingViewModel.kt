@@ -1326,7 +1326,14 @@ class VideoEditingViewModel : ViewModel() {
             if (_exportAudioOnly.value) {
                 filterParts.add("${finalVideoLabel}nullsink")
             }
-            cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
+            val filterComplexStr = filterParts.joinToString(";\n")
+            if (context != null && (filterComplexStr.length > 2000 || (mergeOp != null && mergeOp.items.size >= 10))) {
+                val scriptFile = File(context.cacheDir, "filter_script_${System.currentTimeMillis()}.txt")
+                scriptFile.writeText(filterComplexStr)
+                cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
+            } else {
+                cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
+            }
             
             if (_exportAudioOnly.value) {
                 if (!audioMuted) {
@@ -1562,7 +1569,14 @@ class VideoEditingViewModel : ViewModel() {
                 filterComplexParts.add("${mappedVideoLabel}nullsink")
             }
             
-            cmd.append(" -filter_complex \"${filterComplexParts.joinToString(";")}\"")
+            val filterComplexStr = filterComplexParts.joinToString(";\n")
+            if (context != null && filterComplexStr.length > 2000) {
+                val scriptFile = File(context.cacheDir, "filter_script_${System.currentTimeMillis()}.txt")
+                scriptFile.writeText(filterComplexStr)
+                cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
+            } else {
+                cmd.append(" -filter_complex \"${filterComplexParts.joinToString(";")}\"")
+            }
 
             if (!_exportAudioOnly.value) {
                 if (hasVideoFilters) {

@@ -124,14 +124,18 @@ class CaptionTrackView @JvmOverloads constructor(
         val cornerRadius = 6f
         val pillMarginY = 6f
 
-        // 2. Draw all caption cue blocks
+        val clipLeft = canvas.clipBounds.left.toFloat()
+        val clipRight = canvas.clipBounds.right.toFloat()
+
+        // 2. Draw all caption cue blocks (skipping off-screen cues for instant scrolling)
         for (op in captionOperations) {
             val startMs = op.startTimeMs ?: 0L
             val endMs = op.endTimeMs ?: (startMs + 1000L)
-            val isSelected = (op.id == selectedOperationId)
-
             val left = (startMs * pxPerMs).coerceAtLeast(0f)
             val right = (endMs * pxPerMs).coerceAtLeast(left + 12f)
+            if (right < clipLeft - 50f || left > clipRight + 50f) continue
+
+            val isSelected = (op.id == selectedOperationId)
             val cueRect = RectF(left, pillMarginY, right, h - pillMarginY)
 
             // Fill & Border

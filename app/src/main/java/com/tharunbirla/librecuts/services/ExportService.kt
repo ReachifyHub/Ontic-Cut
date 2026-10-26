@@ -118,6 +118,9 @@ class ExportService : Service() {
                 // Cleanup temp files
                 if (tempFile.exists()) tempFile.delete()
                 if (concatFile?.exists() == true) concatFile.delete()
+                try {
+                    cacheDir.listFiles { f -> f.name.startsWith("filter_script_") && f.name.endsWith(".txt") }?.forEach { it.delete() }
+                } catch (_: Exception) {}
 
             } catch (e: Exception) {
                 Log.e(TAG, "Export exception", e)

@@ -221,4 +221,18 @@
     <string name="str_paste_sample_script">Paste Sample</string>
     <string name="str_clear_script">Clear</string>
     <string name="str_empty_script_error">Please enter or paste your script map before calculating scenes.</string>
+    <string name="str_missing_media_title">Missing Media</string>
+    <string name="str_missing_media_msg">%1$d media file(s) referenced by this project could not be found or are inaccessible. They are highlighted on the timeline.</string>
+    <string name="str_lost_folder_permission_title">Folder Access Required</string>
+    <string name="str_lost_folder_permission_msg">Permission to access the project folder was revoked or expired. Please re-grant access to restore media files.</string>
+    <string name="str_regrant_access">Re-grant Access</string>
+    <string name="str_retry">Retry</string>
+    <string name="str_missing_media_badge">Missing</string>
+    <string name="str_preparing_previews">Preparing preview assets…</string>
+    <string name="str_export_error_title">Export Failed</string>
+    <string name="str_transcription_err_no_internet">No Internet Connection: Please check your network and try again.</string>
+    <string name="str_transcription_err_timeout">Connection Timed Out: The transcription server took too long to respond. Please try again.</string>
+    <string name="str_transcription_err_server">Server Error: The transcription service encountered an internal error. Please try again later.</string>
+    <string name="str_transcription_err_auth">Authentication Error: Please sign in or re-authenticate.</string>
+    <string name="str_transcription_err_credits">Insufficient Credits: You do not have enough credits to complete this transcription.</string>
 </resources>

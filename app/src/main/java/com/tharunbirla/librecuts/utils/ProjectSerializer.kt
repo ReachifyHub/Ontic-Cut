@@ -17,13 +17,21 @@ import java.lang.reflect.Type
 
 object ProjectSerializer {
 
+    var uriDeserializerFallback: ((String) -> Uri)? = null
+
     private val uriSerializer = object : JsonSerializer<Uri>, JsonDeserializer<Uri> {
         override fun serialize(src: Uri, typeOfSrc: Type, context: JsonSerializationContext): JsonElement {
             return JsonPrimitive(src.toString())
         }
 
         override fun deserialize(json: JsonElement, typeOfT: Type, context: JsonDeserializationContext): Uri {
-            return Uri.parse(json.asString)
+            val str = json.asString
+            val parsed = try { Uri.parse(str) } catch (e: Exception) { null }
+            if (parsed != null && parsed.toString() != null && parsed.toString().isNotEmpty()) {
+                return parsed
+            }
+            uriDeserializerFallback?.invoke(str)?.let { return it }
+            return try { Uri.EMPTY } catch (e: Exception) { Uri.parse("") }
         }
     }
 

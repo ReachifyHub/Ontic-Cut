@@ -38,6 +38,34 @@ class VoiceoverTranscriptionPipeline(
 
     companion object {
         const val BLOCKED_AUTH_MESSAGE = "Transcription blocked: Valid user JWT is not yet available. Authentication UI is pending."
+
+        fun classifyTranscriptionError(error: Throwable?, statusCode: Int? = null): Pair<ErrorCode, String> {
+            val msg = error?.message ?: "Whisper transcription failed"
+            val actualStatusCode = statusCode ?: (error as? SupabaseWhisperTranscriptionProvider.TranscriptionApiException)?.statusCode
+            return when {
+                actualStatusCode == 401 || actualStatusCode == 403 -> {
+                    Pair(ErrorCode.TRANSCRIPTION_AUTH_MISSING, "Authentication Error: Please sign in or re-authenticate.")
+                }
+                actualStatusCode == 402 || msg.contains("credit", ignoreCase = true) -> {
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, "Insufficient Credits: You do not have enough credits to complete this transcription.")
+                }
+                actualStatusCode == 400 -> {
+                    Pair(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, "Audio Too Long: Voiceover exceeds maximum allowed duration.")
+                }
+                actualStatusCode != null && actualStatusCode in 500..599 -> {
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, "Server Error (HTTP $actualStatusCode): The transcription service encountered an internal error. Please try again later.")
+                }
+                error is java.net.SocketTimeoutException -> {
+                    Pair(ErrorCode.TRANSCRIPTION_NETWORK_ERROR, "Connection Timed Out: The transcription server took too long to respond. Please try again.")
+                }
+                error is java.net.UnknownHostException || error is java.net.ConnectException -> {
+                    Pair(ErrorCode.TRANSCRIPTION_NETWORK_ERROR, "No Internet Connection: Please check your network connection and try again.")
+                }
+                else -> {
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, msg)
+                }
+            }
+        }
     }
 
     suspend fun execute(
@@ -157,16 +185,11 @@ class VoiceoverTranscriptionPipeline(
             // Clean up uploaded audio file from storage
             storageClient.deleteAudioFile(remoteFileName, userJwt)
 
-            val errorCode = when (statusCode) {
-                401 -> ErrorCode.TRANSCRIPTION_AUTH_MISSING
-                402 -> ErrorCode.TRANSCRIPTION_API_FAILED
-                400 -> ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG
-                else -> ErrorCode.TRANSCRIPTION_API_FAILED
-            }
+            val (errorCode, userMsg) = classifyTranscriptionError(error, statusCode)
 
             return@withContext TranscriptionPipelineResult.Error(
                 code = errorCode,
-                message = msg,
+                message = userMsg,
                 httpStatusCode = statusCode,
                 details = msg
             )
