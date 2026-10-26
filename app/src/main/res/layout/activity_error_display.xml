@@ -200,7 +200,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Please check if this issue already exists before opening a new one on GitHub."
+                android:text="Please check if this issue already exists before reporting a bug."
                 android:textColor="@color/iconSecondary"
                 android:textSize="13sp"
                 android:gravity="center"
@@ -219,11 +219,11 @@
                 android:layout_marginBottom="8dp" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnReportGithub"
+                android:id="@+id/btnReportBug"
                 android:layout_width="match_parent"
                 android:layout_height="56dp"
-                android:text="Report on GitHub"
-                app:icon="@drawable/ic_github_24"
+                android:text="Report a Bug"
+                app:icon="@drawable/ic_bug_24"
                 app:iconGravity="textStart"
                 app:backgroundTint="@color/colorPrimary"
                 android:textColor="@color/colorOnPrimary"

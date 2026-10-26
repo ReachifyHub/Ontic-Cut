@@ -1,9 +1,9 @@
 <resources>
 
-    <!-- ONTIC CUT WARM BRAND PALETTE -->
-    <color name="onticCoral">#E85D4A</color>
-    <color name="onticOrange">#F58658</color>
-    <color name="onticPeach">#F7B08C</color>
+    <!-- VYDRA BRAND PALETTE -->
+    <color name="vydraCoral">#E85D4A</color>
+    <color name="vydraOrange">#F58658</color>
+    <color name="vydraPeach">#F7B08C</color>
 
     <!-- PRIMARY: Warm Coral -->
     <color name="colorPrimary">#E85D4A</color>

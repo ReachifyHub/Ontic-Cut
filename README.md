@@ -1,8 +1,8 @@
-# Ontic Cut
+# Vydra
 
-**Ontic Cut** is a powerful video editing application for Android creators that prioritizes speed, precision, and privacy. Built for mobile workflow and content creation, it empowers users to trim, arrange, overlay, caption, and export watermark-free videos locally on their device.
+**Vydra** is a powerful video editing application for Android creators that prioritizes speed, precision, and privacy. Built for mobile workflow and content creation, it empowers users to trim, arrange, overlay, caption, and export watermark-free videos locally on their device.
 
-> **Attribution & Heritage:** Ontic Cut is developed from the open-source [OnticCut](https://github.com/ReachifyHub/Ontic-Cut/edit/main/README.md) project created by Tharun Birla and community contributors under the MIT License.
+> **Attribution & Heritage:** Vydra is developed from the open-source project created by Tharun Birla and community contributors under the MIT License.
 
 ---
 
@@ -62,20 +62,9 @@ Help resist this gatekeeping and support the movement at [keepandroidopen.org](h
   </table>
 </div>
 
-## 💖 Support LibreCuts
+## 💬 Community & Support
 
-LibreCuts is built with passion and provided to the community for free. If this app has helped you create amazing videos, consider supporting its continued development! Your sponsorship helps keep the project alive and growing.
-
-<div align="center">
-  <br/>
-  <a href="https://github.com/sponsors/tharunbirla"><img src="https://img.shields.io/badge/sponsor-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=%23EA4AAA" alt="GitHub Sponsors" /></a>
-  &nbsp;&nbsp;
-  <a href="https://www.patreon.com/tharunbirla"><img src="https://img.shields.io/badge/Patreon-F96854?style=for-the-badge&logo=patreon&logoColor=white" alt="Patreon" /></a>
-  &nbsp;&nbsp;
-  <a href="https://ko-fi.com/tharunbirla"><img src="https://img.shields.io/badge/Ko--fi-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Ko-Fi" /></a>
-  <br/>
-  <br/>
-</div>
+Join our community for updates, discussions, and support.
 
 ## 🛠️ Getting Started
 
@@ -86,33 +75,19 @@ LibreCuts is built with passion and provided to the community for free. If this 
 
 ### Installation
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/tharunbirla/LibreCuts.git
-   ```
-2. **Open the project in Android Studio**:
-   - Launch Android Studio and select "Open an existing Android Studio project."
-   - Navigate to the cloned directory and select it.
-3. **Build the project**:
-   - Click on "Build" in the menu, then select "Make Project."
-4. **Run the app**:
+1. **Build the project**:
+   - Open in Android Studio or compile with Gradle.
+2. **Run the app**:
    - Connect an Android device or start an emulator.
-   - Click on the "Run" button in Android Studio.
 
 ## 🔒 Permissions
 
-Ontic Cut requires the following permissions to function properly:
+Vydra requires the following permissions to function properly:
 
 - **READ_EXTERNAL_STORAGE**: To read videos from the device.
 - **WRITE_EXTERNAL_STORAGE**: (For older Android versions) To save edited videos.
 - **POST_NOTIFICATIONS**: To show notifications related to video editing.
 - **READ_MEDIA_AUDIO/VIDEO/IMAGES**: For accessing media files on devices running Android 13 (API level 33) and above.
-
-## 🔧 Troubleshooting & Support
-
-If you encounter any export failures, codec errors, or unexpected crashes during your editing workflow:
-- Refer to our comprehensive [Error Codes & Troubleshooting Guide](https://github.com/tharunbirla/LibreCuts/wiki/Error-Codes-&-Troubleshooting) on the Wiki.
-- Join our [Discord Community](https://discord.gg/gwr3nE7YW) for real-time support, suggestions, and app updates.
 
 ## 🤝 Contributing
 

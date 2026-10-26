@@ -1,6 +1,6 @@
 {
-  "name": "Ontic Cut",
-  "description": "Ontic Cut video editor with timeline editing, local media processing, speed controls, and export.",
+  "name": "Vydra",
+  "description": "Vydra video editor with timeline editing, local media processing, speed controls, auto assemble, and export.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

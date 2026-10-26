@@ -1,4 +1,4 @@
-<p>Ontic Cut is a powerful, privacy-first video editor for Android creators focused on precision, performance, and freedom. Edit and export watermark-free videos entirely on your device.</p>
+<p>Vydra is a powerful, privacy-first video editor for Android creators focused on precision, performance, and freedom. Edit and export watermark-free videos entirely on your device.</p>
 
 <p><b>Features</b></p>
 
