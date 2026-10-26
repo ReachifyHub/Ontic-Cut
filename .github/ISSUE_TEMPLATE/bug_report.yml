@@ -55,7 +55,7 @@ body:
         - Video Export / FFmpeg Rendering
         - Audio / Background Music / Mute
         - Filters / Speed / Reverse / Aspect Ratio
-        - Project Save / Load (.lcprj)
+        - Project Save / Load (.vdprj)
         - Other
 
   - type: input

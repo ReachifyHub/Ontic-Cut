@@ -27,7 +27,7 @@
                 android:id="@+id/ivOnboardingLogo"
                 android:layout_width="80dp"
                 android:layout_height="80dp"
-                android:src="@mipmap/ic_launcher"
+                android:src="@drawable/ic_vydra_logo_round"
                 android:contentDescription="Vydra App Icon" />
 
             <!-- App Name -->

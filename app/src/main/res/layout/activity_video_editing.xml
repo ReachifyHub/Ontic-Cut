@@ -258,13 +258,13 @@
 
             <ImageButton
                 android:id="@+id/btnFullscreen"
-                android:layout_width="32dp"
-                android:layout_height="32dp"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
                 android:layout_gravity="bottom|end"
                 android:layout_margin="16dp"
                 android:background="@drawable/rounded_time_bg"
                 android:src="@drawable/ic_fullscreen_24"
-                android:padding="6dp"
+                android:padding="7dp"
                 android:scaleType="fitCenter"
                 android:contentDescription="Fullscreen"
                 app:tint="@color/textColor" />
@@ -336,13 +336,14 @@
 
                 <ImageButton
                     android:id="@+id/btnPlayPause"
-                    android:layout_width="44dp"
-                    android:layout_height="44dp"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
                     android:background="@drawable/circle_primary_container"
                     android:src="@drawable/ic_play_24"
-                    android:padding="10dp"
+                    android:padding="11dp"
                     android:scaleType="fitCenter"
                     android:elevation="4dp"
+                    android:contentDescription="Play or Pause"
                     app:tint="@color/onPrimaryContainer" />
 
                 <Space
@@ -495,13 +496,13 @@
 
                 <ImageButton
                     android:id="@+id/btnTimelineAdd"
-                    android:layout_width="36dp"
-                    android:layout_height="36dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="@drawable/circle_primary_container"
                     android:src="@drawable/ic_add_24"
                     android:contentDescription="Add Media"
                     android:elevation="8dp"
-                    android:padding="8dp"
+                    android:padding="9dp"
                     app:tint="@color/colorOnPrimary" />
 
                 <com.boostlyte.vydra.customviews.CustomVideoSeeker
@@ -649,10 +650,10 @@
 
             <LinearLayout
                 android:id="@+id/editingControlsWrapper"
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:gravity="center"
+                android:gravity="center_vertical"
                 android:paddingVertical="8dp"
                 android:paddingHorizontal="8dp">
 

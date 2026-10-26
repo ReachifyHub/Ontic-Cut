@@ -137,7 +137,7 @@ class Phase7HandoffAndStressTest {
         )
 
         // 1. Serialize to JSON file (simulate save)
-        val projectFile = File(tempFolder.root, "Full_Assembled.lcprj")
+        val projectFile = File(tempFolder.root, "Full_Assembled.vdprj")
         val json = ProjectSerializer.serialize(recipe)
         assertNotNull(json)
         projectFile.writeText(json)

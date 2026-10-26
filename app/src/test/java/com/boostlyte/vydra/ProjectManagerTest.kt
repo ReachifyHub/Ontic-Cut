@@ -26,15 +26,15 @@ class ProjectManagerTest {
 
     @Test
     fun testGenerateUniqueProjectFile_defaultName() {
-        val file1 = File(mockDir, "Project 1.lcprj")
+        val file1 = File(mockDir, "Project 1.vdprj")
         assertFalse(file1.exists())
 
         // Simulated unique generator logic
-        var candidate = File(mockDir, "Project 1.lcprj")
+        var candidate = File(mockDir, "Project 1.vdprj")
         assertTrue(!candidate.exists())
         candidate.writeText("{}")
 
-        var candidate2 = File(mockDir, "Project 2.lcprj")
+        var candidate2 = File(mockDir, "Project 2.vdprj")
         assertTrue(!candidate2.exists())
     }
 
@@ -55,21 +55,21 @@ class ProjectManagerTest {
 
     @Test
     fun testSavedProjectListingSort() {
-        val fileOld = File(mockDir, "Old Project.lcprj")
+        val fileOld = File(mockDir, "Old Project.vdprj")
         fileOld.writeText("{}")
         fileOld.setLastModified(1000L)
 
-        val fileNew = File(mockDir, "New Project.lcprj")
+        val fileNew = File(mockDir, "New Project.vdprj")
         fileNew.writeText("{}")
         fileNew.setLastModified(5000L)
 
         val files = mockDir.listFiles { f ->
-            f.isFile && f.name.endsWith(".lcprj", ignoreCase = true)
+            f.isFile && (f.name.endsWith(".vdprj", ignoreCase = true) || f.name.endsWith(".lcprj", ignoreCase = true))
         } ?: emptyArray()
 
         val sorted = files.sortedByDescending { it.lastModified() }
-        assertEquals("New Project.lcprj", sorted[0].name)
-        assertEquals("Old Project.lcprj", sorted[1].name)
+        assertEquals("New Project.vdprj", sorted[0].name)
+        assertEquals("Old Project.vdprj", sorted[1].name)
     }
 
     @Test
@@ -89,7 +89,7 @@ class ProjectManagerTest {
 
     @Test
     fun testThumbnailNaming() {
-        val file = File(mockDir, "MyProject.lcprj")
+        val file = File(mockDir, "MyProject.vdprj")
         val thumb = ProjectManager.getThumbnailFile(file)
         assertEquals("MyProject.thumb.jpg", thumb.name)
         assertEquals(mockDir.absolutePath, thumb.parentFile?.absolutePath)

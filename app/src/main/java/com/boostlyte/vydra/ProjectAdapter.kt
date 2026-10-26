@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Adapter for displaying saved Vydra (.lcprj) projects on the home screen.
+ * Adapter for displaying saved Vydra (.vdprj) projects on the home screen.
  * Displays project title, duration, clip count, last modified date, visual thumbnail preview,
  * and options popup menu.
  */

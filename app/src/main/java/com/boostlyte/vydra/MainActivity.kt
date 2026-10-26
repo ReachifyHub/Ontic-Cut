@@ -610,11 +610,20 @@ class MainActivity : AppCompatActivity() {
                     navigateToEditingScreen(uri)
                 }
             }
-        } else if ((Intent.ACTION_VIEW == action || Intent.ACTION_EDIT == action) && type != null) {
-            if (type.startsWith("video/") || type.startsWith("image/")) {
-                intent.data?.let { uri ->
-                    Log.d("SharedVideo", "Received VIEW/EDIT intent with media URI: $uri")
-                    navigateToEditingScreen(uri)
+        } else if (Intent.ACTION_VIEW == action || Intent.ACTION_EDIT == action) {
+            val uri = intent.data
+            val uriPath = uri?.path ?: uri?.toString() ?: ""
+            if (uri != null && (uriPath.endsWith(".vdprj", ignoreCase = true) || uriPath.endsWith(".lcprj", ignoreCase = true))) {
+                val importIntent = Intent(this, ProjectImportActivity::class.java).apply {
+                    putExtra("PROJECT_URI", uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                }
+                startActivity(importIntent)
+                return
+            } else if (type != null && (type.startsWith("video/") || type.startsWith("image/"))) {
+                intent.data?.let { mediaUri ->
+                    Log.d("SharedVideo", "Received VIEW/EDIT intent with media URI: $mediaUri")
+                    navigateToEditingScreen(mediaUri)
                 }
             }
         }

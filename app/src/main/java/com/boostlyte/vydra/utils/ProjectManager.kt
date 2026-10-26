@@ -19,7 +19,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * ProjectManager manages the dedicated project library for Vydra (.lcprj files).
+ * ProjectManager manages the dedicated project library for Vydra (.vdprj files).
  * It provides app-specific storage access that works without broad storage permissions,
  * performs fast non-blocking filesystem queries, safe atomic saving, collision-free naming,
  * thumbnail generation/storage, and project actions (rename, duplicate, delete).
@@ -27,7 +27,8 @@ import java.util.Locale
 object ProjectManager {
 
     private const val TAG = "ProjectManager"
-    const val PROJECT_EXTENSION = ".lcprj"
+    const val PROJECT_EXTENSION = ".vdprj"
+    const val LEGACY_PROJECT_EXTENSION = ".lcprj"
     const val THUMBNAIL_EXTENSION = ".thumb.jpg"
     private const val PROJECTS_DIR_NAME = "Projects"
 
@@ -81,13 +82,14 @@ object ProjectManager {
     }
 
     /**
-     * Lists all .lcprj projects in the dedicated folder, sorted by last modified (newest first).
+     * Lists all .vdprj (and legacy .lcprj) projects in the dedicated folder, sorted by last modified (newest first).
      * Extracts duration, clip count, and lightweight thumbnail if available.
      */
     fun listSavedProjects(context: Context): List<SavedProjectItem> {
         val dir = getProjectsDirectory(context)
         val files = dir.listFiles { file ->
-            file.isFile && file.name.endsWith(PROJECT_EXTENSION, ignoreCase = true)
+            file.isFile && (file.name.endsWith(PROJECT_EXTENSION, ignoreCase = true) ||
+                    file.name.endsWith(LEGACY_PROJECT_EXTENSION, ignoreCase = true))
         } ?: return emptyList()
 
         val dateFormat = SimpleDateFormat("MMM d, yyyy • h:mm a", Locale.getDefault())
@@ -386,8 +388,10 @@ object ProjectManager {
             if (file.exists()) return file
         }
         val dir = getProjectsDirectory(context)
-        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(PROJECT_EXTENSION, ignoreCase = true) }
-            ?: return null
+        val files = dir.listFiles { f ->
+            f.isFile && (f.name.endsWith(PROJECT_EXTENSION, ignoreCase = true) ||
+                    f.name.endsWith(LEGACY_PROJECT_EXTENSION, ignoreCase = true))
+        } ?: return null
 
         val lastSegment = uri.lastPathSegment ?: return null
         for (f in files) {

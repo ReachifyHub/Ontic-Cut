@@ -5717,7 +5717,7 @@ class VideoEditingActivity : AppCompatActivity() {
             }
             btnSave.setOnLongClickListener {
                 bottomSheetDialog.dismiss()
-                saveProjectLauncher.launch("project.lcprj")
+                saveProjectLauncher.launch("project.vdprj")
                 true
             }
         }
