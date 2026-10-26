@@ -39,9 +39,28 @@ public class DummyUri extends Uri {
     @Override public String getFragment() { return null; }
     @Override public String getEncodedFragment() { return null; }
     @Override public List<String> getPathSegments() { return Collections.emptyList(); }
-    @Override public String getLastPathSegment() { return "dummy"; }
+    @Override public String getLastPathSegment() {
+        if (customPath != null && customPath.contains("/")) {
+            return customPath.substring(customPath.lastIndexOf('/') + 1);
+        }
+        return "dummy";
+    }
     @Override public Builder buildUpon() { return null; }
-    @Override public String toString() { return "file:///dummy"; }
+    @Override public String toString() { return customPath != null ? customPath : "file:///dummy"; }
     @Override public int describeContents() { return 0; }
     @Override public void writeToParcel(Parcel dest, int flags) {}
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o instanceof Uri) {
+            return this.toString().equals(o.toString());
+        }
+        return false;
+    }
+
+    @Override
+    public int hashCode() {
+        return toString().hashCode();
+    }
 }

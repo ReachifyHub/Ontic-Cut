@@ -3369,6 +3369,81 @@ class VideoEditingActivity : AppCompatActivity() {
                             tvSnippet.text = boundary.scriptText
                             layoutScenesContainer.addView(itemView)
                         }
+
+                        // Phase 5 Assembly Engine Confirmation
+                        val currentSequenceItems = getSequenceItems()
+                        val imageClips = currentSequenceItems.filter { it.isImage || isImageUri(it.uri) }
+                        val imageUris = imageClips.map { it.uri }
+
+                        val plan = com.tharunbirla.librecuts.autoassemble.TimelineAssembler.computeAssemblyPlan(
+                            scenes = result.boundaries,
+                            imageUris = imageUris,
+                            audioDurationMs = durationMs
+                        )
+
+                        val layoutAssemblyConfirmation = view.findViewById<View>(R.id.layoutAssemblyConfirmation)
+                        val tvAssemblyScenes = view.findViewById<TextView>(R.id.tvAssemblyScenesSummary)
+                        val tvAssemblyImages = view.findViewById<TextView>(R.id.tvAssemblyImagesSummary)
+                        val tvAssemblyDistribution = view.findViewById<TextView>(R.id.tvAssemblyDistributionSummary)
+                        val tvAssemblyClipDuration = view.findViewById<TextView>(R.id.tvAssemblyClipDurationSummary)
+                        val layoutAssemblyWarning = view.findViewById<View>(R.id.layoutAssemblyWarning)
+                        val tvAssemblyWarningText = view.findViewById<TextView>(R.id.tvAssemblyWarningText)
+                        val layoutAssemblyActions = view.findViewById<View>(R.id.layoutAssemblyActions)
+                        val btnCancelAssembly = view.findViewById<Button>(R.id.btnCancelAssembly)
+                        val btnAssembleTimeline = view.findViewById<Button>(R.id.btnAssembleTimeline)
+                        val layoutAssemblingProgress = view.findViewById<View>(R.id.layoutAssemblingProgress)
+
+                        layoutAssemblyConfirmation?.visibility = View.VISIBLE
+                        tvAssemblyScenes?.text = "Scenes: ${result.boundaries.size} (${plan.matchedScenesCount} matched, ${plan.unmatchedScenesCount} unmatched)"
+                        tvAssemblyImages?.text = "Images: ${imageUris.size} available on timeline"
+                        tvAssemblyDistribution?.text = if (plan.imagesPerScene.isNotEmpty()) {
+                            "Distribution: " + plan.imagesPerScene.mapIndexed { idx, cnt -> "S${idx + 1} ($cnt)" }.joinToString(", ")
+                        } else {
+                            "Distribution: None"
+                        }
+                        tvAssemblyClipDuration?.text = "Average clip duration: %,d ms".format(plan.averageClipDurationMs)
+
+                        val warnings = mutableListOf<String>()
+                        if (plan.unmatchedScenesCount > 0) {
+                            warnings.add("${plan.unmatchedScenesCount} unmatched scene(s) will be continuously interpolated across audio")
+                        }
+                        if (plan.isShortClipWarning) {
+                            warnings.add("Average clip duration is ${plan.averageClipDurationMs} ms (< 800 ms). Image switching may feel rapid.")
+                        }
+                        if (warnings.isNotEmpty()) {
+                            layoutAssemblyWarning?.visibility = View.VISIBLE
+                            tvAssemblyWarningText?.text = "⚠ " + warnings.joinToString("\n")
+                        } else {
+                            layoutAssemblyWarning?.visibility = View.GONE
+                        }
+
+                        btnCancelAssembly?.setBounceClickListener {
+                            bottomSheet.dismiss()
+                        }
+
+                        btnAssembleTimeline?.setBounceClickListener {
+                            if (plan.isTooFewImages) {
+                                androidx.appcompat.app.AlertDialog.Builder(this@VideoEditingActivity)
+                                    .setTitle("Not Enough Images")
+                                    .setMessage(plan.errorMessage ?: "You have ${plan.totalScenes} scenes but only ${imageUris.size} images. Each scene needs at least 1 image.")
+                                    .setPositiveButton("OK", null)
+                                    .show()
+                                return@setBounceClickListener
+                            }
+
+                            if (plan.isShortClipWarning) {
+                                androidx.appcompat.app.AlertDialog.Builder(this@VideoEditingActivity)
+                                    .setTitle("Short Clip Duration")
+                                    .setMessage("The computed average clip duration is ${plan.averageClipDurationMs} ms (less than 800 ms). Fast-paced image switching might feel rapid. Do you want to continue anyway?")
+                                    .setPositiveButton("Continue anyway") { _, _ ->
+                                        executeAssembly(plan, bottomSheet, layoutAssemblyActions, layoutAssemblingProgress)
+                                    }
+                                    .setNegativeButton("Cancel", null)
+                                    .show()
+                            } else {
+                                executeAssembly(plan, bottomSheet, layoutAssemblyActions, layoutAssemblingProgress)
+                            }
+                        }
                     }
                     is AutoAssembleResult.BlockedAuth -> {
                         layoutError.visibility = View.VISIBLE
@@ -3383,6 +3458,62 @@ class VideoEditingActivity : AppCompatActivity() {
         }
 
         bottomSheet.show()
+    }
+
+    private fun executeAssembly(
+        plan: com.tharunbirla.librecuts.autoassemble.AssemblyPlan,
+        bottomSheet: com.google.android.material.bottomsheet.BottomSheetDialog,
+        actionsLayout: View?,
+        progressLayout: View?
+    ) {
+        actionsLayout?.visibility = View.GONE
+        progressLayout?.visibility = View.VISIBLE
+        bottomSheet.setCancelable(false)
+
+        lifecycleScope.launch {
+            // 1. Safety snapshot / backup project state before mutation
+            try {
+                val curProj = viewModel.project.value
+                if (curProj != null) {
+                    val projName = (currentProjectFile?.nameWithoutExtension ?: curProj.sourceName) + "_pre_assembly"
+                    val recipe = com.tharunbirla.librecuts.models.EditRecipe.fromVideoProject(
+                        projName,
+                        curProj,
+                        durationMs = getTotalSequenceDuration(),
+                        clipCount = getSequenceItems().size
+                    )
+                    withContext(Dispatchers.IO) {
+                        com.tharunbirla.librecuts.utils.ProjectManager.saveProject(this@VideoEditingActivity, recipe)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Safety snapshot failed: ${e.message}")
+            }
+
+            // 2. Compute project mutation off main thread
+            val mutatedProject = withContext(Dispatchers.Default) {
+                val cur = viewModel.project.value ?: return@withContext null
+                com.tharunbirla.librecuts.autoassemble.TimelineAssembler.applyAssemblyToProject(cur, plan)
+            }
+
+            if (mutatedProject != null) {
+                // Register assembly as a single undoable operation
+                viewModel.executeCommand(com.tharunbirla.librecuts.commands.MutateProjectCommand("Auto Assemble Timeline") {
+                    mutatedProject
+                })
+
+                // 3. Update timeline track and player
+                initializeVideoData()
+
+                Toast.makeText(
+                    this@VideoEditingActivity,
+                    "Timeline assembled: ${plan.clips.size} clips across ${plan.totalScenes} scenes",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+
+            bottomSheet.dismiss()
+        }
     }
 
     private fun subtitlesAction() {
@@ -5923,8 +6054,87 @@ class VideoEditingActivity : AppCompatActivity() {
                     photoSequencePreviewImageView?.visibility = View.VISIBLE
                     playerView.visibility = View.INVISIBLE
                     photoSequencePreviewImageView?.setImageURI(activeItem.uri)
+                    photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.CENTER_CROP
+
+                    val motionType = activeItem.motionEffect
+                        ?: viewModel.project.value?.operations?.filterIsInstance<com.tharunbirla.librecuts.models.EditOperation.MotionEffect>()
+                            ?.find { it.index == activeClipIndex }?.motionType
+
+                    if (motionType != null && activeItem.trimmedDurationMs > 0) {
+                        val progress = (relTimeMs.toFloat() / activeItem.trimmedDurationMs.toFloat()).coerceIn(0f, 1f)
+                        val viewW = photoSequencePreviewImageView?.width?.toFloat() ?: 0f
+                        val viewH = photoSequencePreviewImageView?.height?.toFloat() ?: 0f
+
+                        when (motionType) {
+                            "zoom_in" -> {
+                                val s = 1.0f + 0.12f * progress
+                                photoSequencePreviewImageView?.scaleX = s
+                                photoSequencePreviewImageView?.scaleY = s
+                                photoSequencePreviewImageView?.translationX = 0f
+                                photoSequencePreviewImageView?.translationY = 0f
+                            }
+                            "zoom_out" -> {
+                                val s = 1.12f - 0.12f * progress
+                                photoSequencePreviewImageView?.scaleX = s
+                                photoSequencePreviewImageView?.scaleY = s
+                                photoSequencePreviewImageView?.translationX = 0f
+                                photoSequencePreviewImageView?.translationY = 0f
+                            }
+                            "pan_left" -> {
+                                photoSequencePreviewImageView?.scaleX = 1.12f
+                                photoSequencePreviewImageView?.scaleY = 1.12f
+                                val maxX = viewW * 0.05f
+                                photoSequencePreviewImageView?.translationX = maxX * (1f - 2f * progress)
+                                photoSequencePreviewImageView?.translationY = 0f
+                            }
+                            "pan_right" -> {
+                                photoSequencePreviewImageView?.scaleX = 1.12f
+                                photoSequencePreviewImageView?.scaleY = 1.12f
+                                val maxX = viewW * 0.05f
+                                photoSequencePreviewImageView?.translationX = maxX * (-1f + 2f * progress)
+                                photoSequencePreviewImageView?.translationY = 0f
+                            }
+                            "pan_up" -> {
+                                photoSequencePreviewImageView?.scaleX = 1.12f
+                                photoSequencePreviewImageView?.scaleY = 1.12f
+                                val maxY = viewH * 0.05f
+                                photoSequencePreviewImageView?.translationX = 0f
+                                photoSequencePreviewImageView?.translationY = maxY * (1f - 2f * progress)
+                            }
+                            "pan_down" -> {
+                                photoSequencePreviewImageView?.scaleX = 1.12f
+                                photoSequencePreviewImageView?.scaleY = 1.12f
+                                val maxY = viewH * 0.05f
+                                photoSequencePreviewImageView?.translationX = 0f
+                                photoSequencePreviewImageView?.translationY = maxY * (-1f + 2f * progress)
+                            }
+                            "drift_up_right" -> {
+                                photoSequencePreviewImageView?.scaleX = 1.12f
+                                photoSequencePreviewImageView?.scaleY = 1.12f
+                                val maxX = viewW * 0.04f
+                                val maxY = viewH * 0.04f
+                                photoSequencePreviewImageView?.translationX = maxX * (-1f + 2f * progress)
+                                photoSequencePreviewImageView?.translationY = maxY * (1f - 2f * progress)
+                            }
+                            else -> {
+                                photoSequencePreviewImageView?.scaleX = 1f
+                                photoSequencePreviewImageView?.scaleY = 1f
+                                photoSequencePreviewImageView?.translationX = 0f
+                                photoSequencePreviewImageView?.translationY = 0f
+                            }
+                        }
+                    } else {
+                        photoSequencePreviewImageView?.scaleX = 1f
+                        photoSequencePreviewImageView?.scaleY = 1f
+                        photoSequencePreviewImageView?.translationX = 0f
+                        photoSequencePreviewImageView?.translationY = 0f
+                    }
                 } else {
                     photoSequencePreviewImageView?.visibility = View.GONE
+                    photoSequencePreviewImageView?.scaleX = 1f
+                    photoSequencePreviewImageView?.scaleY = 1f
+                    photoSequencePreviewImageView?.translationX = 0f
+                    photoSequencePreviewImageView?.translationY = 0f
                     playerView.visibility = View.VISIBLE
                 }
             }

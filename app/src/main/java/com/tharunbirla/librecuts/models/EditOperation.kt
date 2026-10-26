@@ -232,7 +232,8 @@ sealed class EditOperation : Serializable {
         val isReversed: Boolean = false,
         val isMirrored: Boolean = false,
         val maskConfig: MaskConfig = MaskConfig(),
-        val isImage: Boolean = false
+        val isImage: Boolean = false,
+        val motionEffect: String? = null
     ) : Serializable {
         val trimmedDurationMs: Long
             get() = ((trimEndMs - trimStartMs) / speed).toLong()
@@ -411,6 +412,16 @@ sealed class EditOperation : Serializable {
     ) : EditOperation() {
         enum class BackgroundType { COLOR, IMAGE, BLUR }
     }
+
+    /**
+     * Motion effect operation: Specifies subtle Ken Burns motion (e.g. zoom_in, pan_left)
+     * for a main-sequence clip at the given index (0 = primary clip, 1..N = merge item index + 1).
+     */
+    data class MotionEffect(
+        val index: Int,
+        val motionType: String,
+        val id: String = System.nanoTime().toString()
+    ) : EditOperation()
 }
 
 data class SubtitleCue(
@@ -486,4 +497,5 @@ val EditOperation.id: String
         is EditOperation.AddSubtitles -> id
         is EditOperation.Adjust -> id
         is EditOperation.CanvasBackground -> id
+        is EditOperation.MotionEffect -> id
     }

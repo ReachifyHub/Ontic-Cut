@@ -1028,8 +1028,25 @@ class VideoEditingViewModel : ViewModel() {
                 
                 filterParts.add("[$i:v]$preFilters[pre$i]")
 
-                // 2. Apply background/padding
-                if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.BLUR) {
+                // 2. Apply background/padding or Ken Burns motion
+                val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == i }
+                val clipMotionType = motionOp?.motionType ?: if (i > 0) mergeOp?.items?.getOrNull(i - 1)?.motionEffect else null
+                val d = durationsArray[i].coerceAtLeast(0.1)
+
+                val motionFilter = when (clipMotionType) {
+                    "zoom_in" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth*1.15:$mainHeight*1.15,zoompan=z='1.0+0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=30"
+                    "zoom_out" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth*1.15:$mainHeight*1.15,zoompan=z='1.12-0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=30"
+                    "pan_left" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'"
+                    "pan_right" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'"
+                    "pan_up" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'"
+                    "pan_down" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$d)'"
+                    "drift_up_right" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)*(1-(t/$d))'"
+                    else -> null
+                }
+
+                if (motionFilter != null) {
+                    filterParts.add("[pre$i]$motionFilter,setsar=1,fps=30,format=yuv420p[norm$i]")
+                } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.BLUR) {
                     val blur = bgOp.blurRadius
                     val bgScale = "format=yuv420p,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight,boxblur=$blur"
                     val fgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease"
