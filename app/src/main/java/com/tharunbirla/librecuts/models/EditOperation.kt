@@ -102,7 +102,8 @@ sealed class EditOperation : Serializable {
         val letterSpacing: Float = 0f,
         val lineSpacing: Float = 0f,
         val positionKeyframes: List<KeyframePoint> = emptyList(),
-        val opacityKeyframes: List<KeyframePoint> = emptyList()
+        val opacityKeyframes: List<KeyframePoint> = emptyList(),
+        val groupId: String? = null
     ) : EditOperation() {
         init {
             require(text.isNotEmpty()) { "Text cannot be empty" }

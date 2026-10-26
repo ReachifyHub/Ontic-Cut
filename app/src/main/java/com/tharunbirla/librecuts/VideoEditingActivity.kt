@@ -517,6 +517,7 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private var shouldQuitAfterSave = false
+    private val autoAssembleManager by lazy { AutoAssembleManager(this) }
 
     private val saveProjectLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -1893,6 +1894,18 @@ class VideoEditingActivity : AppCompatActivity() {
             findViewById<View>(R.id.subtitlesEditingToolbar)?.also { toolbar ->
                 toolbar.findViewById<ImageButton>(R.id.btnCloseSubtitlesSheet)?.setBounceClickListener {
                     exitSubtitlesEditingMode()
+                }
+                toolbar.findViewById<View>(R.id.btnAutoCaptions)?.setBounceClickListener {
+                    startAutoCaptionsFlow(isRegeneration = false)
+                }
+                toolbar.findViewById<View>(R.id.btnRegenerateAutoCaptions)?.setBounceClickListener {
+                    startAutoCaptionsFlow(isRegeneration = true)
+                }
+                toolbar.findViewById<View>(R.id.btnRemoveAutoCaptions)?.setBounceClickListener {
+                    removeAutoCaptions()
+                }
+                toolbar.findViewById<View>(R.id.btnAddSrtAlternative)?.setBounceClickListener {
+                    pickSrtFile()
                 }
                 toolbar.findViewById<Button>(R.id.btnUploadSrt)?.setBounceClickListener {
                     pickSrtFile()
@@ -3554,12 +3567,17 @@ class VideoEditingActivity : AppCompatActivity() {
         val toolbar = subtitlesEditingToolbar ?: return
         val project = viewModel.project.value
         val subOp = project?.operations?.find { it is EditOperation.AddSubtitles } as? EditOperation.AddSubtitles
+        val autoCaptionOps = project?.operations?.filterIsInstance<EditOperation.AddText>()?.filter {
+            it.groupId == com.tharunbirla.librecuts.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+        } ?: emptyList()
+
         val layoutNo = toolbar.findViewById<View>(R.id.layoutNoSubtitles)
         val layoutHas = toolbar.findViewById<View>(R.id.layoutHasSubtitles)
+        val layoutAuto = toolbar.findViewById<View>(R.id.layoutAutoCaptionsActive)
+        val tvAutoStatus = toolbar.findViewById<TextView>(R.id.tvAutoCaptionsStatus)
         val tvFileName = toolbar.findViewById<TextView>(R.id.tvSubtitleFileName)
 
         if (subOp != null) {
-            layoutNo?.visibility = View.GONE
             layoutHas?.visibility = View.VISIBLE
             tvFileName?.text = subOp.fileName
 
@@ -3570,9 +3588,205 @@ class VideoEditingActivity : AppCompatActivity() {
 
             setupSubtitleFontSelector(toolbar)
         } else {
-            layoutNo?.visibility = View.VISIBLE
             layoutHas?.visibility = View.GONE
         }
+
+        if (autoCaptionOps.isNotEmpty()) {
+            layoutAuto?.visibility = View.VISIBLE
+            tvAutoStatus?.text = "Auto Captions: ${autoCaptionOps.size} cues"
+        } else {
+            layoutAuto?.visibility = View.GONE
+        }
+
+        if (subOp == null && autoCaptionOps.isEmpty()) {
+            layoutNo?.visibility = View.VISIBLE
+        } else {
+            layoutNo?.visibility = View.GONE
+        }
+    }
+
+    private fun startAutoCaptionsFlow(isRegeneration: Boolean = false) {
+        val project = viewModel.project.value ?: return
+        val audioOp = project.operations.filterIsInstance<EditOperation.AddBackgroundAudio>().firstOrNull()
+
+        if (audioOp == null) {
+            Toast.makeText(this, R.string.str_no_voiceover_for_captions, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        // 1. Check for cached transcription
+        val cached = autoAssembleManager.findCachedTranscription(audioOp.audioUri)
+        if (cached != null) {
+            processTranscriptionForCaptions(cached.first, audioOp)
+            return
+        }
+
+        // 2. Prompt user to transcribe if no cached transcription exists
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.str_auto_captions)
+            .setMessage(R.string.str_transcribe_voiceover_prompt)
+            .setPositiveButton(R.string.str_transcribe_now) { _, _ ->
+                executeTranscriptionForCaptions(audioOp)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun executeTranscriptionForCaptions(audioOp: EditOperation.AddBackgroundAudio) {
+        if (!com.tharunbirla.librecuts.transcription.SupabaseAuthManager.hasValidJwt(this)) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Sign In Required")
+                .setMessage(getString(R.string.str_sign_in_required_auto_assemble))
+                .setPositiveButton(android.R.string.ok, null)
+                .show()
+            return
+        }
+
+        val progressDialog = android.app.ProgressDialog(this).apply {
+            setMessage("Uploading voiceover for transcription...")
+            setCancelable(false)
+            show()
+        }
+
+        val audioDurSeconds = ((audioOp.originalDurationMs.takeIf { it > 0 } ?: getTotalSequenceDuration()) / 1000).toInt().coerceAtLeast(1)
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val pipeline = com.tharunbirla.librecuts.transcription.VoiceoverTranscriptionPipeline(this@VideoEditingActivity)
+            val result = pipeline.execute(
+                audioUri = audioOp.audioUri,
+                audioDurationSeconds = audioDurSeconds,
+                projectName = viewModel.project.value?.sourceName,
+                onProgress = { _, statusMsg ->
+                    lifecycleScope.launch(Dispatchers.Main) {
+                        progressDialog.setMessage(statusMsg)
+                    }
+                }
+            )
+
+            withContext(Dispatchers.Main) {
+                progressDialog.dismiss()
+                when (result) {
+                    is com.tharunbirla.librecuts.transcription.models.TranscriptionPipelineResult.Success -> {
+                        processTranscriptionForCaptions(result.response, audioOp)
+                    }
+                    is com.tharunbirla.librecuts.transcription.models.TranscriptionPipelineResult.BlockedAuth -> {
+                        MaterialAlertDialogBuilder(this@VideoEditingActivity)
+                            .setTitle("Authentication Required")
+                            .setMessage(getString(R.string.str_sign_in_required_auto_assemble))
+                            .setPositiveButton(android.R.string.ok, null)
+                            .show()
+                    }
+                    is com.tharunbirla.librecuts.transcription.models.TranscriptionPipelineResult.Error -> {
+                        val creditErr = autoAssembleManager.extractCreditErrorMessage(result.message, result.details, result.httpStatusCode)
+                        val errMsg = creditErr ?: result.message
+                        MaterialAlertDialogBuilder(this@VideoEditingActivity)
+                            .setTitle(if (creditErr != null) "Credit Limit" else "Transcription Failed")
+                            .setMessage(errMsg)
+                            .setPositiveButton(android.R.string.ok, null)
+                            .show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun processTranscriptionForCaptions(
+        transcription: com.tharunbirla.librecuts.transcription.models.TranscriptionResponse,
+        audioOp: EditOperation.AddBackgroundAudio
+    ) {
+        val audioDurationMs = if (audioOp.originalDurationMs > 0) audioOp.originalDurationMs else getTotalSequenceDuration()
+        val buildResult = com.tharunbirla.librecuts.captions.CaptionCueBuilder.buildCues(transcription, audioDurationMs)
+
+        when (buildResult) {
+            is com.tharunbirla.librecuts.captions.CaptionBuildResult.Error -> {
+                MaterialAlertDialogBuilder(this)
+                    .setTitle(R.string.str_auto_captions)
+                    .setMessage(buildResult.message)
+                    .setPositiveButton(android.R.string.ok, null)
+                    .show()
+            }
+            is com.tharunbirla.librecuts.captions.CaptionBuildResult.Success -> {
+                showCaptionConfirmationDialog(buildResult.cues, buildResult.mode)
+            }
+        }
+    }
+
+    private fun showCaptionConfirmationDialog(
+        cues: List<com.tharunbirla.librecuts.captions.CaptionCue>,
+        mode: com.tharunbirla.librecuts.captions.CaptionTimestampMode
+    ) {
+        val modeText = if (mode == com.tharunbirla.librecuts.captions.CaptionTimestampMode.WORD_LEVEL) {
+            "Timestamp Mode: Word-level (Accurate speech sync)"
+        } else {
+            "Timestamp Mode: Segment-based (Approximate timing)\n\n⚠️ Word-level timestamps were not present in this transcription. Timing is estimated proportionally across sentence segments."
+        }
+
+        val message = "${cues.size} caption cues will be created.\n\n$modeText"
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.str_auto_captions)
+            .setMessage(message)
+            .setPositiveButton("Generate") { _, _ ->
+                injectAutoCaptions(cues)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun injectAutoCaptions(cues: List<com.tharunbirla.librecuts.captions.CaptionCue>) {
+        val progressDialog = android.app.ProgressDialog(this).apply {
+            setMessage(getString(R.string.str_generating_captions))
+            setCancelable(false)
+            show()
+        }
+
+        lifecycleScope.launch(Dispatchers.Default) {
+            val newTextOps = com.tharunbirla.librecuts.captions.CaptionCueBuilder.cuesToEditOperations(cues)
+
+            viewModel.executeCommand(
+                com.tharunbirla.librecuts.commands.MutateProjectCommand("Generate Auto Captions") { proj ->
+                    // Idempotent: replace previous auto-captions, keep manual AddText & AddSubtitles untouched
+                    val cleanOps = proj.operations.filterNot {
+                        it is EditOperation.AddText && it.groupId == com.tharunbirla.librecuts.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+                    }
+                    proj.copy(
+                        operations = cleanOps + newTextOps,
+                        lastModifiedAt = System.currentTimeMillis()
+                    )
+                }
+            )
+
+            withContext(Dispatchers.Main) {
+                progressDialog.dismiss()
+                Toast.makeText(this@VideoEditingActivity, "Generated ${newTextOps.size} caption overlays", Toast.LENGTH_SHORT).show()
+                updateSubtitlesUi()
+                updateUIInteractionState()
+            }
+        }
+    }
+
+    private fun removeAutoCaptions() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Remove Auto Captions")
+            .setMessage("Are you sure you want to remove all auto-generated captions? Manual text overlays and subtitles will not be affected.")
+            .setPositiveButton(R.string.str_remove) { _, _ ->
+                viewModel.executeCommand(
+                    com.tharunbirla.librecuts.commands.MutateProjectCommand("Remove Auto Captions") { proj ->
+                        val cleanOps = proj.operations.filterNot {
+                            it is EditOperation.AddText && it.groupId == com.tharunbirla.librecuts.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+                        }
+                        proj.copy(
+                            operations = cleanOps,
+                            lastModifiedAt = System.currentTimeMillis()
+                        )
+                    }
+                )
+                Toast.makeText(this, "Auto-captions removed", Toast.LENGTH_SHORT).show()
+                updateSubtitlesUi()
+                updateUIInteractionState()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun updateSubtitleOp(newOp: EditOperation.AddSubtitles) {
@@ -7120,11 +7334,18 @@ class VideoEditingActivity : AppCompatActivity() {
         imageTrackContainer.removeAllViews()
         imageTrackContainer.visibility = View.GONE
 
-        val overlayOps = project.operations.filter { it is EditOperation.AddText || it is EditOperation.AddImageOverlay }
-        if (overlayOps.isNotEmpty()) {
+        val autoCaptionOps = project.operations.filterIsInstance<EditOperation.AddText>().filter {
+            it.groupId == com.tharunbirla.librecuts.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+        }
+        val manualOverlayOps = project.operations.filter {
+            (it is EditOperation.AddText && it.groupId != com.tharunbirla.librecuts.captions.CaptionCueBuilder.CAPTION_GROUP_ID) || it is EditOperation.AddImageOverlay
+        }
+
+        if (manualOverlayOps.isNotEmpty() || autoCaptionOps.isNotEmpty()) {
             textTrackContainer.visibility = View.VISIBLE
-            // Reverse so that the top-most overlay is visually at the top of the timeline track stack
-            for (op in overlayOps.reversed()) {
+
+            // 1. Manual text and image overlays as individual TrackTrimViews
+            for (op in manualOverlayOps.reversed()) {
                 val opId = when (op) {
                     is EditOperation.AddText -> op.id
                     is EditOperation.AddImageOverlay -> op.id
@@ -7216,6 +7437,37 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                 }
                 textTrackContainer.addView(trackView)
+            }
+
+            // 2. Dedicated single CaptionTrackView for all auto-captions
+            if (autoCaptionOps.isNotEmpty()) {
+                val captionTrack = com.tharunbirla.librecuts.customviews.CaptionTrackView(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 48.dpToPx()).apply {
+                        topMargin = 4.dpToPx()
+                    }
+                    totalDurationMs = totalSequenceDuration
+                    customMsPerPixel = 1.0f / pixelsPerMs
+                    captionOperations = autoCaptionOps
+                    selectedOperationId = viewModel.selectedOperationId.value
+                    onCaptionClicked = { opId ->
+                        val cueOp = autoCaptionOps.find { it.id == opId }
+                        if (cueOp != null) {
+                            seekToGlobalPosition(cueOp.startTimeMs ?: 0L)
+                        }
+                        if (viewModel.selectedOperationId.value == opId) {
+                            viewModel.selectOperation(null)
+                        } else {
+                            viewModel.selectOperation(opId)
+                        }
+                    }
+                    onCaptionTrimChanged = { op, start, end ->
+                        viewModel.updateOperation(op.copy(startTimeMs = start, endTimeMs = end))
+                    }
+                    onDragStateChanged = { isDragging ->
+                        isTrackDragging = isDragging
+                    }
+                }
+                textTrackContainer.addView(captionTrack)
             }
         } else {
             textTrackContainer.visibility = View.GONE

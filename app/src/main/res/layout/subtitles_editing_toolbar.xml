@@ -49,29 +49,144 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center"
-            android:paddingVertical="16dp">
+            android:paddingVertical="12dp">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnAutoCaptions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/str_auto_captions_from_voiceover"
+                app:icon="@drawable/ic_closed_caption_24"
+                app:iconGravity="textStart"
+                app:iconPadding="8dp"
+                android:textAllCaps="false"
+                android:textColor="@android:color/white"
+                android:backgroundTint="@color/colorPrimary"
+                app:cornerRadius="24dp"
+                android:paddingVertical="12dp"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:layout_marginBottom="12dp"
+                android:text="@string/str_auto_captions_desc"
+                android:textColor="@color/outline"
+                android:textSize="12sp"/>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:background="#20FFFFFF"
+                android:layout_marginVertical="6dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btnUploadSrt"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="@string/str_upload_subtitle_file"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                app:icon="@drawable/ic_folder_24"
+                app:iconGravity="textStart"
+                app:iconPadding="8dp"
                 android:textAllCaps="false"
-                android:textColor="@color/onPrimaryContainer"
-                android:backgroundTint="@color/colorPrimary"
+                android:textColor="@color/textColor"
+                app:strokeColor="@color/outline"
                 app:cornerRadius="24dp"
-                android:paddingHorizontal="24dp"
-                android:paddingVertical="8dp"
+                android:paddingVertical="10dp"
                 android:textSize="14sp"
                 android:fontFamily="sans-serif-medium"/>
             
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
+                android:layout_marginTop="6dp"
                 android:text="@string/str_supports_standard_srt_formatte"
                 android:textColor="@color/outline"
                 android:textSize="12sp"/>
+        </LinearLayout>
+
+        <!-- Auto-captions active state -->
+        <LinearLayout
+            android:id="@+id/layoutAutoCaptionsActive"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:paddingVertical="8dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="@drawable/bg_bottom_nav"
+                android:padding="10dp"
+                android:layout_marginBottom="12dp">
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:src="@drawable/ic_closed_caption_24"
+                    app:tint="@color/colorPrimary" />
+
+                <TextView
+                    android:id="@+id/tvAutoCaptionsStatus"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="12dp"
+                    android:text="Auto Captions: 0 cues"
+                    android:textColor="@color/textColor"
+                    android:textSize="14sp"
+                    android:fontFamily="sans-serif-medium" />
+
+                <ImageButton
+                    android:id="@+id/btnRegenerateAutoCaptions"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_swap_24"
+                    android:padding="6dp"
+                    android:scaleType="fitCenter"
+                    app:tint="@color/colorPrimary"
+                    android:contentDescription="Regenerate Captions" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:layout_marginTop="4dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnRemoveAutoCaptions"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/str_remove_auto_captions"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:textAllCaps="false"
+                    android:textColor="#F44336"
+                    app:strokeColor="#F44336"
+                    app:cornerRadius="24dp"
+                    android:layout_marginEnd="8dp"/>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnAddSrtAlternative"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Upload .SRT"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:textAllCaps="false"
+                    android:textColor="@color/textColor"
+                    app:strokeColor="@color/outline"
+                    app:cornerRadius="24dp"/>
+            </LinearLayout>
         </LinearLayout>
 
         <!-- Subtitles active state -->
