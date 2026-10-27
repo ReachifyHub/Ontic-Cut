@@ -1,0 +1,67 @@
+# Vydra Privacy Policy
+
+**Last Updated:** October 2026
+**Application:** Vydra Video Editor (by BoostLyte)
+
+Welcome to Vydra. Your privacy and trust are our top priorities. This Privacy Policy explains how Vydra collects, uses, and safeguards information when you use our mobile application and related services.
+
+---
+
+### 1. Core Architecture: 100% Local Video Editing
+
+* **On-Device Processing:** All video cutting, trimming, canvas resizing, filter applications, color grading, stickers, text overlays, transitions, and video rendering occur **100% locally on your device**.
+* **Zero Video Uploads:** Your video files, photos, project metadata, and exported video files are **NEVER** uploaded to Vydra servers or third-party servers. Your media never leaves your hardware during standard video editing and exporting.
+
+---
+
+### 2. Cloud AI Features (Auto Assemble & Voiceover Transcription)
+
+Vydra provides optional cloud-powered features, including **AI Auto Assemble**, which aligns video scenes with voiceover timestamps.
+
+* **Audio Uploads for Transcription:** When you initiate AI Auto Assemble for a project, your selected voiceover audio file is securely uploaded via HTTPS to our dedicated, private cloud storage in Supabase.
+* **Whisper AI Processing:** The audio is processed by our secure transcription proxy using Whisper AI to detect speech timestamps and generate scene alignment boundaries.
+* **Immediate Deletion:** Once speech transcription is complete, **the uploaded audio file is permanently deleted from our cloud storage**.
+* **No Permanent Storage:** We do NOT keep copies of your audio files on our servers.
+* **No AI Training:** Your voiceover audio files and speech data are **NEVER used to train, retrain, or improve artificial intelligence or machine learning models**.
+
+---
+
+### 3. Account Information & Authentication
+
+* **Optional Account:** An account is optional. You can use Vydra as an offline video editor, assemble projects with pre-transcribed scripts, and export watermark-free videos without ever creating an account.
+* **Credentials & Storage:** When you create an account to use AI Auto Assemble, your email address and authentication tokens are managed by Supabase Authentication. On your device, access tokens are encrypted using hardware-backed Android KeyStore AES-256-GCM encryption. We never store plain text passwords or tokens.
+* **Account Deletion:** You may request account deletion or sign out at any time through the Account settings in the app.
+
+---
+
+### 4. Transcription Credits & Purchases
+
+* **Subscription & Credit Balances:** We store your user identifier and credit balance (in minutes) to verify eligibility for cloud transcription requests.
+* **Manual Purchases:** Credit top-ups are currently coordinated manually via WhatsApp. No financial payment card information is collected or processed directly within the Vydra application.
+
+---
+
+### 5. Data Security
+
+We implement rigorous technical and organizational measures to protect your information:
+* All communication with cloud services is encrypted using Transport Layer Security (TLS/HTTPS).
+* Cloud storage buckets use restricted zero-trust security rules with signed, time-limited access URLs.
+* On-device authentication credentials are encrypted using Android KeyStore cryptography.
+
+---
+
+### 6. Children's Privacy
+
+Vydra is not directed to individuals under the age of 13. We do not knowingly collect personal data from children.
+
+---
+
+### 7. Changes to This Policy
+
+We may update this Privacy Policy from time to time to reflect product enhancements or regulatory requirements. Any updates will be accessible directly within the application.
+
+---
+
+### 8. Contact Us
+
+If you have questions or concerns about this Privacy Policy or your data, please contact us via our official WhatsApp Community or email support@boostlyte.com.

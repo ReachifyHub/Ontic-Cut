@@ -278,4 +278,16 @@
     <string name="auth_dialog_sign_out_message">Are you sure you want to sign out? You will need to sign in again to use cloud transcription.</string>
     <string name="auth_signed_out_toast">Signed out successfully.</string>
     <string name="auth_signed_in_toast">Signed in successfully as %1$s.</string>
+
+    <!-- Transcription Credits & WhatsApp Purchase -->
+    <string name="credits_section_title">Transcription Credits</string>
+    <string name="credits_loading">Checking balance…</string>
+    <string name="credits_balance_format">Credits: %1$d minutes</string>
+    <string name="credits_balance_single">Credits: 1 minute</string>
+    <string name="credits_balance_zero">Credits: 0 minutes</string>
+    <string name="credits_refresh_cd">Refresh credit balance</string>
+    <string name="credits_btn_buy_whatsapp">Buy Credits (WhatsApp)</string>
+    <string name="credits_zero_dialog_title">No Transcription Credits</string>
+    <string name="credits_zero_dialog_message">You have 0 transcription credits. Auto Assemble requires credits to transcribe your voiceover with Whisper AI.\n\nPlease purchase credits via WhatsApp to continue.</string>
+    <string name="credits_low_banner">Low credit balance (%1$d mins remaining)</string>
 </resources>

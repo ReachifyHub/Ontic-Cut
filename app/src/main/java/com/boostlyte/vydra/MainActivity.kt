@@ -268,10 +268,10 @@ class MainActivity : AppCompatActivity() {
             com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.BUG_REPORT_URL)
         }
         binding.btnAboutPrivacyPolicy.setBounceClickListener {
-            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.PRIVACY_POLICY_URL)
+            LegalActivity.start(this, LegalActivity.DOC_PRIVACY_POLICY)
         }
         binding.btnAboutTermsOfUse.setBounceClickListener {
-            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.TERMS_OF_USE_URL)
+            LegalActivity.start(this, LegalActivity.DOC_TERMS_OF_USE)
         }
         binding.btnAboutOpenSourceLicenses.setBounceClickListener {
             com.mikepenz.aboutlibraries.LibsBuilder()
@@ -677,7 +677,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         view.findViewById<View>(R.id.tvOnboardingPrivacyPolicy)?.setOnClickListener {
-            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.PRIVACY_POLICY_URL)
+            LegalActivity.start(this, LegalActivity.DOC_PRIVACY_POLICY)
+        }
+
+        view.findViewById<View>(R.id.tvOnboardingTermsOfUse)?.setOnClickListener {
+            LegalActivity.start(this, LegalActivity.DOC_TERMS_OF_USE)
         }
 
         dialog.show()
@@ -857,6 +861,25 @@ class MainActivity : AppCompatActivity() {
             binding.btnAccountAction.setBounceClickListener {
                 showSignOutConfirmDialog()
             }
+
+            // Show and populate Transcription Credits Section
+            binding.layoutCreditsSection.visibility = View.VISIBLE
+            val cachedCredits = com.boostlyte.vydra.auth.CreditsManager.getCachedCredits(this)
+            displayCredits(cachedCredits, email)
+
+            binding.btnRefreshCredits.setBounceClickListener {
+                binding.tvCreditsBalance.text = getString(R.string.credits_loading)
+                lifecycleScope.launch {
+                    val fresh = com.boostlyte.vydra.auth.CreditsManager.fetchCredits(this@MainActivity)
+                    displayCredits(fresh, email)
+                    Toast.makeText(this@MainActivity, "Credits updated: $fresh mins", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            lifecycleScope.launch {
+                val fresh = com.boostlyte.vydra.auth.CreditsManager.fetchCredits(this@MainActivity)
+                displayCredits(fresh, email)
+            }
         } else {
             binding.tvAccountEmail.text = "Not Signed In"
             binding.tvAccountSubtitle.text = getString(R.string.auth_account_settings_desc_signed_out)
@@ -869,6 +892,28 @@ class MainActivity : AppCompatActivity() {
             binding.btnAccountAction.setBounceClickListener {
                 showAuthDialog()
             }
+
+            // Hide Credits Section when signed out
+            binding.layoutCreditsSection.visibility = View.GONE
+            binding.btnBuyCredits.visibility = View.GONE
+        }
+    }
+
+    private fun displayCredits(credits: Int, email: String?) {
+        binding.tvCreditsBalance.text = when (credits) {
+            0 -> getString(R.string.credits_balance_zero)
+            1 -> getString(R.string.credits_balance_single)
+            else -> getString(R.string.credits_balance_format, credits)
+        }
+        if (credits <= com.boostlyte.vydra.auth.CreditsManager.LOW_CREDIT_THRESHOLD_MINUTES) {
+            binding.tvCreditsBalance.setTextColor(ContextCompat.getColor(this, android.R.color.holo_orange_light))
+            binding.btnBuyCredits.visibility = View.VISIBLE
+            binding.btnBuyCredits.setBounceClickListener {
+                com.boostlyte.vydra.utils.AppUrls.openWhatsAppPurchase(this, email)
+            }
+        } else {
+            binding.tvCreditsBalance.setTextColor(ContextCompat.getColor(this, R.color.colorPrimary))
+            binding.btnBuyCredits.visibility = View.GONE
         }
     }
 
@@ -878,6 +923,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage(R.string.auth_dialog_sign_out_message)
             .setPositiveButton(R.string.auth_btn_sign_out) { _, _ ->
                 lifecycleScope.launch {
+                    com.boostlyte.vydra.auth.CreditsManager.invalidateCache(this@MainActivity)
                     com.boostlyte.vydra.transcription.SupabaseAuthManager.signOut(this@MainActivity)
                     Toast.makeText(this@MainActivity, R.string.auth_signed_out_toast, Toast.LENGTH_SHORT).show()
                     updateAccountSettingsUI()

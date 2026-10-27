@@ -1,0 +1,76 @@
+# Vydra Terms of Use
+
+**Last Updated:** October 2026
+**Application:** Vydra Video Editor (by BoostLyte)
+
+Please review these Terms of Use ("Terms") before using the Vydra mobile application ("App"). By downloading, accessing, or using Vydra, you agree to be bound by these Terms. If you do not agree to these Terms, do not use the App.
+
+---
+
+### 1. License & Local Device Use
+
+* **Grant of License:** BoostLyte grants you a personal, non-exclusive, non-transferable, revocable license to use Vydra on your Android device in accordance with these Terms.
+* **On-Device Ownership:** You retain full ownership of all video clips, images, sound recordings, and multimedia files imported, edited, or exported using the App. Vydra does not claim any intellectual property rights over your user content.
+* **Open Source Components:** Certain libraries within Vydra are distributed under open-source licenses. Full license information is accessible within the "Open Source Licenses" section in the App settings.
+
+---
+
+### 2. Cloud AI Features & Voiceover Transcription
+
+* **AI Auto Assemble:** Vydra provides an optional AI Auto Assemble feature that transcribes voiceovers and calculates scene boundaries using cloud infrastructure.
+* **Ephemeral Processing:** Voiceover audio files uploaded for AI transcription are used strictly to generate speech timestamps and are deleted immediately upon completion.
+* **No AI Training:** BoostLyte does not use your uploaded audio to train or fine-tune AI or machine learning models.
+* **Transcription Credits:** Cloud transcription requires credits (measured in audio minutes).
+  * Each transcription request consumes credits rounded up to the nearest whole minute.
+  * Transcription credits are non-refundable once successfully consumed for audio processing.
+  * Manual credit purchases are arranged via WhatsApp support. Once credited to your account by support staff, credits become available for Auto Assemble workflows.
+
+---
+
+### 3. User Accounts & Security
+
+* **Account Creation:** You may create an account using your email address to access cloud features. You agree to provide accurate information and keep your credentials confidential.
+* **Prohibited Conduct:** You agree NOT to:
+  * Upload audio or media that infringes on third-party intellectual property rights, copyrights, or privacy rights.
+  * Use the App to create defamatory, violent, illegal, or abusive content.
+  * Reverse engineer, decompile, or attempt to extract source code from proprietary server components, API endpoints, or Edge Functions.
+  * Circumvent authentication, credit validation, or rate-limiting systems.
+
+---
+
+### 4. Intellectual Property
+
+* The Vydra trademarks, logos, graphical assets, visual designs, and software source code (excluding open-source third-party dependencies) are the intellectual property of BoostLyte and its licensors.
+
+---
+
+### 5. Disclaimer of Warranties
+
+* **"AS IS" Basis:** The App and its features, including AI Auto Assemble and video export pipelines, are provided on an "AS IS" and "AS AVAILABLE" basis without warranties of any kind, whether express or implied.
+* **Performance & Hardware:** Video rendering performance, frame processing speeds, and export capabilities depend entirely on your mobile device hardware, processor, and available storage memory. BoostLyte does not guarantee uninterrupted or error-free operation on all Android hardware configurations.
+
+---
+
+### 6. Limitation of Liability
+
+* To the maximum extent permitted by applicable law, in no event shall BoostLyte, its developers, or affiliates be liable for any indirect, incidental, special, consequential, or punitive damages, including loss of data, loss of projects, or device storage failures resulting from your use of the App.
+* Users are strongly encouraged to maintain backups of their raw footage and exported media.
+
+---
+
+### 7. Termination
+
+* We reserve the right to suspend or terminate access to cloud services (such as AI Auto Assemble) for users who violate these Terms or abuse server infrastructure.
+* Local video editing and offline exporting capabilities remain operational on your device regardless of cloud account status.
+
+---
+
+### 8. Changes to Terms
+
+* BoostLyte reserves the right to modify these Terms at any time. Continued use of the App following any changes constitutes acceptance of the modified Terms.
+
+---
+
+### 9. Contact Information
+
+For support, questions about these Terms, or credit inquiries, please contact us through our official WhatsApp Community or email support@boostlyte.com.

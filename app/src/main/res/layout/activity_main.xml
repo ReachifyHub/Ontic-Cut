@@ -385,6 +385,89 @@
                     </LinearLayout>
                 </LinearLayout>
 
+                <!-- Transcription Credits Container (Visible when logged in) -->
+                <LinearLayout
+                    android:id="@+id/layoutCreditsSection"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:visibility="gone"
+                    android:layout_marginTop="12dp">
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:background="#22FFFFFF"
+                        android:layout_marginBottom="12dp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <ImageView
+                            android:layout_width="22dp"
+                            android:layout_height="22dp"
+                            android:src="@drawable/ic_bolt_24"
+                            app:tint="@color/colorPrimary"
+                            android:layout_marginEnd="10dp" />
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="@string/credits_section_title"
+                                android:textColor="@color/textColor"
+                                android:textSize="14sp"
+                                android:fontFamily="sans-serif-medium" />
+
+                            <TextView
+                                android:id="@+id/tvCreditsBalance"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:text="@string/credits_loading"
+                                android:textColor="@color/colorPrimary"
+                                android:textSize="13sp"
+                                android:fontFamily="sans-serif" />
+                        </LinearLayout>
+
+                        <ImageView
+                            android:id="@+id/btnRefreshCredits"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:padding="6dp"
+                            android:src="@drawable/ic_refresh_24"
+                            app:tint="@color/iconSecondary"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:contentDescription="@string/credits_refresh_cd" />
+                    </LinearLayout>
+
+                    <Button
+                        android:id="@+id/btnBuyCredits"
+                        android:layout_width="match_parent"
+                        android:layout_height="42dp"
+                        android:layout_marginTop="12dp"
+                        android:background="@drawable/rounded_button"
+                        android:text="@string/credits_btn_buy_whatsapp"
+                        android:textColor="@color/colorOnPrimary"
+                        android:textSize="13sp"
+                        android:fontFamily="sans-serif-medium"
+                        android:textAllCaps="false"
+                        android:drawableStart="@drawable/ic_whatsapp_24"
+                        android:drawablePadding="8dp"
+                        android:paddingHorizontal="16dp"
+                        android:visibility="gone" />
+                </LinearLayout>
+
                 <Button
                     android:id="@+id/btnAccountAction"
                     android:layout_width="match_parent"

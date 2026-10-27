@@ -84,6 +84,11 @@
             android:exported="false"
             android:theme="@style/Editor" />
 
+        <activity
+            android:name=".LegalActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme" />
+
         <service
             android:name=".services.ExportService"
             android:foregroundServiceType="dataSync"

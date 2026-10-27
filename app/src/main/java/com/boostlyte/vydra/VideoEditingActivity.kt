@@ -3352,6 +3352,18 @@ class VideoEditingActivity : AppCompatActivity() {
                 return@setBounceClickListener
             }
 
+            val manager = AutoAssembleManager(this@VideoEditingActivity)
+            val isCached = manager.findCachedTranscription(primaryAudioOp.audioUri) != null
+            val isLoggedIn = com.boostlyte.vydra.transcription.SupabaseAuthManager.isLoggedIn(this)
+
+            if (!isCached && isLoggedIn) {
+                val cachedCredits = com.boostlyte.vydra.auth.CreditsManager.getCachedCredits(this)
+                if (cachedCredits <= 0) {
+                    showZeroCreditsDialog()
+                    return@setBounceClickListener
+                }
+            }
+
             // Hide keyboard
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
             imm?.hideSoftInputFromWindow(etScriptMap.windowToken, 0)
@@ -3508,14 +3520,34 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                     is AutoAssembleResult.Error -> {
                         layoutError.visibility = View.VISIBLE
-                        tvError.text = result.message
-                        layoutError.setOnClickListener(null)
+                        if (result.isCreditError) {
+                            tvError.text = "${result.message}\nTap here to buy credits via WhatsApp."
+                            layoutError.setOnClickListener {
+                                showZeroCreditsDialog()
+                            }
+                            showZeroCreditsDialog()
+                        } else {
+                            tvError.text = result.message
+                            layoutError.setOnClickListener(null)
+                        }
                     }
                 }
             }
         }
 
         bottomSheet.show()
+    }
+
+    private fun showZeroCreditsDialog() {
+        val email = com.boostlyte.vydra.transcription.SupabaseAuthManager.getCurrentUserEmail(this)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.credits_zero_dialog_title)
+            .setMessage(R.string.credits_zero_dialog_message)
+            .setPositiveButton(R.string.credits_btn_buy_whatsapp) { _, _ ->
+                com.boostlyte.vydra.utils.AppUrls.openWhatsAppPurchase(this, email)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
     }
 
     private fun executeAssembly(
