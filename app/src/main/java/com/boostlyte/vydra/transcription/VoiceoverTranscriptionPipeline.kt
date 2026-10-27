@@ -39,21 +39,56 @@ class VoiceoverTranscriptionPipeline(
     companion object {
         const val BLOCKED_AUTH_MESSAGE = "Transcription blocked: Valid user JWT is not yet available. Authentication UI is pending."
 
+        private fun extractBackendErrorMessage(errorBody: String): String? {
+            if (errorBody.isBlank()) return null
+            try {
+                if (errorBody.contains("{")) {
+                    val jsonStart = errorBody.indexOf("{")
+                    val jsonEnd = errorBody.lastIndexOf("}")
+                    if (jsonStart in 0 until jsonEnd) {
+                        val jsonStr = errorBody.substring(jsonStart, jsonEnd + 1)
+                        val parsed = com.google.gson.JsonParser.parseString(jsonStr).asJsonObject
+                        val err = parsed.get("error")?.asString
+                            ?: parsed.get("message")?.asString
+                            ?: parsed.get("details")?.asString
+                        if (!err.isNullOrBlank()) return err
+                    }
+                }
+            } catch (_: Exception) {}
+            return errorBody.trim().takeIf { it.isNotBlank() && it.length < 200 }
+        }
+
         fun classifyTranscriptionError(error: Throwable?, statusCode: Int? = null): Pair<ErrorCode, String> {
+            val apiException = error as? SupabaseWhisperTranscriptionProvider.TranscriptionApiException
+            val actualStatusCode = statusCode ?: apiException?.statusCode
+            val rawErrorBody = apiException?.errorBody ?: ""
+            val backendMsg = extractBackendErrorMessage(rawErrorBody)
             val msg = error?.message ?: "Whisper transcription failed"
-            val actualStatusCode = statusCode ?: (error as? SupabaseWhisperTranscriptionProvider.TranscriptionApiException)?.statusCode
+            val combinedText = "$msg $rawErrorBody"
+
+            val isAudioTooLong = combinedText.contains("exceed", ignoreCase = true) ||
+                    combinedText.contains("duration", ignoreCase = true) ||
+                    combinedText.contains("too long", ignoreCase = true) ||
+                    combinedText.contains("too large", ignoreCase = true) ||
+                    combinedText.contains("limit", ignoreCase = true)
+
             return when {
-                actualStatusCode == 401 || actualStatusCode == 403 -> {
+                actualStatusCode == 401 || actualStatusCode == 403 || combinedText.contains("jwt", ignoreCase = true) -> {
                     Pair(ErrorCode.TRANSCRIPTION_AUTH_MISSING, "Authentication Error: Please sign in or re-authenticate.")
                 }
-                actualStatusCode == 402 || msg.contains("credit", ignoreCase = true) -> {
-                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, "Insufficient Credits: You do not have enough credits to complete this transcription.")
+                actualStatusCode == 402 || combinedText.contains("credit", ignoreCase = true) -> {
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, backendMsg ?: "Insufficient Credits: You do not have enough credits to complete this transcription.")
                 }
-                actualStatusCode == 400 -> {
+                actualStatusCode == 400 && isAudioTooLong -> {
                     Pair(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, "Audio Too Long: Voiceover exceeds maximum allowed duration.")
                 }
+                actualStatusCode == 400 -> {
+                    val cleanMsg = backendMsg ?: msg.takeIf { !it.contains("TranscriptionApiException") } ?: "Bad Request: Unable to transcribe voiceover. Please verify the audio file format."
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, cleanMsg)
+                }
                 actualStatusCode != null && actualStatusCode in 500..599 -> {
-                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, "Server Error (HTTP $actualStatusCode): The transcription service encountered an internal error. Please try again later.")
+                    val serverMsg = backendMsg ?: "The transcription service encountered an internal error. Please try again later."
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, "Server Error (HTTP $actualStatusCode): $serverMsg")
                 }
                 error is java.net.SocketTimeoutException -> {
                     Pair(ErrorCode.TRANSCRIPTION_NETWORK_ERROR, "Connection Timed Out: The transcription server took too long to respond. Please try again.")
@@ -62,7 +97,7 @@ class VoiceoverTranscriptionPipeline(
                     Pair(ErrorCode.TRANSCRIPTION_NETWORK_ERROR, "No Internet Connection: Please check your network connection and try again.")
                 }
                 else -> {
-                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, msg)
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, backendMsg ?: msg)
                 }
             }
         }

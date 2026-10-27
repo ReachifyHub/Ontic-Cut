@@ -854,21 +854,23 @@ class VideoEditingActivity : AppCompatActivity() {
         })
 
         // Update play/pause button icon on playback state change
-        player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) {
-                    btnPlayPause.setImageResource(R.drawable.ic_pause_24)
-                    if (::btnFullscreenPlayPause.isInitialized) {
-                        btnFullscreenPlayPause.setImageResource(R.drawable.ic_pause_24)
-                    }
-                } else {
-                    btnPlayPause.setImageResource(R.drawable.ic_play_24)
-                    if (::btnFullscreenPlayPause.isInitialized) {
-                        btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
+        if (::player.isInitialized) {
+            player.addListener(object : Player.Listener {
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    if (isPlaying) {
+                        btnPlayPause.setImageResource(R.drawable.ic_pause_24)
+                        if (::btnFullscreenPlayPause.isInitialized) {
+                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_pause_24)
+                        }
+                    } else {
+                        btnPlayPause.setImageResource(R.drawable.ic_play_24)
+                        if (::btnFullscreenPlayPause.isInitialized) {
+                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
+                        }
                     }
                 }
-            }
-        })
+            })
+        }
     }
 
 
@@ -6058,9 +6060,12 @@ class VideoEditingActivity : AppCompatActivity() {
             }
         }
         
-        if (videoUri != null) {
+        if (!::player.isInitialized) {
             player = ExoPlayer.Builder(this).build()
             playerView.player = player
+        }
+
+        if (videoUri != null) {
             showLoading("Loading...")
 
             player.addListener(object : Player.Listener {
@@ -6069,6 +6074,9 @@ class VideoEditingActivity : AppCompatActivity() {
                         // Reset UI components when video reaches the end
                         val btnPlayPause = findViewById<ImageButton>(R.id.btnPlayPause)
                         btnPlayPause.setImageResource(R.drawable.ic_play_24)
+                        if (::btnFullscreenPlayPause.isInitialized) {
+                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
+                        }
                         isProgrammaticScroll = true
                         timelineHorizontalScroll.scrollTo((getTotalSequenceDuration() * pixelsPerMs).toInt(), 0)
                         isProgrammaticScroll = false
@@ -6104,9 +6112,17 @@ class VideoEditingActivity : AppCompatActivity() {
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     if (isPlaying) {
+                        btnPlayPause.setImageResource(R.drawable.ic_pause_24)
+                        if (::btnFullscreenPlayPause.isInitialized) {
+                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_pause_24)
+                        }
                         startProgressUpdater()
                         syncBgAudio(getGlobalPosition(), true)
                     } else {
+                        btnPlayPause.setImageResource(R.drawable.ic_play_24)
+                        if (::btnFullscreenPlayPause.isInitialized) {
+                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
+                        }
                         stopProgressUpdater()
                         pauseAllBgAudio()
                     }
