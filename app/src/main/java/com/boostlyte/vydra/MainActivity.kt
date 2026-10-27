@@ -35,6 +35,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var projectAdapter: ProjectAdapter
+    private val authStateListener: (Boolean, String?) -> Unit = { _, _ ->
+        runOnUiThread {
+            updateAccountSettingsUI()
+        }
+    }
     private val selectVideoLauncher =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri>? ->
             if (!uris.isNullOrEmpty()) {
@@ -238,6 +243,13 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnChangeDefaultEncoder.setBounceClickListener {
             showEncoderDialog()
+        }
+
+        // Initialize Supabase Account UI in Settings
+        com.boostlyte.vydra.transcription.SupabaseAuthManager.addAuthStateListener(authStateListener)
+        updateAccountSettingsUI()
+        lifecycleScope.launch {
+            com.boostlyte.vydra.transcription.SupabaseAuthManager.restoreSessionOnAppStart(this@MainActivity)
         }
 
         // Set dynamic About version tag
@@ -829,8 +841,69 @@ class MainActivity : AppCompatActivity() {
         startActivity(intent)
     }
 
+    private fun updateAccountSettingsUI() {
+        val isLoggedIn = com.boostlyte.vydra.transcription.SupabaseAuthManager.isLoggedIn(this)
+        val email = com.boostlyte.vydra.transcription.SupabaseAuthManager.getCurrentUserEmail(this)
+
+        if (isLoggedIn && !email.isNullOrBlank()) {
+            binding.tvAccountEmail.text = email
+            binding.tvAccountSubtitle.text = getString(R.string.auth_account_settings_desc_signed_in)
+            binding.tvAccountBadge.text = "Cloud Sync Active"
+            binding.tvAccountBadge.setTextColor(ContextCompat.getColor(this, R.color.colorPrimary))
+            binding.ivAccountAvatar.setColorFilter(ContextCompat.getColor(this, R.color.colorPrimary))
+            binding.btnAccountAction.text = getString(R.string.auth_btn_sign_out)
+            binding.btnAccountAction.setBackgroundResource(R.drawable.rounded_button_dark)
+            binding.btnAccountAction.setTextColor(ContextCompat.getColor(this, R.color.textColor))
+            binding.btnAccountAction.setBounceClickListener {
+                showSignOutConfirmDialog()
+            }
+        } else {
+            binding.tvAccountEmail.text = "Not Signed In"
+            binding.tvAccountSubtitle.text = getString(R.string.auth_account_settings_desc_signed_out)
+            binding.tvAccountBadge.text = "Offline Mode"
+            binding.tvAccountBadge.setTextColor(ContextCompat.getColor(this, R.color.iconSecondary))
+            binding.ivAccountAvatar.setColorFilter(ContextCompat.getColor(this, R.color.iconSecondary))
+            binding.btnAccountAction.text = getString(R.string.auth_btn_sign_in)
+            binding.btnAccountAction.setBackgroundResource(R.drawable.rounded_button)
+            binding.btnAccountAction.setTextColor(ContextCompat.getColor(this, R.color.colorOnPrimary))
+            binding.btnAccountAction.setBounceClickListener {
+                showAuthDialog()
+            }
+        }
+    }
+
+    private fun showSignOutConfirmDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.auth_dialog_sign_out_title)
+            .setMessage(R.string.auth_dialog_sign_out_message)
+            .setPositiveButton(R.string.auth_btn_sign_out) { _, _ ->
+                lifecycleScope.launch {
+                    com.boostlyte.vydra.transcription.SupabaseAuthManager.signOut(this@MainActivity)
+                    Toast.makeText(this@MainActivity, R.string.auth_signed_out_toast, Toast.LENGTH_SHORT).show()
+                    updateAccountSettingsUI()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showAuthDialog() {
+        com.boostlyte.vydra.auth.AuthBottomSheetDialog(
+            context = this,
+            onAuthenticated = {
+                updateAccountSettingsUI()
+            }
+        ).show()
+    }
+
     override fun onResume() {
         super.onResume()
         loadSavedProjects()
+        updateAccountSettingsUI()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        com.boostlyte.vydra.transcription.SupabaseAuthManager.removeAuthStateListener(authStateListener)
     }
 }

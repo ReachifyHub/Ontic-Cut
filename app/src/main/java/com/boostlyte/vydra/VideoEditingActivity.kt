@@ -3487,11 +3487,29 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                     is AutoAssembleResult.BlockedAuth -> {
                         layoutError.visibility = View.VISIBLE
-                        tvError.text = result.message
+                        tvError.text = "${result.message} Tap here to sign in."
+                        layoutError.setOnClickListener {
+                            com.boostlyte.vydra.auth.AuthBottomSheetDialog(
+                                context = this@VideoEditingActivity,
+                                onAuthenticated = {
+                                    layoutError.visibility = View.GONE
+                                    btnCalculate.performClick()
+                                }
+                            ).show()
+                        }
+                        // Proactively launch contextual sign-in sheet
+                        com.boostlyte.vydra.auth.AuthBottomSheetDialog(
+                            context = this@VideoEditingActivity,
+                            onAuthenticated = {
+                                layoutError.visibility = View.GONE
+                                btnCalculate.performClick()
+                            }
+                        ).show()
                     }
                     is AutoAssembleResult.Error -> {
                         layoutError.visibility = View.VISIBLE
                         tvError.text = result.message
+                        layoutError.setOnClickListener(null)
                     }
                 }
             }

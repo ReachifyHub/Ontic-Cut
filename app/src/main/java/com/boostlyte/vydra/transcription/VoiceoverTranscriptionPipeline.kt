@@ -106,8 +106,8 @@ class VoiceoverTranscriptionPipeline(
             )
         }
 
-        // Step 2: Check for a valid Supabase user JWT
-        val userJwt = jwtProvider?.invoke() ?: (context?.let { SupabaseAuthManager.getCurrentUserJwt(it) })
+        // Step 2: Check for a valid Supabase user JWT (with auto-refresh)
+        var userJwt = jwtProvider?.invoke() ?: (context?.let { SupabaseAuthManager.getValidAccessToken(it) })
         if (userJwt.isNullOrBlank()) {
             Log.w(TAG, BLOCKED_AUTH_MESSAGE)
             return@withContext TranscriptionPipelineResult.BlockedAuth(BLOCKED_AUTH_MESSAGE)
@@ -125,14 +125,36 @@ class VoiceoverTranscriptionPipeline(
             else -> "audio/*"
         }
 
+        var hasRetriedAuth = false
+
         // Step 3: Upload local audio file to Supabase Storage bucket ("transcription-uploads")
         onProgress(20, "Uploading voiceover to secure cloud storage...")
-        val uploadResult = storageClient.uploadAudioFile(
+        var uploadResult = storageClient.uploadAudioFile(
             audioFile = localAudioFile,
             remotePath = remoteFileName,
             jwt = userJwt,
             mimeType = mimeType
         )
+
+        // Check for 401 on upload and retry once with refreshed token
+        if (uploadResult.isFailure && context != null && !hasRetriedAuth) {
+            val error = uploadResult.exceptionOrNull()
+            val statusCode = (error as? SupabaseStorageClient.HttpException)?.statusCode
+            if (statusCode == 401) {
+                Log.i(TAG, "Storage upload returned 401. Refreshing token and retrying...")
+                hasRetriedAuth = true
+                val refreshedJwt = SupabaseAuthManager.getValidAccessToken(context, forceRefresh = true)
+                if (!refreshedJwt.isNullOrBlank()) {
+                    userJwt = refreshedJwt
+                    uploadResult = storageClient.uploadAudioFile(
+                        audioFile = localAudioFile,
+                        remotePath = remoteFileName,
+                        jwt = userJwt,
+                        mimeType = mimeType
+                    )
+                }
+            }
+        }
 
         if (uploadResult.isFailure) {
             val error = uploadResult.exceptionOrNull()
@@ -147,11 +169,30 @@ class VoiceoverTranscriptionPipeline(
 
         // Step 4: Generate temporary signed HTTPS URL for the uploaded audio file
         onProgress(45, "Generating secure media access URL...")
-        val signedUrlResult = storageClient.createSignedUrl(
+        var signedUrlResult = storageClient.createSignedUrl(
             remotePath = remoteFileName,
             jwt = userJwt,
             expiresInSeconds = 3600
         )
+
+        // Check for 401 on signed URL and retry once with refreshed token
+        if (signedUrlResult.isFailure && context != null && !hasRetriedAuth) {
+            val error = signedUrlResult.exceptionOrNull()
+            val statusCode = (error as? SupabaseStorageClient.HttpException)?.statusCode
+            if (statusCode == 401) {
+                Log.i(TAG, "Signed URL returned 401. Refreshing token and retrying...")
+                hasRetriedAuth = true
+                val refreshedJwt = SupabaseAuthManager.getValidAccessToken(context, forceRefresh = true)
+                if (!refreshedJwt.isNullOrBlank()) {
+                    userJwt = refreshedJwt
+                    signedUrlResult = storageClient.createSignedUrl(
+                        remotePath = remoteFileName,
+                        jwt = userJwt,
+                        expiresInSeconds = 3600
+                    )
+                }
+            }
+        }
 
         if (signedUrlResult.isFailure) {
             val error = signedUrlResult.exceptionOrNull()
@@ -170,11 +211,30 @@ class VoiceoverTranscriptionPipeline(
 
         // Step 5: Call "transcribe-whisper" Edge Function with signed URL and duration
         onProgress(65, "Transcribing voiceover with Whisper AI...")
-        val transcribeResult = transcriptionProvider.transcribeAudio(
+        var transcribeResult = transcriptionProvider.transcribeAudio(
             signedAudioUrl = signedAudioUrl,
             audioDurationSeconds = audioDurationSeconds,
             jwt = userJwt
         )
+
+        // Check for 401 on Edge Function and retry once with refreshed token
+        if (transcribeResult.isFailure && context != null && !hasRetriedAuth) {
+            val error = transcribeResult.exceptionOrNull()
+            val statusCode = (error as? SupabaseWhisperTranscriptionProvider.TranscriptionApiException)?.statusCode
+            if (statusCode == 401) {
+                Log.i(TAG, "Edge Function returned 401. Refreshing token and retrying...")
+                hasRetriedAuth = true
+                val refreshedJwt = SupabaseAuthManager.getValidAccessToken(context, forceRefresh = true)
+                if (!refreshedJwt.isNullOrBlank()) {
+                    userJwt = refreshedJwt
+                    transcribeResult = transcriptionProvider.transcribeAudio(
+                        signedAudioUrl = signedAudioUrl,
+                        audioDurationSeconds = audioDurationSeconds,
+                        jwt = userJwt
+                    )
+                }
+            }
+        }
 
         if (transcribeResult.isFailure) {
             val error = transcribeResult.exceptionOrNull()

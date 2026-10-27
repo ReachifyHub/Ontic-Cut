@@ -242,4 +242,40 @@
     <string name="str_transcription_err_server">Server Error: The transcription service encountered an internal error. Please try again later.</string>
     <string name="str_transcription_err_auth">Authentication Error: Please sign in or re-authenticate.</string>
     <string name="str_transcription_err_credits">Insufficient Credits: You do not have enough credits to complete this transcription.</string>
+
+    <!-- Supabase Auth Strings -->
+    <string name="auth_title">Vydra Account</string>
+    <string name="auth_subtitle">Sign in to enable AI voiceover transcription</string>
+    <string name="auth_tab_sign_in">Sign In</string>
+    <string name="auth_tab_sign_up">Sign Up</string>
+    <string name="auth_email_hint">Email address</string>
+    <string name="auth_password_hint">Password</string>
+    <string name="auth_btn_sign_in">Sign In</string>
+    <string name="auth_btn_sign_up">Create Account</string>
+    <string name="auth_forgot_password">Forgot password?</string>
+    <string name="auth_reset_password_title">Reset Password</string>
+    <string name="auth_reset_password_desc">Enter your email address and we will send you a password reset link.</string>
+    <string name="auth_send_reset_link">Send Reset Link</string>
+    <string name="auth_reset_link_sent">Password reset link sent! Check your email inbox.</string>
+    <string name="auth_confirm_email_title">Confirm Your Email</string>
+    <string name="auth_confirm_email_desc">We sent a verification link to %1$s.\nPlease click the link to confirm your account, then sign in.</string>
+    <string name="auth_btn_resend_email">Resend Confirmation Email</string>
+    <string name="auth_email_resent">Confirmation email resent! Please check your inbox.</string>
+    <string name="auth_btn_back_to_sign_in">Back to Sign In</string>
+    <string name="auth_err_invalid_email">Please enter a valid email address.</string>
+    <string name="auth_err_short_password">Password must be at least 6 characters.</string>
+    <string name="auth_err_invalid_credentials">Invalid email or password. Please try again.</string>
+    <string name="auth_err_email_not_confirmed">Your email has not been confirmed yet. Please verify your email before signing in.</string>
+    <string name="auth_err_user_exists">An account with this email already exists.</string>
+    <string name="auth_err_rate_limited">Too many attempts. Please wait a few moments and try again.</string>
+    <string name="auth_err_network">Network connection error. Please check your internet connection.</string>
+    <string name="auth_err_server">Authentication server error. Please try again later.</string>
+    <string name="auth_account_settings_title">Cloud Account</string>
+    <string name="auth_account_settings_desc_signed_out">Sign in to transcribe voiceovers with AI. Local editing, timeline assembly, and export are 100% free and offline.</string>
+    <string name="auth_account_settings_desc_signed_in">Signed in • AI voiceover transcription active</string>
+    <string name="auth_btn_sign_out">Sign Out</string>
+    <string name="auth_dialog_sign_out_title">Sign Out</string>
+    <string name="auth_dialog_sign_out_message">Are you sure you want to sign out? You will need to sign in again to use cloud transcription.</string>
+    <string name="auth_signed_out_toast">Signed out successfully.</string>
+    <string name="auth_signed_in_toast">Signed in successfully as %1$s.</string>
 </resources>

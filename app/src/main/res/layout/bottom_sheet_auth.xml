@@ -1,0 +1,424 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_bottom_sheet"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingTop="12dp"
+        android:paddingBottom="28dp">
+
+        <!-- Bottom Sheet Drag Handle -->
+        <View
+            android:layout_width="36dp"
+            android:layout_height="4dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="16dp"
+            android:alpha="0.4"
+            android:background="@color/outlineVariant" />
+
+        <!-- Title and Close Header -->
+        <RelativeLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="20dp"
+            android:layout_marginBottom="4dp">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_alignParentStart="true"
+                android:layout_toStartOf="@+id/btnCloseAuth">
+
+                <ImageView
+                    android:layout_width="22dp"
+                    android:layout_height="22dp"
+                    android:src="@drawable/ic_bolt_24"
+                    app:tint="@color/colorPrimary"
+                    android:layout_marginEnd="8dp" />
+
+                <TextView
+                    android:id="@+id/tvAuthTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/auth_title"
+                    android:textColor="@color/textColor"
+                    android:textSize="18sp"
+                    android:fontFamily="sans-serif-bold" />
+            </LinearLayout>
+
+            <ImageButton
+                android:id="@+id/btnCloseAuth"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_alignParentEnd="true"
+                android:layout_centerVertical="true"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_close_24"
+                android:padding="6dp"
+                android:scaleType="fitCenter"
+                android:contentDescription="Close"
+                app:tint="@color/activeTool" />
+        </RelativeLayout>
+
+        <!-- Subtitle -->
+        <TextView
+            android:id="@+id/tvAuthSubtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="20dp"
+            android:text="@string/auth_subtitle"
+            android:textColor="@color/toolTextInactive"
+            android:textSize="13sp"
+            android:fontFamily="sans-serif"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Segmented Tab Switcher: Sign In vs Sign Up -->
+        <LinearLayout
+            android:id="@+id/layoutAuthTabs"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginHorizontal="20dp"
+            android:background="@drawable/bg_auth_tabs"
+            android:orientation="horizontal"
+            android:padding="4dp"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:id="@+id/btnTabSignIn"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@drawable/bg_tab_active_pill"
+                android:gravity="center"
+                android:text="@string/auth_tab_sign_in"
+                android:textColor="@color/colorOnPrimary"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:clickable="true"
+                android:focusable="true" />
+
+            <TextView
+                android:id="@+id/btnTabSignUp"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:background="@android:color/transparent"
+                android:gravity="center"
+                android:text="@string/auth_tab_sign_up"
+                android:textColor="@color/toolTextInactive"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:clickable="true"
+                android:focusable="true" />
+        </LinearLayout>
+
+        <!-- Error Message Banner -->
+        <LinearLayout
+            android:id="@+id/layoutAuthError"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="20dp"
+            android:background="@drawable/bg_aspect_ratio_item"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:layout_marginBottom="14dp"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_warning_24"
+                app:tint="@android:color/holo_red_light"
+                android:layout_marginEnd="10dp" />
+
+            <TextView
+                android:id="@+id/tvAuthErrorMessage"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@android:color/holo_red_light"
+                android:textSize="13sp"
+                android:fontFamily="sans-serif" />
+        </LinearLayout>
+
+        <!-- Main Form Container -->
+        <LinearLayout
+            android:id="@+id/layoutAuthForm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="20dp"
+            android:orientation="vertical"
+            android:visibility="visible">
+
+            <!-- Email Input -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/bg_auth_input"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="14dp"
+                android:layout_marginBottom="12dp">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_mail_24"
+                    app:tint="@color/iconSecondary"
+                    android:layout_marginEnd="10dp" />
+
+                <EditText
+                    android:id="@+id/etAuthEmail"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@null"
+                    android:hint="@string/auth_email_hint"
+                    android:textColorHint="@color/toolTextInactive"
+                    android:textColor="@color/textColor"
+                    android:textSize="14sp"
+                    android:inputType="textEmailAddress"
+                    android:maxLines="1"
+                    android:imeOptions="actionNext" />
+            </LinearLayout>
+
+            <!-- Password Input -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/bg_auth_input"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="14dp"
+                android:layout_marginBottom="12dp">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_lock_24"
+                    app:tint="@color/iconSecondary"
+                    android:layout_marginEnd="10dp" />
+
+                <EditText
+                    android:id="@+id/etAuthPassword"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@null"
+                    android:hint="@string/auth_password_hint"
+                    android:textColorHint="@color/toolTextInactive"
+                    android:textColor="@color/textColor"
+                    android:textSize="14sp"
+                    android:inputType="textPassword"
+                    android:maxLines="1"
+                    android:imeOptions="actionDone" />
+            </LinearLayout>
+
+            <!-- Forgot Password Link -->
+            <TextView
+                android:id="@+id/tvForgotPassword"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end"
+                android:text="@string/auth_forgot_password"
+                android:textColor="@color/colorPrimary"
+                android:textSize="13sp"
+                android:fontFamily="sans-serif-medium"
+                android:paddingVertical="4dp"
+                android:clickable="true"
+                android:focusable="true"
+                android:layout_marginBottom="16dp" />
+
+            <!-- Submit Button -->
+            <Button
+                android:id="@+id/btnAuthSubmit"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/rounded_button"
+                android:text="@string/auth_btn_sign_in"
+                android:textColor="@color/colorOnPrimary"
+                android:textSize="15sp"
+                android:fontFamily="sans-serif-medium"
+                android:textAllCaps="false" />
+
+            <!-- Progress Indicator -->
+            <ProgressBar
+                android:id="@+id/progressAuth"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="16dp"
+                android:indeterminateTint="@color/colorPrimary"
+                android:visibility="gone" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="Account is optional. Video editing, offline assembly, and export work completely without signing in."
+                android:textColor="@color/toolTextInactive"
+                android:textSize="12sp"
+                android:gravity="center" />
+        </LinearLayout>
+
+        <!-- Email Confirmation Required View -->
+        <LinearLayout
+            android:id="@+id/layoutConfirmEmail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="20dp"
+            android:orientation="vertical"
+            android:gravity="center_horizontal"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:src="@drawable/ic_mail_24"
+                app:tint="@color/colorPrimary"
+                android:layout_marginBottom="12dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/auth_confirm_email_title"
+                android:textColor="@color/textColor"
+                android:textSize="18sp"
+                android:fontFamily="sans-serif-bold"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/tvConfirmEmailDesc"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/toolTextInactive"
+                android:textSize="13sp"
+                android:gravity="center"
+                android:layout_marginBottom="20dp" />
+
+            <Button
+                android:id="@+id/btnResendConfirmation"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/rounded_button"
+                android:text="@string/auth_btn_resend_email"
+                android:textColor="@color/colorOnPrimary"
+                android:textSize="15sp"
+                android:fontFamily="sans-serif-medium"
+                android:textAllCaps="false"
+                android:layout_marginBottom="12dp" />
+
+            <Button
+                android:id="@+id/btnBackToSignInFromConfirm"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/rounded_button_dark"
+                android:text="@string/auth_btn_back_to_sign_in"
+                android:textColor="@color/textColor"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:textAllCaps="false" />
+
+            <ProgressBar
+                android:id="@+id/progressResendEmail"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_marginTop="12dp"
+                android:indeterminateTint="@color/colorPrimary"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- Password Recovery View -->
+        <LinearLayout
+            android:id="@+id/layoutPasswordRecovery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="20dp"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/auth_reset_password_title"
+                android:textColor="@color/textColor"
+                android:textSize="18sp"
+                android:fontFamily="sans-serif-bold"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/auth_reset_password_desc"
+                android:textColor="@color/toolTextInactive"
+                android:textSize="13sp"
+                android:layout_marginBottom="16dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/bg_auth_input"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="14dp"
+                android:layout_marginBottom="16dp">
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_mail_24"
+                    app:tint="@color/iconSecondary"
+                    android:layout_marginEnd="10dp" />
+
+                <EditText
+                    android:id="@+id/etResetPasswordEmail"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@null"
+                    android:hint="@string/auth_email_hint"
+                    android:textColorHint="@color/toolTextInactive"
+                    android:textColor="@color/textColor"
+                    android:textSize="14sp"
+                    android:inputType="textEmailAddress"
+                    android:maxLines="1" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnSendPasswordReset"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/rounded_button"
+                android:text="@string/auth_send_reset_link"
+                android:textColor="@color/colorOnPrimary"
+                android:textSize="15sp"
+                android:fontFamily="sans-serif-medium"
+                android:textAllCaps="false"
+                android:layout_marginBottom="12dp" />
+
+            <Button
+                android:id="@+id/btnBackToSignInFromReset"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="@drawable/rounded_button_dark"
+                android:text="@string/auth_btn_back_to_sign_in"
+                android:textColor="@color/textColor"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:textAllCaps="false" />
+
+            <ProgressBar
+                android:id="@+id/progressResetPassword"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="12dp"
+                android:indeterminateTint="@color/colorPrimary"
+                android:visibility="gone" />
+        </LinearLayout>
+
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>
