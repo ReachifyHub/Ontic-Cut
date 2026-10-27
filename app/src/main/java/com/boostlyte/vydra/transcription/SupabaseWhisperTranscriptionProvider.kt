@@ -69,6 +69,7 @@ class SupabaseWhisperTranscriptionProvider(
             }
 
             // Construct JSON request body: { "audioUrl": "...", "audioDurationSeconds": 123 }
+            Log.i(TAG, "Calling Edge Function '$functionName' with audioDurationSeconds: ${audioDurationSeconds}s")
             val requestPayload = TranscribeWhisperRequest(
                 audioUrl = signedAudioUrl,
                 audioDurationSeconds = audioDurationSeconds
@@ -97,8 +98,9 @@ class SupabaseWhisperTranscriptionProvider(
                 Result.success(parsedResponse)
             } else {
                 val errorBody = readStreamSafely(connection.errorStream)
+                Log.e(TAG, "Edge Function '$functionName' failed - HTTP status: $statusCode, errorBody: $errorBody")
                 val descriptiveMessage = when (statusCode) {
-                    400 -> "Bad Request from '$functionName' (audio may exceed limit or invalid URL): $errorBody"
+                    400 -> "Bad Request from '$functionName': $errorBody"
                     401 -> "Unauthorized call to '$functionName': User JWT is invalid or expired: $errorBody"
                     402 -> "Payment required / Insufficient credits for transcription: $errorBody"
                     403 -> "Forbidden access to '$functionName': $errorBody"

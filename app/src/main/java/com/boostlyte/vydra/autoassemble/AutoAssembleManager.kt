@@ -146,6 +146,7 @@ class AutoAssembleManager(
         projectName: String? = null,
         onProgress: (progress: Int, statusMessage: String) -> Unit = { _, _ -> }
     ): AutoAssembleResult = withContext(Dispatchers.IO) {
+        Log.i(TAG, "Starting Auto Assemble - duration: ${audioDurationSeconds}s, URI scheme: ${audioUri.scheme}")
         val parsedScenes = ScriptMapParser.parse(rawScriptMap)
         if (parsedScenes.isEmpty()) {
             return@withContext AutoAssembleResult.Error(

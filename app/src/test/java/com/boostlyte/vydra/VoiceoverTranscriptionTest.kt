@@ -230,4 +230,102 @@ class VoiceoverTranscriptionTest {
         assertTrue(ex is IllegalStateException)
         assertTrue(ex?.message?.contains("JWT") == true)
     }
+
+    @Test
+    fun testAudioDurationCalculation_36SecondsAudioYields36Seconds() {
+        // Test audio duration calculation as performed in VideoEditingActivity:
+        // durationSecs = ((durationMs + 999) / 1000).toInt().coerceAtLeast(1)
+        val durationMs36Exact = 36000L
+        val durationSecs36 = ((durationMs36Exact + 999) / 1000).toInt().coerceAtLeast(1)
+        assertEquals(36, durationSecs36)
+
+        // 35.1s to 36.0s rounds/ceilings to 36s
+        val durationMs35_2 = 35200L
+        val durationSecs35_2 = ((durationMs35_2 + 999) / 1000).toInt().coerceAtLeast(1)
+        assertEquals(36, durationSecs35_2)
+
+        // Request JSON payload contains exactly 36 seconds
+        val request = TranscribeWhisperRequest(
+            audioUrl = "https://rqnbumhburadomrdmzhp.supabase.co/storage/v1/object/sign/transcription-uploads/test_36s.m4a?token=xyz",
+            audioDurationSeconds = durationSecs36
+        )
+        val json = Gson().toJson(request)
+        val parsedJson = JsonParser.parseString(json).asJsonObject
+        assertEquals(36, parsedJson.get("audioDurationSeconds").asInt)
+    }
+
+    @Test
+    fun testClassifyTranscriptionError_genuineDurationLimitError() {
+        // Explicit duration limit violation
+        val ex = SupabaseWhisperTranscriptionProvider.TranscriptionApiException(
+            statusCode = 400,
+            errorBody = """{"error":"Voiceover duration exceeds 30-minute limit","code":"audio_too_long"}""",
+            message = "Bad Request from 'transcribe-whisper': {\"error\":\"Voiceover duration exceeds 30-minute limit\",\"code\":\"audio_too_long\"}"
+        )
+
+        val (errorCode, message) = VoiceoverTranscriptionPipeline.classifyTranscriptionError(ex)
+        assertEquals(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, errorCode)
+        assertTrue(message.contains("Audio Too Long"))
+        assertTrue(message.contains("30 minutes"))
+    }
+
+    @Test
+    fun testClassifyTranscriptionError_invalidSignedUrlError() {
+        // Invalid or expired signed URL error
+        val ex = SupabaseWhisperTranscriptionProvider.TranscriptionApiException(
+            statusCode = 400,
+            errorBody = """{"error":"Failed to download audio from signed URL: expired or invalid signature","code":"invalid_audio_url"}""",
+            message = "Bad Request from 'transcribe-whisper': {\"error\":\"Failed to download audio from signed URL: expired or invalid signature\",\"code\":\"invalid_audio_url\"}"
+        )
+
+        val (errorCode, message) = VoiceoverTranscriptionPipeline.classifyTranscriptionError(ex)
+        assertNotEquals(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, errorCode)
+        assertEquals(ErrorCode.TRANSCRIPTION_SIGNED_URL_FAILED, errorCode)
+        assertEquals("Failed to download audio from signed URL: expired or invalid signature", message)
+    }
+
+    @Test
+    fun testClassifyTranscriptionError_invalidDurationParameter() {
+        // Malformed or negative duration parameter error
+        val ex = SupabaseWhisperTranscriptionProvider.TranscriptionApiException(
+            statusCode = 400,
+            errorBody = """{"error":"Invalid audio duration: duration must be positive"}""",
+            message = "Bad Request from 'transcribe-whisper': {\"error\":\"Invalid audio duration: duration must be positive\"}"
+        )
+
+        val (errorCode, message) = VoiceoverTranscriptionPipeline.classifyTranscriptionError(ex)
+        assertNotEquals(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, errorCode)
+        assertEquals(ErrorCode.TRANSCRIPTION_API_FAILED, errorCode)
+        assertEquals("Invalid audio duration: duration must be positive", message)
+    }
+
+    @Test
+    fun testClassifyTranscriptionError_genericHttp400BadRequest() {
+        // Generic 400 bad request error
+        val ex = SupabaseWhisperTranscriptionProvider.TranscriptionApiException(
+            statusCode = 400,
+            errorBody = """{"error":"Malformed request payload: missing required field 'audioUrl'"}""",
+            message = "Bad Request from 'transcribe-whisper': {\"error\":\"Malformed request payload: missing required field 'audioUrl'\"}"
+        )
+
+        val (errorCode, message) = VoiceoverTranscriptionPipeline.classifyTranscriptionError(ex)
+        assertNotEquals(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, errorCode)
+        assertEquals(ErrorCode.TRANSCRIPTION_API_FAILED, errorCode)
+        assertEquals("Malformed request payload: missing required field 'audioUrl'", message)
+    }
+
+    @Test
+    fun testClassifyTranscriptionError_providerDescriptiveMessageDoesNotFalseTriggerDuration() {
+        // Verify that standard provider 400 error does NOT falsely trigger duration limit
+        val ex = SupabaseWhisperTranscriptionProvider.TranscriptionApiException(
+            statusCode = 400,
+            errorBody = """{"message":"Unsupported audio format or corrupt file"}""",
+            message = "Bad Request from 'transcribe-whisper': {\"message\":\"Unsupported audio format or corrupt file\"}"
+        )
+
+        val (errorCode, message) = VoiceoverTranscriptionPipeline.classifyTranscriptionError(ex)
+        assertNotEquals(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, errorCode)
+        assertEquals(ErrorCode.TRANSCRIPTION_API_FAILED, errorCode)
+        assertEquals("Unsupported audio format or corrupt file", message)
+    }
 }

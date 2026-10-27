@@ -39,65 +39,158 @@ class VoiceoverTranscriptionPipeline(
     companion object {
         const val BLOCKED_AUTH_MESSAGE = "Transcription blocked: Valid user JWT is not yet available. Authentication UI is pending."
 
-        private fun extractBackendErrorMessage(errorBody: String): String? {
-            if (errorBody.isBlank()) return null
-            try {
-                if (errorBody.contains("{")) {
-                    val jsonStart = errorBody.indexOf("{")
-                    val jsonEnd = errorBody.lastIndexOf("}")
-                    if (jsonStart in 0 until jsonEnd) {
-                        val jsonStr = errorBody.substring(jsonStart, jsonEnd + 1)
-                        val parsed = com.google.gson.JsonParser.parseString(jsonStr).asJsonObject
-                        val err = parsed.get("error")?.asString
-                            ?: parsed.get("message")?.asString
-                            ?: parsed.get("details")?.asString
-                        if (!err.isNullOrBlank()) return err
+        internal data class BackendErrorInfo(
+            val parsedMessage: String?,
+            val errorCode: String?,
+            val isExplicitDurationLimit: Boolean,
+            val isInvalidDuration: Boolean,
+            val isSignedUrlError: Boolean,
+            val isCreditError: Boolean,
+            val isAuthError: Boolean
+        )
+
+        internal fun parseBackendError(errorBody: String, rawMessage: String): BackendErrorInfo {
+            var extractedMsg: String? = null
+            var extractedCode: String? = null
+
+            if (errorBody.isNotBlank()) {
+                try {
+                    if (errorBody.contains("{")) {
+                        val jsonStart = errorBody.indexOf("{")
+                        val jsonEnd = errorBody.lastIndexOf("}")
+                        if (jsonStart in 0 until jsonEnd) {
+                            val jsonStr = errorBody.substring(jsonStart, jsonEnd + 1)
+                            val json = com.google.gson.JsonParser.parseString(jsonStr).asJsonObject
+                            extractedMsg = json.get("error")?.asString
+                                ?: json.get("message")?.asString
+                                ?: json.get("msg")?.asString
+                                ?: json.get("details")?.asString
+                            extractedCode = json.get("code")?.asString
+                                ?: json.get("error_code")?.asString
+                        }
                     }
+                } catch (_: Exception) {}
+
+                if (extractedMsg.isNullOrBlank()) {
+                    extractedMsg = errorBody.trim().takeIf { it.isNotBlank() && it.length < 300 }
                 }
-            } catch (_: Exception) {}
-            return errorBody.trim().takeIf { it.isNotBlank() && it.length < 200 }
+            }
+
+            // Only examine the backend payload, or fallback to rawMessage if errorBody was empty
+            val textToInspect = (extractedMsg ?: errorBody.ifBlank { rawMessage }).lowercase()
+            val codeToInspect = (extractedCode ?: "").lowercase()
+
+            // 1. Explicit duration limit violation
+            // Note: Must be an EXPLICIT limit violation (e.g. exceeds 30 minutes, audio payload too large, duration limit exceeded).
+            // It MUST NOT match "invalid duration" or "duration must be positive" or "rate limit" or "credit limit".
+            val isInvalidDuration = textToInspect.contains("invalid duration") ||
+                    textToInspect.contains("duration must be") ||
+                    textToInspect.contains("duration cannot") ||
+                    textToInspect.contains("duration <= 0") ||
+                    textToInspect.contains("negative duration")
+
+            val isDurationLimitExceeded = codeToInspect == "audio_too_long" ||
+                    codeToInspect == "duration_limit_exceeded" ||
+                    codeToInspect == "audio_payload_too_large" ||
+                    (textToInspect.contains("duration") && (textToInspect.contains("exceed") || textToInspect.contains("too long") || textToInspect.contains("maximum") || textToInspect.contains("30 min") || textToInspect.contains("30-min"))) ||
+                    (textToInspect.contains("audio") && (textToInspect.contains("too long") || textToInspect.contains("too large"))) ||
+                    textToInspect.contains("exceeds the 30-minute") ||
+                    textToInspect.contains("exceeds maximum allowed duration")
+
+            val isExplicitDurationLimit = isDurationLimitExceeded && !isInvalidDuration
+
+            // 2. Signed URL / storage access error
+            val isSignedUrlError = codeToInspect.contains("signed_url") ||
+                    codeToInspect == "invalid_audio_url" ||
+                    codeToInspect == "invalid_url" ||
+                    textToInspect.contains("signed url") ||
+                    textToInspect.contains("signed_url") ||
+                    textToInspect.contains("download audio") ||
+                    textToInspect.contains("fetch audio") ||
+                    textToInspect.contains("could not access audio") ||
+                    textToInspect.contains("audio file not found") ||
+                    textToInspect.contains("invalid signed") ||
+                    textToInspect.contains("expired url") ||
+                    (textToInspect.contains("invalid url") && !textToInspect.contains("missing"))
+
+            // 3. Credit error
+            val isCreditError = textToInspect.contains("credit") ||
+                    textToInspect.contains("balance") ||
+                    textToInspect.contains("payment") ||
+                    codeToInspect.contains("credit")
+
+            // 4. Auth error
+            val isAuthError = textToInspect.contains("unauthorized") ||
+                    textToInspect.contains("jwt") ||
+                    textToInspect.contains("bearer") ||
+                    textToInspect.contains("forbidden") ||
+                    textToInspect.contains("token") ||
+                    codeToInspect.contains("auth")
+
+            return BackendErrorInfo(
+                parsedMessage = extractedMsg,
+                errorCode = extractedCode,
+                isExplicitDurationLimit = isExplicitDurationLimit,
+                isInvalidDuration = isInvalidDuration,
+                isSignedUrlError = isSignedUrlError,
+                isCreditError = isCreditError,
+                isAuthError = isAuthError
+            )
         }
 
         fun classifyTranscriptionError(error: Throwable?, statusCode: Int? = null): Pair<ErrorCode, String> {
             val apiException = error as? SupabaseWhisperTranscriptionProvider.TranscriptionApiException
             val actualStatusCode = statusCode ?: apiException?.statusCode
             val rawErrorBody = apiException?.errorBody ?: ""
-            val backendMsg = extractBackendErrorMessage(rawErrorBody)
-            val msg = error?.message ?: "Whisper transcription failed"
-            val combinedText = "$msg $rawErrorBody"
+            val rawMsg = error?.message ?: "Whisper transcription failed"
 
-            val isAudioTooLong = combinedText.contains("exceed", ignoreCase = true) ||
-                    combinedText.contains("duration", ignoreCase = true) ||
-                    combinedText.contains("too long", ignoreCase = true) ||
-                    combinedText.contains("too large", ignoreCase = true) ||
-                    combinedText.contains("limit", ignoreCase = true)
+            val info = parseBackendError(rawErrorBody, rawMsg)
+            val backendMsg = info.parsedMessage
 
             return when {
-                actualStatusCode == 401 || actualStatusCode == 403 || combinedText.contains("jwt", ignoreCase = true) -> {
-                    Pair(ErrorCode.TRANSCRIPTION_AUTH_MISSING, "Authentication Error: Please sign in or re-authenticate.")
+                // 1. Auth errors (401, 403, or auth messages)
+                actualStatusCode == 401 || actualStatusCode == 403 || info.isAuthError -> {
+                    Pair(ErrorCode.TRANSCRIPTION_AUTH_MISSING, backendMsg ?: "Authentication Error: Please sign in or re-authenticate.")
                 }
-                actualStatusCode == 402 || combinedText.contains("credit", ignoreCase = true) -> {
+                // 2. Credit errors (402 or credit messages)
+                actualStatusCode == 402 || info.isCreditError -> {
                     Pair(ErrorCode.TRANSCRIPTION_API_FAILED, backendMsg ?: "Insufficient Credits: You do not have enough credits to complete this transcription.")
                 }
-                actualStatusCode == 400 && isAudioTooLong -> {
-                    Pair(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, "Audio Too Long: Voiceover exceeds maximum allowed duration.")
+                // 3. Explicit duration limit violation (HTTP 400 + explicit duration limit exceeded)
+                actualStatusCode == 400 && info.isExplicitDurationLimit -> {
+                    Pair(ErrorCode.TRANSCRIPTION_AUDIO_TOO_LONG, "Audio Too Long: Voiceover exceeds maximum allowed duration of 30 minutes.")
                 }
-                actualStatusCode == 400 -> {
-                    val cleanMsg = backendMsg ?: msg.takeIf { !it.contains("TranscriptionApiException") } ?: "Bad Request: Unable to transcribe voiceover. Please verify the audio file format."
+                // 4. Signed URL error (HTTP 400 + audio URL / storage download issue)
+                actualStatusCode == 400 && info.isSignedUrlError -> {
+                    val cleanMsg = backendMsg ?: "Audio File Error: Could not access audio from cloud storage for transcription."
+                    Pair(ErrorCode.TRANSCRIPTION_SIGNED_URL_FAILED, cleanMsg)
+                }
+                // 5. Invalid duration parameter (HTTP 400 + duration <= 0 or invalid duration)
+                actualStatusCode == 400 && info.isInvalidDuration -> {
+                    val cleanMsg = backendMsg ?: "Invalid Audio Duration: The audio duration must be greater than 0."
                     Pair(ErrorCode.TRANSCRIPTION_API_FAILED, cleanMsg)
                 }
+                // 6. Generic HTTP 400 Bad Request
+                actualStatusCode == 400 -> {
+                    val cleanMsg = backendMsg ?: "Bad Request: Unable to process audio transcription. Please verify the audio file format."
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, cleanMsg)
+                }
+                // 7. Server error (5xx)
                 actualStatusCode != null && actualStatusCode in 500..599 -> {
                     val serverMsg = backendMsg ?: "The transcription service encountered an internal error. Please try again later."
                     Pair(ErrorCode.TRANSCRIPTION_API_FAILED, "Server Error (HTTP $actualStatusCode): $serverMsg")
                 }
+                // 8. Timeout
                 error is java.net.SocketTimeoutException -> {
                     Pair(ErrorCode.TRANSCRIPTION_NETWORK_ERROR, "Connection Timed Out: The transcription server took too long to respond. Please try again.")
                 }
+                // 9. Network connectivity
                 error is java.net.UnknownHostException || error is java.net.ConnectException -> {
                     Pair(ErrorCode.TRANSCRIPTION_NETWORK_ERROR, "No Internet Connection: Please check your network connection and try again.")
                 }
+                // 10. Fallback
                 else -> {
-                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, backendMsg ?: msg)
+                    Pair(ErrorCode.TRANSCRIPTION_API_FAILED, backendMsg ?: rawMsg)
                 }
             }
         }
@@ -109,7 +202,7 @@ class VoiceoverTranscriptionPipeline(
         projectName: String? = null,
         onProgress: (progress: Int, statusMessage: String) -> Unit = { _, _ -> }
     ): TranscriptionPipelineResult = withContext(Dispatchers.IO) {
-        Log.i(TAG, "Starting voiceover transcription pipeline for URI: $audioUri (duration: ${audioDurationSeconds}s)")
+        Log.i(TAG, "Starting voiceover transcription pipeline - duration: ${audioDurationSeconds}s, URI scheme: ${audioUri.scheme}")
         onProgress(5, "Validating voiceover...")
 
         // Step 1: Validate duration and resolve local audio file
@@ -245,6 +338,7 @@ class VoiceoverTranscriptionPipeline(
         val signedAudioUrl = signedUrlResult.getOrThrow()
 
         // Step 5: Call "transcribe-whisper" Edge Function with signed URL and duration
+        Log.i(TAG, "Calling transcription provider with duration: ${audioDurationSeconds}s")
         onProgress(65, "Transcribing voiceover with Whisper AI...")
         var transcribeResult = transcriptionProvider.transcribeAudio(
             signedAudioUrl = signedAudioUrl,
@@ -274,8 +368,10 @@ class VoiceoverTranscriptionPipeline(
         if (transcribeResult.isFailure) {
             val error = transcribeResult.exceptionOrNull()
             val msg = error?.message ?: "Whisper transcription failed"
-            val statusCode = (error as? SupabaseWhisperTranscriptionProvider.TranscriptionApiException)?.statusCode
-            Log.e(TAG, "Step 5 failed - Transcription Edge Function error ($statusCode): $msg", error)
+            val apiException = error as? SupabaseWhisperTranscriptionProvider.TranscriptionApiException
+            val statusCode = apiException?.statusCode
+            val rawErrorBody = apiException?.errorBody ?: ""
+            Log.e(TAG, "Step 5 failed - Transcription Edge Function error. Duration: ${audioDurationSeconds}s, HTTP status: $statusCode, backendError: $rawErrorBody", error)
             
             // Clean up uploaded audio file from storage
             storageClient.deleteAudioFile(remoteFileName, userJwt)
