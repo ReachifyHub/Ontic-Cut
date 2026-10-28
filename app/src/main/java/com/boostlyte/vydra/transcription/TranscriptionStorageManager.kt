@@ -22,6 +22,10 @@ import java.io.OutputStreamWriter
  */
 class TranscriptionStorageManager {
 
+    companion object {
+        const val CURRENT_CACHE_VERSION = 2
+    }
+
     private val TAG = "TranscriptionStorage"
     private val prettyGson: Gson = GsonBuilder().setPrettyPrinting().create()
 
@@ -86,6 +90,7 @@ class TranscriptionStorageManager {
         }
 
         // Add local metadata headers
+        rootObject.addProperty("_cache_version", CURRENT_CACHE_VERSION)
         rootObject.addProperty("_project_name", projectName ?: "Untitled")
         rootObject.addProperty("_audio_file_name", audioFileName)
         if (!audioUri.isNullOrEmpty()) {
@@ -93,6 +98,17 @@ class TranscriptionStorageManager {
         }
         rootObject.addProperty("_audio_duration_seconds", audioDurationSeconds)
         rootObject.addProperty("_saved_at_ms", timestamp)
+
+        // Ensure structured words and duration are persisted so cached reads have timestamps
+        if (response.words != null && !rootObject.has("words")) {
+            rootObject.add("words", prettyGson.toJsonTree(response.words))
+        }
+        if (response.duration != null && !rootObject.has("duration")) {
+            rootObject.addProperty("duration", response.duration)
+        }
+        if (response.text != null && !rootObject.has("text")) {
+            rootObject.addProperty("text", response.text)
+        }
 
         // STRICT SECURITY: Scrub any credentials or tokens if accidentally contained
         rootObject.remove("jwt")

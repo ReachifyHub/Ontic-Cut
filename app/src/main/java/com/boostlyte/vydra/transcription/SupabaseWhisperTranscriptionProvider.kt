@@ -22,7 +22,8 @@ class SupabaseWhisperTranscriptionProvider(
     private val supabaseUrl: String = SupabaseConfig.SUPABASE_URL,
     private val anonKey: String = SupabaseConfig.ANON_KEY,
     private val functionName: String = SupabaseConfig.EDGE_FUNCTION_TRANSCRIBE,
-    private val gson: Gson = Gson()
+    private val gson: Gson = Gson(),
+    private val context: android.content.Context? = null
 ) : TranscriptionProvider {
 
     private val TAG = "WhisperProvider"
@@ -86,14 +87,8 @@ class SupabaseWhisperTranscriptionProvider(
                 val responseBody = readStreamSafely(connection.inputStream)
                 Log.d(TAG, "Edge Function '$functionName' returned HTTP $statusCode (${responseBody.length} bytes)")
 
-                val parsedResponse = try {
-                    gson.fromJson(responseBody, TranscriptionResponse::class.java).copy(
-                        rawJson = responseBody
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not fully map response to TranscriptionResponse data class, wrapping raw: ${e.message}")
-                    TranscriptionResponse(rawJson = responseBody)
-                }
+                val parsedResponse = TranscriptionResponseParser.parse(responseBody)
+                TranscriptionResponseParser.saveDevCapture(responseBody, parsedResponse, context)
 
                 Result.success(parsedResponse)
             } else {

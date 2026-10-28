@@ -3458,6 +3458,9 @@ class VideoEditingActivity : AppCompatActivity() {
                         tvAssemblyClipDuration?.text = "Average clip duration: %,d ms".format(plan.averageClipDurationMs)
 
                         val warnings = mutableListOf<String>()
+                        if (plan.hasInvalidBoundariesWarning) {
+                            warnings.add("Warning: Scene timestamps appear invalid or collapsed. Images will be evenly distributed across the narration.")
+                        }
                         if (plan.unmatchedScenesCount > 0) {
                             warnings.add("${plan.unmatchedScenesCount} unmatched scene(s) will be continuously interpolated across audio")
                         }

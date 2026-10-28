@@ -81,6 +81,7 @@ data class AssemblyPlan(
     val averageClipDurationMs: Long,
     val isTooFewImages: Boolean,
     val isShortClipWarning: Boolean,
+    val hasInvalidBoundariesWarning: Boolean = false,
     val errorMessage: String? = null
 ) : Serializable {
     val totalScenes: Int get() = sceneCoverages.size
@@ -425,7 +426,18 @@ object TimelineAssembler {
             assembledClips[lastIdx] = last.copy(durationMs = (last.durationMs + totalDiff).coerceAtLeast(1L))
         }
 
-        val avgClipDuration = if (totalImages > 0) audioDurationMs / totalImages else 0L
+        // Guard against collapsed / invalid boundaries
+        val hasInvalidBoundaries = scenes.any { it.isMatched } && (
+            scenes.filter { it.isMatched }.all { it.endMs <= it.startMs } ||
+            (audioDurationMs > 5000L && scenes.filter { it.isMatched }.sumOf { it.endMs - it.startMs } < 1000L)
+        )
+
+        val avgClipDuration = if (assembledClips.isNotEmpty()) {
+            assembledClips.map { it.durationMs }.average().toLong()
+        } else if (totalImages > 0) {
+            audioDurationMs / totalImages
+        } else 0L
+
         val isShortClipWarning = avgClipDuration < MIN_CLIP_DURATION_MS || assembledClips.any { it.durationMs < MIN_CLIP_DURATION_MS }
 
         return AssemblyPlan(
@@ -437,7 +449,8 @@ object TimelineAssembler {
             imagesPerScene = imagesPerScene,
             averageClipDurationMs = avgClipDuration,
             isTooFewImages = false,
-            isShortClipWarning = isShortClipWarning
+            isShortClipWarning = isShortClipWarning,
+            hasInvalidBoundariesWarning = hasInvalidBoundaries
         )
     }
 

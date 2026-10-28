@@ -105,6 +105,13 @@ class AutoAssembleManager(
                     if (!jsonElement.isJsonObject) continue
                     val root = jsonElement.asJsonObject
 
+                    // Invalidate stale cache entries written before CURRENT_CACHE_VERSION
+                    val cacheVersion = root.get("_cache_version")?.asInt ?: 1
+                    if (cacheVersion < TranscriptionStorageManager.CURRENT_CACHE_VERSION) {
+                        Log.i(TAG, "Invalidating stale cache file ${file.name} (v$cacheVersion < v${TranscriptionStorageManager.CURRENT_CACHE_VERSION})")
+                        continue
+                    }
+
                     val savedAudioName = root.get("_audio_file_name")?.asString
                     val savedAudioUri = root.get("_audio_uri")?.asString
 
@@ -116,13 +123,18 @@ class AutoAssembleManager(
                     }
 
                     if (matchesAudio) {
-                        val parsed = gson.fromJson(content, TranscriptionResponse::class.java).copy(
+                        val parsed = com.boostlyte.vydra.transcription.TranscriptionResponseParser.parse(content).copy(
                             rawJson = content
                         )
-                        // Verify valid transcription payload (has text or segments)
-                        if (!parsed.text.isNullOrBlank() || !parsed.segments.isNullOrEmpty()) {
-                            Log.i(TAG, "Reusing valid cached transcription from: ${file.absolutePath}")
+                        // Invariant check: Must have valid, non-zero timestamps
+                        val hasWordTimestamps = !parsed.words.isNullOrEmpty() && parsed.words.any { (it.end ?: 0.0) > 0.0 }
+                        val hasSegmentTimestamps = !parsed.segments.isNullOrEmpty() && parsed.segments.any { it.end > 0.0 }
+
+                        if (hasWordTimestamps || hasSegmentTimestamps) {
+                            Log.i(TAG, "Reusing valid cached transcription (v$cacheVersion) from: ${file.absolutePath}")
                             return Pair(parsed, file)
+                        } else {
+                            Log.w(TAG, "Cached file ${file.name} lacks valid timestamps. Invalidation triggered.")
                         }
                     }
                 } catch (e: Exception) {
@@ -146,6 +158,7 @@ class AutoAssembleManager(
         projectName: String? = null,
         onProgress: (progress: Int, statusMessage: String) -> Unit = { _, _ -> }
     ): AutoAssembleResult = withContext(Dispatchers.IO) {
+        val audioDurationMs = audioDurationSeconds * 1000L
         Log.i(TAG, "Starting Auto Assemble - duration: ${audioDurationSeconds}s, URI scheme: ${audioUri.scheme}")
         val parsedScenes = ScriptMapParser.parse(rawScriptMap)
         if (parsedScenes.isEmpty()) {
@@ -159,7 +172,7 @@ class AutoAssembleManager(
         val cached = findCachedTranscription(audioUri)
         if (cached != null) {
             onProgress(60, "Loaded cached transcription. Aligning scenes...")
-            val boundaries = SceneFuzzyMatcher.matchScenes(parsedScenes, cached.first)
+            val boundaries = SceneFuzzyMatcher.matchScenes(parsedScenes, cached.first, audioDurationMs)
             onProgress(100, "Scenes calculated successfully!")
             return@withContext AutoAssembleResult.Success(
                 boundaries = boundaries,
@@ -188,7 +201,7 @@ class AutoAssembleManager(
         when (pipelineResult) {
             is TranscriptionPipelineResult.Success -> {
                 onProgress(90, "Transcribed! Aligning scene boundaries...")
-                val boundaries = SceneFuzzyMatcher.matchScenes(parsedScenes, pipelineResult.response)
+                val boundaries = SceneFuzzyMatcher.matchScenes(parsedScenes, pipelineResult.response, audioDurationMs)
                 onProgress(100, "Scenes calculated successfully!")
                 AutoAssembleResult.Success(
                     boundaries = boundaries,

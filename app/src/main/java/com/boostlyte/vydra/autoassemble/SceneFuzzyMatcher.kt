@@ -1,13 +1,15 @@
 package com.boostlyte.vydra.autoassemble
 
+import android.util.Log
 import com.boostlyte.vydra.models.SceneBoundary
+import com.boostlyte.vydra.transcription.TranscriptionResponseParser
 import com.boostlyte.vydra.transcription.models.TranscriptionResponse
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Timestamped word token extracted from a Whisper transcription.
+ * Timestamped word token extracted from a Whisper or Grok transcription.
  */
 data class TimestampedToken(
     val normalized: String,
@@ -18,23 +20,36 @@ data class TimestampedToken(
 )
 
 /**
- * Fuzzy-matching alignment algorithm that maps script scenes to Whisper transcription timestamps.
+ * Robust fuzzy-matching alignment algorithm that maps script scenes to transcription timestamps.
  *
  * Architecture:
- * 1. Text Normalization: Converts text to lowercase and strips all punctuation.
- * 2. Token Extraction: Parses segments/words into timestamped tokens.
- * 3. Sequence Alignment: Employs a forward-moving sliding window with fuzzy Levenshtein token distance
- *    and Longest Common Subsequence (LCS) scoring.
- * 4. Graceful Degradation: Missing scenes are flagged as unmatched without failing or distorting
- *    surrounding scenes.
+ * 1. Text Normalization: Converts text to lowercase, unifies apostrophes/contractions identically
+ *    (e.g. "doesn't" and "doesnt" -> "doesnt", "it's" and "its" -> "its"), and strips punctuation.
+ * 2. Token Extraction: Extracts real timestamps from structured word arrays, line-by-line word timestamps,
+ *    or segment timestamps. Missing timestamps return empty tokens instead of synthesizing fake spans.
+ * 3. Sequential Monotonic Alignment: Advances monotonically without backwards jumping across scenes.
+ * 4. Invariant Enforcement: Validates endMs > startMs, rejects zero or negative spans, and applies
+ *    a sanity guard (>= 4 words requires span >= 200ms) to reject collapsed 0:00 - 0:00 matches.
  */
 object SceneFuzzyMatcher {
 
+    private const val TAG = "SceneFuzzyMatcher"
+
     /**
-     * Normalizes text for comparison by lowercasing and stripping non-alphanumeric characters.
+     * Normalizes text for comparison by lowercasing, standardizing apostrophes/contractions,
+     * and stripping remaining non-alphanumeric punctuation.
      */
     fun normalize(text: String): String {
         return text.lowercase()
+            // Standardize typographic apostrophes
+            .replace('’', '\'')
+            .replace('‘', '\'')
+            .replace('´', '\'')
+            .replace('`', '\'')
+            // Remove apostrophes directly so contractions align identically on both sides:
+            // "doesn't" -> "doesnt", "it's" -> "its", "don't" -> "dont", "can't" -> "cant"
+            .replace("'", "")
+            // Replace remaining non-alphanumerics with spaces
             .replace(Regex("[^a-z0-9\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -87,25 +102,41 @@ object SceneFuzzyMatcher {
 
     /**
      * Extracts all timestamped tokens from a [TranscriptionResponse].
-     * Uses word-level timestamps when available, or distributes segment timestamps across words.
+     * Prefers direct word-level timestamps (from Grok or Whisper words array), then segment timestamps.
+     * If neither exists, returns empty list so missing timestamps produce unmatched scenes rather
+     * than fabricated collapsed boundaries.
      */
     fun extractTokens(response: TranscriptionResponse): List<TimestampedToken> {
         val tokens = mutableListOf<TimestampedToken>()
-        val segments = response.segments
 
+        // 1. Direct word-level timestamps (from Grok speech-to-text, Whisper word timestamps, etc.)
+        val directWords = response.words
+        if (!directWords.isNullOrEmpty()) {
+            for ((wIdx, w) in directWords.withIndex()) {
+                val norm = normalize(w.word)
+                if (norm.isEmpty()) continue
+                val startMs = w.start?.let { TranscriptionResponseParser.secondsToMillis(it) } ?: 0L
+                val endMs = w.end?.let { TranscriptionResponseParser.secondsToMillis(it) } ?: (startMs + 100L)
+                tokens.add(TimestampedToken(norm, w.word, startMs, max(startMs + 20L, endMs), 0))
+            }
+            if (tokens.isNotEmpty()) return tokens
+        }
+
+        // 2. Segment-level timestamps (with nested words or distributed)
+        val segments = response.segments
         if (!segments.isNullOrEmpty()) {
             for ((segIdx, seg) in segments.withIndex()) {
-                val segStartMs = (seg.start * 1000.0).toLong().coerceAtLeast(0L)
-                val segEndMs = (seg.end * 1000.0).toLong().coerceAtLeast(segStartMs)
+                val segStartMs = TranscriptionResponseParser.secondsToMillis(seg.start)
+                val segEndMs = max(segStartMs + 50L, TranscriptionResponseParser.secondsToMillis(seg.end))
 
                 val words = seg.words
                 if (!words.isNullOrEmpty()) {
                     for (w in words) {
                         val norm = normalize(w.word)
                         if (norm.isEmpty()) continue
-                        val wStartMs = ((w.start ?: seg.start) * 1000.0).toLong().coerceAtLeast(0L)
-                        val wEndMs = ((w.end ?: seg.end) * 1000.0).toLong().coerceAtLeast(wStartMs)
-                        tokens.add(TimestampedToken(norm, w.word, wStartMs, wEndMs, segIdx))
+                        val wStartMs = w.start?.let { TranscriptionResponseParser.secondsToMillis(it) } ?: segStartMs
+                        val wEndMs = w.end?.let { TranscriptionResponseParser.secondsToMillis(it) } ?: segEndMs
+                        tokens.add(TimestampedToken(norm, w.word, wStartMs, max(wStartMs + 20L, wEndMs), segIdx))
                     }
                 } else {
                     val rawWords = seg.text.split(Regex("\\s+")).filter { it.isNotBlank() }
@@ -122,21 +153,12 @@ object SceneFuzzyMatcher {
                     }
                 }
             }
-        } else if (!response.text.isNullOrBlank()) {
-            val totalDurationMs = ((response.duration ?: 0.0) * 1000.0).toLong().coerceAtLeast(1000L)
-            val rawWords = response.text.split(Regex("\\s+")).filter { it.isNotBlank() }
-            val wordCount = rawWords.size
-            if (wordCount > 0) {
-                for ((wIdx, rawWord) in rawWords.withIndex()) {
-                    val norm = normalize(rawWord)
-                    if (norm.isEmpty()) continue
-                    val wStart = (wIdx * totalDurationMs) / wordCount
-                    val wEnd = ((wIdx + 1) * totalDurationMs) / wordCount
-                    tokens.add(TimestampedToken(norm, rawWord, wStart, wEnd, 0))
-                }
-            }
+            if (tokens.isNotEmpty()) return tokens
         }
-        return tokens
+
+        // 3. If no word or segment timestamps are present, we return empty tokens.
+        // Fabricating timestamps over a dummy 1000ms duration is explicitly avoided.
+        return emptyList()
     }
 
     /**
@@ -145,7 +167,8 @@ object SceneFuzzyMatcher {
      */
     fun matchScenes(
         scenes: List<ParsedScene>,
-        response: TranscriptionResponse
+        response: TranscriptionResponse,
+        audioDurationMs: Long = 0L
     ): List<SceneBoundary> {
         val transcriptTokens = extractTokens(response)
         val boundaries = mutableListOf<SceneBoundary>()
@@ -165,11 +188,12 @@ object SceneFuzzyMatcher {
         }
 
         var searchTokenIndex = 0
+        var lastMatchedEndMs = 0L
         val totalTranscriptTokens = transcriptTokens.size
 
         for (scene in scenes) {
             val sceneTokens = tokenize(scene.scriptText)
-            if (sceneTokens.isEmpty()) {
+            if (sceneTokens.isEmpty() || searchTokenIndex >= totalTranscriptTokens) {
                 boundaries.add(
                     SceneBoundary(
                         sceneIndex = scene.sceneIndex,
@@ -184,32 +208,72 @@ object SceneFuzzyMatcher {
                 continue
             }
 
-            // Monotonic progression with a slight 3-token lookback tolerance for transitions
-            val startSearchFrom = max(0, searchTokenIndex - 3)
-
+            // Strictly sequential & monotonic alignment: search begins at or after scene k-1's end
             val matchResult = findBestWindowMatch(
                 sceneTokens = sceneTokens,
                 transcriptTokens = transcriptTokens,
-                fromIndex = startSearchFrom
+                fromIndex = searchTokenIndex
             )
 
             if (matchResult != null && matchResult.score >= 0.35f) {
-                val startMs = transcriptTokens[matchResult.startIndex].startMs
-                val endMs = transcriptTokens[matchResult.endIndex].endMs
-                boundaries.add(
-                    SceneBoundary(
-                        sceneIndex = scene.sceneIndex,
-                        sceneTitle = scene.sceneTitle,
-                        startMs = startMs,
-                        endMs = max(startMs + 100L, endMs),
-                        isMatched = true,
-                        scriptText = scene.scriptText,
-                        confidence = matchResult.score
+                var startMs = transcriptTokens[matchResult.startIndex].startMs
+                var endMs = transcriptTokens[matchResult.endIndex].endMs
+
+                // Clamp to audio bounds if provided
+                if (audioDurationMs > 0L) {
+                    startMs = startMs.coerceIn(0L, audioDurationMs)
+                    endMs = endMs.coerceIn(0L, audioDurationMs)
+                }
+
+                // Monotonic progression: cannot start before previous matched scene ended
+                if (startMs < lastMatchedEndMs) {
+                    startMs = lastMatchedEndMs
+                }
+                if (endMs < startMs) {
+                    endMs = startMs
+                }
+
+                val duration = endMs - startMs
+
+                // Sanity Guard:
+                // If scene contains more than 3 words but computed span is under 200 ms,
+                // treat it as suspicious (collapsed timestamps) and mark unmatched.
+                val isSuspicious = (sceneTokens.size > 3 && duration < 200L) || (duration <= 0L)
+
+                if (isSuspicious) {
+                    Log.w(
+                        TAG,
+                        "Scene ${scene.sceneIndex} '${scene.sceneTitle}' match rejected by sanity guard: " +
+                                "words=${sceneTokens.size}, span=${duration}ms (<200ms). Marking unmatched."
                     )
-                )
-                searchTokenIndex = matchResult.endIndex + 1
+                    boundaries.add(
+                        SceneBoundary(
+                            sceneIndex = scene.sceneIndex,
+                            sceneTitle = scene.sceneTitle,
+                            startMs = 0L,
+                            endMs = 0L,
+                            isMatched = false,
+                            scriptText = scene.scriptText,
+                            confidence = matchResult.score
+                        )
+                    )
+                } else {
+                    boundaries.add(
+                        SceneBoundary(
+                            sceneIndex = scene.sceneIndex,
+                            sceneTitle = scene.sceneTitle,
+                            startMs = startMs,
+                            endMs = endMs,
+                            isMatched = true,
+                            scriptText = scene.scriptText,
+                            confidence = matchResult.score
+                        )
+                    )
+                    lastMatchedEndMs = endMs
+                    searchTokenIndex = matchResult.endIndex + 1
+                }
             } else {
-                // Scene was omitted or completely missing from the voiceover
+                // Scene omitted or no match found
                 boundaries.add(
                     SceneBoundary(
                         sceneIndex = scene.sceneIndex,
@@ -221,7 +285,6 @@ object SceneFuzzyMatcher {
                         confidence = matchResult?.score ?: 0f
                     )
                 )
-                // searchTokenIndex is intentionally preserved so subsequent scenes can match
             }
         }
 
@@ -291,7 +354,7 @@ object SceneFuzzyMatcher {
             }
         }
 
-        // Secondary fallback search if anchor filtering missed a heavily modified opening
+        // Secondary fallback search if anchor filtering missed a modified opening
         if (bestMatch == null || highestScore < 0.35f) {
             val step = max(1, sceneLen / 3)
             var start = fromIndex

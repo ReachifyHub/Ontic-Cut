@@ -29,7 +29,7 @@ import java.io.InputStream
 class VoiceoverTranscriptionPipeline(
     private val context: Context?,
     private val storageClient: SupabaseStorageClient = SupabaseStorageClient(),
-    private val transcriptionProvider: TranscriptionProvider = SupabaseWhisperTranscriptionProvider(),
+    private val transcriptionProvider: TranscriptionProvider = SupabaseWhisperTranscriptionProvider(context = context),
     private val storageManager: TranscriptionStorageManager = TranscriptionStorageManager(),
     private val jwtProvider: (() -> String?)? = null
 ) {
