@@ -3322,12 +3322,23 @@ class VideoEditingActivity : AppCompatActivity() {
         val audioFileName = primaryAudioOp.audioUri.lastPathSegment ?: "voiceover.m4a"
         tvVoiceoverName.text = "Voiceover: $audioFileName"
 
-        val durationMs = if (primaryAudioOp.originalDurationMs > 0) {
+        val durationMs = if (primaryAudioOp.originalDurationMs > 0L) {
             primaryAudioOp.originalDurationMs
         } else if (primaryAudioOp.internalEndMs > primaryAudioOp.internalStartMs) {
             primaryAudioOp.internalEndMs - primaryAudioOp.internalStartMs
         } else {
-            3000L
+            val retrieved = try {
+                val r = android.media.MediaMetadataRetriever()
+                if (primaryAudioOp.audioUri.scheme == "file") {
+                    r.setDataSource(primaryAudioOp.audioUri.path)
+                } else {
+                    r.setDataSource(this, primaryAudioOp.audioUri)
+                }
+                val d = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
+                r.release()
+                d
+            } catch (_: Exception) { 0L }
+            if (retrieved > 0L) retrieved else 3000L
         }
         val durationSecs = ((durationMs + 999) / 1000).toInt().coerceAtLeast(1)
         val mins = (durationMs / 1000) / 60
@@ -3566,26 +3577,7 @@ class VideoEditingActivity : AppCompatActivity() {
         bottomSheet.setCancelable(false)
 
         lifecycleScope.launch {
-            // 1. Safety snapshot / backup project state before mutation
-            try {
-                val curProj = viewModel.project.value
-                if (curProj != null) {
-                    val projName = (currentProjectFile?.nameWithoutExtension ?: curProj.sourceName) + "_pre_assembly"
-                    val recipe = com.boostlyte.vydra.models.EditRecipe.fromVideoProject(
-                        projName,
-                        curProj,
-                        durationMs = getTotalSequenceDuration(),
-                        clipCount = getSequenceItems().size
-                    )
-                    withContext(Dispatchers.IO) {
-                        com.boostlyte.vydra.utils.ProjectManager.saveProject(this@VideoEditingActivity, recipe)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Safety snapshot failed: ${e.message}")
-            }
-
-            // 2. Compute project mutation off main thread
+            // 1. Compute project mutation off main thread
             val mutatedProject = withContext(Dispatchers.Default) {
                 val cur = viewModel.project.value ?: return@withContext null
                 com.boostlyte.vydra.autoassemble.TimelineAssembler.applyAssemblyToProject(cur, plan)
@@ -3597,7 +3589,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     mutatedProject
                 })
 
-                // 3. Update timeline track and player
+                // 2. Update source media URI and reinitialize player & timeline data
+                videoUri = mutatedProject.sourceUri
                 initializeVideoData()
 
                 Toast.makeText(
@@ -5526,15 +5519,15 @@ class VideoEditingActivity : AppCompatActivity() {
                     d
                 }
                 val totalSeqDur = getTotalSequenceDuration()
-                val endGlobalMs = if (realDurationMs > 0) minOf(totalSeqDur, realDurationMs) else totalSeqDur
+                val effectiveAudioDur = if (realDurationMs > 0L) realDurationMs else totalSeqDur
                 viewModel.addOperation(
                     com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio(
                         audioUri = tempUri,
                         internalStartMs = 0L,
-                        internalEndMs = realDurationMs,
+                        internalEndMs = effectiveAudioDur,
                         startTimeMs = 0L,
-                        endTimeMs = endGlobalMs,
-                        originalDurationMs = realDurationMs
+                        endTimeMs = effectiveAudioDur,
+                        originalDurationMs = effectiveAudioDur
                     )
                 )
                 Toast.makeText(this@VideoEditingActivity, R.string.toast_audio_track_added, Toast.LENGTH_SHORT).show()
@@ -5993,6 +5986,12 @@ class VideoEditingActivity : AppCompatActivity() {
                                     } catch (_: Exception) {}
                                 }
                             }
+                        } else if (op is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio) {
+                            if (op.audioUri.scheme == "content") {
+                                try {
+                                    contentResolver.takePersistableUriPermission(op.audioUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                } catch (_: Exception) {}
+                            }
                         }
                     }
 
@@ -6237,14 +6236,48 @@ class VideoEditingActivity : AppCompatActivity() {
         return items
     }
 
+    private var lastContinuousGlobalPos = 0L
+    private var lastContinuousItemIndex = -1
+
     private fun getGlobalPosition(): Long {
         if (!::player.isInitialized) return 0L
         val index = player.currentMediaItemIndex
+        if (chunkDurationsMs.isEmpty()) return player.currentPosition
+
+        val safeIndex = index.coerceIn(0, chunkDurationsMs.size - 1)
         var pos = 0L
-        for (i in 0 until minOf(index, chunkDurationsMs.size)) {
+        for (i in 0 until safeIndex) {
             pos += chunkDurationsMs[i]
         }
-        return pos + player.currentPosition
+
+        val chunkDur = chunkDurationsMs[safeIndex]
+        val rawPos = player.currentPosition
+        // In ExoPlayer, when switching ConcatenatingMediaSource items, currentPosition may briefly
+        // still report the end position of the previous chunk before resetting to 0.
+        // Clamping to chunkDur and resetting if stale ensures time never spikes across chunk transitions.
+        val chunkPos = if (rawPos >= chunkDur) {
+            0L
+        } else {
+            rawPos.coerceIn(0L, chunkDur)
+        }
+
+        val calculated = pos + chunkPos
+        if (player.isPlaying) {
+            if (calculated >= lastContinuousGlobalPos) {
+                lastContinuousGlobalPos = calculated
+            } else if (lastContinuousGlobalPos - calculated < 1000L && safeIndex >= lastContinuousItemIndex) {
+                // Ignore transient backward jitter during chunk boundary transitions
+                return lastContinuousGlobalPos
+            } else {
+                lastContinuousGlobalPos = calculated
+            }
+            lastContinuousItemIndex = safeIndex
+            return lastContinuousGlobalPos
+        } else {
+            lastContinuousGlobalPos = calculated
+            lastContinuousItemIndex = safeIndex
+            return calculated
+        }
     }
 
     private fun getTotalSequenceDuration(): Long {
@@ -6419,7 +6452,8 @@ class VideoEditingActivity : AppCompatActivity() {
             for ((index, item) in sequenceItems.withIndex()) {
                 val start = accumulatedStartMs
                 val end = accumulatedStartMs + item.trimmedDurationMs
-                if (currentGlobalPos >= start && currentGlobalPos <= end) {
+                val isLast = (index == sequenceItems.size - 1)
+                if (currentGlobalPos >= start && (currentGlobalPos < end || (isLast && currentGlobalPos <= end))) {
                     activeClipIndex = index
                     break
                 }
@@ -6432,11 +6466,12 @@ class VideoEditingActivity : AppCompatActivity() {
             applyColorFilterAndAdjustToPlayer(activeFilterName, activeAdjust)
             
             if (activeClipIndex >= 0 && activeClipIndex < sequenceItems.size) {
-                val relTimeMs = currentGlobalPos - accumulatedStartMs
-                val evaluatedMask = sequenceItems[activeClipIndex].maskConfig.evaluatedAt(relTimeMs)
+                val activeItem = sequenceItems[activeClipIndex]
+                val itemDur = maxOf(1L, activeItem.trimmedDurationMs)
+                val relTimeMs = (currentGlobalPos - accumulatedStartMs).coerceIn(0L, itemDur)
+                val evaluatedMask = activeItem.maskConfig.evaluatedAt(relTimeMs)
                 mainVideoMaskContainer?.maskConfig = evaluatedMask
 
-                val activeItem = sequenceItems[activeClipIndex]
                 if (activeItem.isImage || isImageUri(activeItem.uri)) {
                     photoSequencePreviewImageView?.visibility = View.VISIBLE
                     playerView.visibility = View.INVISIBLE
@@ -6455,8 +6490,8 @@ class VideoEditingActivity : AppCompatActivity() {
                         ?: viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.MotionEffect>()
                             ?.find { it.index == activeClipIndex }?.motionType
 
-                    if (motionType != null && activeItem.trimmedDurationMs > 0) {
-                        val progress = (relTimeMs.toFloat() / activeItem.trimmedDurationMs.toFloat()).coerceIn(0f, 1f)
+                    if (motionType != null && itemDur > 0) {
+                        val progress = (relTimeMs.toFloat() / itemDur.toFloat()).coerceIn(0f, 1f)
                         val viewW = photoSequencePreviewImageView?.width?.toFloat() ?: 0f
                         val viewH = photoSequencePreviewImageView?.height?.toFloat() ?: 0f
 
@@ -6625,6 +6660,8 @@ class VideoEditingActivity : AppCompatActivity() {
         
         pendingSeekRunnable?.let { customVideoSeeker.removeCallbacks(it) }
         lastSoughtGlobalPos = globalPos
+        lastContinuousGlobalPos = globalPos
+        lastContinuousItemIndex = -1
         lastSeekCallTimeMs = currentTime
 
         var remainingPos = globalPos
@@ -6799,8 +6836,10 @@ class VideoEditingActivity : AppCompatActivity() {
                         primaryVideoAspectRatio = 16f / 9f
                     }
 
-                    val hasTrim = viewModel.project.value?.operations?.any { it is com.boostlyte.vydra.models.EditOperation.Trim } == true
-                    if (!hasTrim) {
+                    val existingTrim = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Trim>()?.lastOrNull()
+                    if (existingTrim != null) {
+                        originalMainVideoDurationMs = maxOf(5000L, existingTrim.endMs)
+                    } else {
                         viewModel.updateMainVideoTrim(0L, 5000L)
                     }
 

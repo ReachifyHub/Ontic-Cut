@@ -393,11 +393,16 @@ class VoiceoverTranscriptionPipeline(
 
         // Step 7: Save transcription result locally without altering timestamps
         onProgress(90, "Saving transcription to project...")
+        val canonicalAudioName = if (audioUri.scheme == "file") {
+            File(audioUri.path ?: "").name
+        } else {
+            audioUri.lastPathSegment ?: localAudioFile.name
+        }
         val savedFile = try {
             storageManager.saveTranscriptionResult(
                 context = context,
                 projectName = projectName,
-                audioFileName = localAudioFile.name,
+                audioFileName = canonicalAudioName,
                 audioDurationSeconds = audioDurationSeconds,
                 response = transcriptionResponse,
                 audioUri = audioUri.toString()

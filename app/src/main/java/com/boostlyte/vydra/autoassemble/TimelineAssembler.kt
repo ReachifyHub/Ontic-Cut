@@ -487,8 +487,26 @@ object TimelineAssembler {
             )
         }
 
-        // Filter operations: keep background audio (voiceover untouched), text/image overlays, and backgrounds
-        val preservedOps = project.operations.filter { op ->
+        // Filter operations: keep background audio (voiceover untouched, expanding coverage to full duration), text/image overlays, and backgrounds
+        val preservedOps = project.operations.map { op ->
+            if (op is EditOperation.AddBackgroundAudio) {
+                val fullAudioDur = if (op.originalDurationMs > 0L) {
+                    op.originalDurationMs
+                } else if (op.internalEndMs > 0L) {
+                    op.internalEndMs
+                } else {
+                    plan.totalAudioDurationMs
+                }
+                op.copy(
+                    startTimeMs = 0L,
+                    endTimeMs = fullAudioDur,
+                    internalStartMs = 0L,
+                    internalEndMs = fullAudioDur
+                )
+            } else {
+                op
+            }
+        }.filter { op ->
             op is EditOperation.AddBackgroundAudio ||
             op is EditOperation.AddText ||
             op is EditOperation.AddImageOverlay ||
