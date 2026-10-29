@@ -23,6 +23,28 @@ object ScriptMapParser {
         RegexOption.IGNORE_CASE
     )
 
+    private val SCRIPT_LABEL_PREFIX = Regex(
+        """^(?:script|narration|voiceover|audio|dialogue|spoken|text)\s*[:\-]\s*""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * Cleans script text lines by stripping leading labels (e.g. "Script:", "Narration:")
+     * and outer enclosing quotation marks.
+     */
+    fun cleanScriptText(raw: String): String {
+        var text = raw.trim()
+        text = SCRIPT_LABEL_PREFIX.replace(text, "").trim()
+        if ((text.startsWith("\"") && text.endsWith("\"") && text.length >= 2) ||
+            (text.startsWith("“") && text.endsWith("”") && text.length >= 2) ||
+            (text.startsWith("‘") && text.endsWith("’") && text.length >= 2)
+        ) {
+            text = text.substring(1, text.length - 1).trim()
+        }
+        text = SCRIPT_LABEL_PREFIX.replace(text, "").trim()
+        return text
+    }
+
     fun parse(rawScript: String): List<ParsedScene> {
         val trimmed = rawScript.trim()
         if (trimmed.isEmpty()) return emptyList()
@@ -36,18 +58,27 @@ object ScriptMapParser {
 
         fun finalizeCurrentScene() {
             val idx = currentSceneIndex ?: return
-            val body = currentBodyLines.joinToString(" ").trim()
-            val finalTitle = if (currentSceneTitle.isNotBlank()) {
-                currentSceneTitle
-            } else {
-                "Scene $idx"
+            val cleanedBodyLines = currentBodyLines.map { cleanScriptText(it) }.filter { it.isNotBlank() }
+            val body = cleanedBodyLines.joinToString(" ").trim()
+            val cleanedHeaderTrailing = cleanScriptText(currentHeaderTrailingText)
+
+            val (finalTitle, finalText) = when {
+                body.isNotEmpty() -> {
+                    val title = if (currentSceneTitle.isNotBlank()) currentSceneTitle else "Scene $idx"
+                    Pair(title, body)
+                }
+                cleanedHeaderTrailing.isNotEmpty() -> {
+                    // Header contained trailing text without subsequent body lines
+                    // e.g. "Scene 1: Welcome to the channel."
+                    val title = if (currentSceneTitle.isNotBlank()) currentSceneTitle else "Scene $idx"
+                    Pair(title, cleanedHeaderTrailing)
+                }
+                else -> {
+                    val title = if (currentSceneTitle.isNotBlank()) currentSceneTitle else "Scene $idx"
+                    Pair(title, title)
+                }
             }
-            // If body text exists from subsequent lines, use it; otherwise fallback to trailing header text
-            val finalText = if (body.isNotEmpty()) {
-                body
-            } else {
-                if (currentHeaderTrailingText.isNotEmpty()) currentHeaderTrailingText else finalTitle
-            }
+
             scenes.add(ParsedScene(idx, finalTitle, finalText))
             currentBodyLines.clear()
             currentHeaderTrailingText = ""
@@ -82,13 +113,13 @@ object ScriptMapParser {
         if (scenes.isEmpty() && trimmed.isNotEmpty()) {
             val paragraphs = trimmed.split(Regex("\n\\s*\n"))
             paragraphs.forEachIndexed { index, paragraph ->
-                val pTrimmed = paragraph.trim()
-                if (pTrimmed.isNotEmpty()) {
+                val pCleaned = cleanScriptText(paragraph)
+                if (pCleaned.isNotEmpty()) {
                     scenes.add(
                         ParsedScene(
                             sceneIndex = index + 1,
                             sceneTitle = "Scene ${index + 1}",
-                            scriptText = pTrimmed
+                            scriptText = pCleaned
                         )
                     )
                 }

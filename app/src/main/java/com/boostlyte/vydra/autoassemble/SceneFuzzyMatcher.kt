@@ -315,38 +315,40 @@ object SceneFuzzyMatcher {
         // Iterate possible start positions in the remaining transcript
         for (start in fromIndex until transcriptLen) {
             val firstSceneWord = sceneTokens.first()
-            var matchesAnchor = false
-            for (offset in 0..min(2, transcriptLen - start - 1)) {
-                if (wordsFuzzyMatch(firstSceneWord, transcriptTokens[start + offset].normalized)) {
-                    matchesAnchor = true
-                    break
-                }
-            }
+            val secondSceneWord = sceneTokens.getOrNull(1)
+            val thirdSceneWord = sceneTokens.getOrNull(2)
 
-            if (!matchesAnchor && sceneLen > 1) {
-                val secondSceneWord = sceneTokens[1]
-                for (offset in 0..min(3, transcriptLen - start - 1)) {
-                    if (wordsFuzzyMatch(secondSceneWord, transcriptTokens[start + offset].normalized)) {
-                        matchesAnchor = true
-                        break
-                    }
-                }
-            }
+            val currentNorm = transcriptTokens[start].normalized
+            val matchesAnchor = wordsFuzzyMatch(firstSceneWord, currentNorm) ||
+                    (secondSceneWord != null && wordsFuzzyMatch(secondSceneWord, currentNorm)) ||
+                    (thirdSceneWord != null && wordsFuzzyMatch(thirdSceneWord, currentNorm))
 
             val testAnchor = if (matchesAnchor) true else (sceneLen <= 3)
 
             if (testAnchor) {
-                val endLimit = min(transcriptLen - 1, start + maxWindowSize)
+                val endLimit = min(transcriptLen - 1, start + maxWindowSize - 1)
                 val startLimit = min(endLimit, start + minWindowSize - 1)
 
                 for (end in startLimit..endLimit) {
                     val windowTokens = transcriptTokens.subList(start, end + 1).map { it.normalized }
                     val score = computeAlignmentScore(sceneTokens, windowTokens)
 
-                    if (score > highestScore) {
+                    val windowLen = end - start + 1
+                    val isBetter = when {
+                        score > highestScore -> true
+                        score == highestScore && bestMatch != null -> {
+                            val currDiff = abs(windowLen - sceneLen)
+                            val bestDiff = abs((bestMatch.endIndex - bestMatch.startIndex + 1) - sceneLen)
+                            currDiff < bestDiff
+                        }
+                        else -> false
+                    }
+
+                    if (isBetter) {
                         highestScore = score
                         bestMatch = WindowMatch(start, end, score)
-                        if (score >= 0.95f) {
+                        // If exact 100% match with ideal length, we can return immediately
+                        if (score >= 0.999f && windowLen == sceneLen) {
                             return bestMatch
                         }
                     }
@@ -359,12 +361,28 @@ object SceneFuzzyMatcher {
             val step = max(1, sceneLen / 3)
             var start = fromIndex
             while (start < transcriptLen) {
-                val end = min(transcriptLen - 1, start + sceneLen)
-                val windowTokens = transcriptTokens.subList(start, end + 1).map { it.normalized }
-                val score = computeAlignmentScore(sceneTokens, windowTokens)
-                if (score > highestScore) {
-                    highestScore = score
-                    bestMatch = WindowMatch(start, end, score)
+                val endLimit = min(transcriptLen - 1, start + maxWindowSize - 1)
+                val startLimit = min(endLimit, start + minWindowSize - 1)
+                for (end in startLimit..endLimit) {
+                    val windowTokens = transcriptTokens.subList(start, end + 1).map { it.normalized }
+                    val score = computeAlignmentScore(sceneTokens, windowTokens)
+                    val windowLen = end - start + 1
+                    val isBetter = when {
+                        score > highestScore -> true
+                        score == highestScore && bestMatch != null -> {
+                            val currDiff = abs(windowLen - sceneLen)
+                            val bestDiff = abs((bestMatch.endIndex - bestMatch.startIndex + 1) - sceneLen)
+                            currDiff < bestDiff
+                        }
+                        else -> false
+                    }
+                    if (isBetter) {
+                        highestScore = score
+                        bestMatch = WindowMatch(start, end, score)
+                        if (score >= 0.999f && windowLen == sceneLen) {
+                            return bestMatch
+                        }
+                    }
                 }
                 start += step
             }
