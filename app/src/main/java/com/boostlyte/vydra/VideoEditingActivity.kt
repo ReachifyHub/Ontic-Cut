@@ -912,12 +912,18 @@ class VideoEditingActivity : AppCompatActivity() {
 
         setupFullscreenAndPipControls()
 
-        val canvasLayoutListener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
-            triggerCanvasLayoutUpdate()
+        val canvasLayoutChangeListener = View.OnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            val newW = right - left
+            val newH = bottom - top
+            val oldW = oldRight - oldLeft
+            val oldH = oldBottom - oldTop
+            if (newW > 0 && newH > 0 && (newW != oldW || newH != oldH)) {
+                triggerCanvasLayoutUpdate()
+            }
         }
-        playerContainer.viewTreeObserver.addOnGlobalLayoutListener(canvasLayoutListener)
-        pipPlayerContainer.viewTreeObserver.addOnGlobalLayoutListener(canvasLayoutListener)
-        fullscreenCanvasHolder.viewTreeObserver.addOnGlobalLayoutListener(canvasLayoutListener)
+        playerContainer.addOnLayoutChangeListener(canvasLayoutChangeListener)
+        pipPlayerContainer.addOnLayoutChangeListener(canvasLayoutChangeListener)
+        fullscreenCanvasHolder.addOnLayoutChangeListener(canvasLayoutChangeListener)
 
         tvDuration = findViewById(R.id.tvDuration)
         sequenceTrackContainer = findViewById(R.id.sequenceTrackContainer)
@@ -2511,160 +2517,239 @@ class VideoEditingActivity : AppCompatActivity() {
         val hFrac = bounds.height().coerceIn(0.001f, 1f)
 
         val activeParent = (canvasContainer.parent as? View) ?: playerContainer
-        activeParent.post {
+        val applyLayout = {
             val containerWidth = activeParent.width.toFloat()
             val containerHeight = activeParent.height.toFloat()
-            if (containerWidth <= 0f || containerHeight <= 0f) return@post
-
-            val projectRatio = viewModel.project.value?.canvasAspectRatio?.aspectRatio
-            val baseVideoRatio = projectRatio ?: if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else {
-                val format = if (::player.isInitialized) player.videoFormat else null
-                if (format != null && format.width > 0 && format.height > 0) {
-                    val rot = format.rotationDegrees
-                    val vw = if (rot == 90 || rot == 270) format.height else format.width
-                    val vh = if (rot == 90 || rot == 270) format.width else format.height
-                    vw.toFloat() / vh.toFloat()
-                } else 16f / 9f
-            }
-
-            val croppedAspectRatio = (baseVideoRatio * wFrac) / hFrac
-            val containerRatio = containerWidth / containerHeight
-
-            val canvasW: Float
-            val canvasH: Float
-            if (croppedAspectRatio > containerRatio) {
-                canvasW = containerWidth
-                canvasH = containerWidth / croppedAspectRatio
-            } else {
-                canvasW = containerHeight * croppedAspectRatio
-                canvasH = containerHeight
-            }
-
-            // 1. Size canvasContainer to the cropped aspect ratio box
-            val canvasLp = canvasContainer.layoutParams as FrameLayout.LayoutParams
-            canvasLp.width = canvasW.toInt()
-            canvasLp.height = canvasH.toInt()
-            canvasLp.gravity = Gravity.CENTER
-            canvasContainer.layoutParams = canvasLp
-
-            // Enable clipping on canvasContainer and mainVideoMaskContainer
-            canvasContainer.clipChildren = true
-            canvasContainer.clipToPadding = true
-            mainVideoMaskContainer?.clipChildren = true
-            mainVideoMaskContainer?.clipToPadding = true
-
-            // 2. Scale playerView so the crop box fills canvasContainer
-            val fullWidth = canvasW / wFrac
-            val fullHeight = canvasH / hFrac
-
-            val playerLp = playerView.layoutParams as FrameLayout.LayoutParams
-            playerLp.width = fullWidth.toInt()
-            playerLp.height = fullHeight.toInt()
-            playerLp.gravity = Gravity.TOP or Gravity.START
-            playerView.layoutParams = playerLp
-            playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
-
-            playerView.translationX = -fullWidth * xFrac
-            playerView.translationY = -fullHeight * yFrac
-
-            val photoLp = photoSequencePreviewImageView?.layoutParams as? FrameLayout.LayoutParams
-            photoLp?.let {
-                it.width = fullWidth.toInt()
-                it.height = fullHeight.toInt()
-                it.gravity = Gravity.TOP or Gravity.START
-                photoSequencePreviewImageView?.layoutParams = it
-                photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.FIT_XY
-                photoSequencePreviewImageView?.translationX = -fullWidth * xFrac
-                photoSequencePreviewImageView?.translationY = -fullHeight * yFrac
-            }
-
-            val hwCanvas = findViewById<com.boostlyte.vydra.customviews.HandwritingCanvasView>(R.id.handwritingCanvasView)
-            val overlays = listOf(textOverlayView, draggableTextOverlay, imageOverlayView, draggableImageOverlay, cropOverlayView, videoMaskOverlayView, hwCanvas)
-            for (overlay in overlays) {
-                overlay?.let {
-                    val overlayParams = it.layoutParams as FrameLayout.LayoutParams
-                    overlayParams.width = FrameLayout.LayoutParams.MATCH_PARENT
-                    overlayParams.height = FrameLayout.LayoutParams.MATCH_PARENT
-                    overlayParams.gravity = Gravity.CENTER
-                    it.layoutParams = overlayParams
-                    it.translationX = 0f
-                    it.translationY = 0f
+            if (containerWidth > 0f && containerHeight > 0f) {
+                val projectRatio = viewModel.project.value?.canvasAspectRatio?.aspectRatio
+                val baseVideoRatio = projectRatio ?: if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else {
+                    val format = if (::player.isInitialized) player.videoFormat else null
+                    if (format != null && format.width > 0 && format.height > 0) {
+                        val rot = format.rotationDegrees
+                        val vw = if (rot == 90 || rot == 270) format.height else format.width
+                        val vh = if (rot == 90 || rot == 270) format.width else format.height
+                        vw.toFloat() / vh.toFloat()
+                    } else 16f / 9f
                 }
-            }
 
-            textOverlayView?.setVideoSize(canvasW.toInt(), canvasH.toInt())
-            draggableTextOverlay?.setVideoSize(canvasW.toInt(), canvasH.toInt())
-            imageOverlayView?.setVideoSize(canvasW.toInt(), canvasH.toInt())
-            draggableImageOverlay?.setVideoSize(canvasW.toInt(), canvasH.toInt())
-            cropOverlayView?.setVideoSize(canvasW.toInt(), canvasH.toInt())
+                val croppedAspectRatio = (baseVideoRatio * wFrac) / hFrac
+                val containerRatio = containerWidth / containerHeight
+
+                val canvasW: Float
+                val canvasH: Float
+                if (croppedAspectRatio > containerRatio) {
+                    canvasW = containerWidth
+                    canvasH = containerWidth / croppedAspectRatio
+                } else {
+                    canvasW = containerHeight * croppedAspectRatio
+                    canvasH = containerHeight
+                }
+
+                val targetW = canvasW.toInt()
+                val targetH = canvasH.toInt()
+
+                // 1. Size canvasContainer to the cropped aspect ratio box only if changed
+                val canvasLp = canvasContainer.layoutParams as? FrameLayout.LayoutParams
+                if (canvasLp != null) {
+                    if (canvasLp.width != targetW || canvasLp.height != targetH || canvasLp.gravity != Gravity.CENTER) {
+                        canvasLp.width = targetW
+                        canvasLp.height = targetH
+                        canvasLp.gravity = Gravity.CENTER
+                        canvasContainer.layoutParams = canvasLp
+                    }
+                }
+
+                // Enable clipping on canvasContainer and mainVideoMaskContainer
+                if (!canvasContainer.clipChildren) canvasContainer.clipChildren = true
+                if (!canvasContainer.clipToPadding) canvasContainer.clipToPadding = true
+                mainVideoMaskContainer?.let {
+                    if (!it.clipChildren) it.clipChildren = true
+                    if (!it.clipToPadding) it.clipToPadding = true
+                }
+
+                // 2. Scale playerView so the crop box fills canvasContainer
+                val fullWidth = canvasW / wFrac
+                val fullHeight = canvasH / hFrac
+                val targetPlayerW = fullWidth.toInt()
+                val targetPlayerH = fullHeight.toInt()
+
+                val playerLp = playerView.layoutParams as? FrameLayout.LayoutParams
+                if (playerLp != null) {
+                    val targetGravity = Gravity.TOP or Gravity.START
+                    if (playerLp.width != targetPlayerW || playerLp.height != targetPlayerH || playerLp.gravity != targetGravity) {
+                        playerLp.width = targetPlayerW
+                        playerLp.height = targetPlayerH
+                        playerLp.gravity = targetGravity
+                        playerView.layoutParams = playerLp
+                    }
+                }
+                if (playerView.resizeMode != AspectRatioFrameLayout.RESIZE_MODE_FILL) {
+                    playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+                }
+
+                val targetTransX = -fullWidth * xFrac
+                val targetTransY = -fullHeight * yFrac
+                if (playerView.translationX != targetTransX) playerView.translationX = targetTransX
+                if (playerView.translationY != targetTransY) playerView.translationY = targetTransY
+
+                val photoLp = photoSequencePreviewImageView?.layoutParams as? FrameLayout.LayoutParams
+                photoLp?.let {
+                    val targetGravity = Gravity.TOP or Gravity.START
+                    if (it.width != targetPlayerW || it.height != targetPlayerH || it.gravity != targetGravity) {
+                        it.width = targetPlayerW
+                        it.height = targetPlayerH
+                        it.gravity = targetGravity
+                        photoSequencePreviewImageView?.layoutParams = it
+                    }
+                    if (photoSequencePreviewImageView?.scaleType != ImageView.ScaleType.FIT_XY) {
+                        photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.FIT_XY
+                    }
+                    if (photoSequencePreviewImageView?.translationX != targetTransX) photoSequencePreviewImageView?.translationX = targetTransX
+                    if (photoSequencePreviewImageView?.translationY != targetTransY) photoSequencePreviewImageView?.translationY = targetTransY
+                }
+
+                val hwCanvas = findViewById<com.boostlyte.vydra.customviews.HandwritingCanvasView>(R.id.handwritingCanvasView)
+                val overlays = listOf(textOverlayView, draggableTextOverlay, imageOverlayView, draggableImageOverlay, cropOverlayView, videoMaskOverlayView, hwCanvas)
+                for (overlay in overlays) {
+                    overlay?.let {
+                        val overlayParams = it.layoutParams as? FrameLayout.LayoutParams
+                        if (overlayParams != null && (overlayParams.width != FrameLayout.LayoutParams.MATCH_PARENT ||
+                            overlayParams.height != FrameLayout.LayoutParams.MATCH_PARENT ||
+                            overlayParams.gravity != Gravity.CENTER)) {
+                            overlayParams.width = FrameLayout.LayoutParams.MATCH_PARENT
+                            overlayParams.height = FrameLayout.LayoutParams.MATCH_PARENT
+                            overlayParams.gravity = Gravity.CENTER
+                            it.layoutParams = overlayParams
+                        }
+                        if (it.translationX != 0f) it.translationX = 0f
+                        if (it.translationY != 0f) it.translationY = 0f
+                    }
+                }
+
+                textOverlayView?.setVideoSize(targetW, targetH)
+                draggableTextOverlay?.setVideoSize(targetW, targetH)
+                imageOverlayView?.setVideoSize(targetW, targetH)
+                draggableImageOverlay?.setVideoSize(targetW, targetH)
+                cropOverlayView?.setVideoSize(targetW, targetH)
+            }
+        }
+        if (activeParent.width > 0 && activeParent.height > 0) {
+            applyLayout()
+        } else {
+            activeParent.post(applyLayout)
         }
     }
 
     private fun resetCropPreview() {
         val canvasContainer = findViewById<FrameLayout>(R.id.canvasContainer) ?: return
         val activeParent = (canvasContainer.parent as? View) ?: playerContainer
-        activeParent.post {
+        val applyLayout = {
             val containerWidth = activeParent.width
             val containerHeight = activeParent.height
-            if (containerWidth <= 0 || containerHeight <= 0) return@post
-
-            val projectRatio = viewModel.project.value?.canvasAspectRatio?.aspectRatio
-            val baseVideoRatio = projectRatio ?: if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else 16f / 9f
-            val containerRatio = containerWidth.toFloat() / containerHeight.toFloat()
-            var finalWidth = containerWidth
-            var finalHeight = containerHeight
-
-            if (baseVideoRatio > containerRatio) {
-                finalHeight = (containerWidth / baseVideoRatio).toInt()
-            } else {
-                finalWidth = (containerHeight * baseVideoRatio).toInt()
-            }
-
-            val canvasLp = canvasContainer.layoutParams as FrameLayout.LayoutParams
-            canvasLp.width = finalWidth
-            canvasLp.height = finalHeight
-            canvasLp.gravity = Gravity.CENTER
-            canvasContainer.layoutParams = canvasLp
-
-            val playerLp = playerView.layoutParams as FrameLayout.LayoutParams
-            playerLp.width = FrameLayout.LayoutParams.MATCH_PARENT
-            playerLp.height = FrameLayout.LayoutParams.MATCH_PARENT
-            playerLp.gravity = Gravity.CENTER
-            playerView.layoutParams = playerLp
-            playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-            playerView.translationX = 0f
-            playerView.translationY = 0f
-
-            val photoLp = photoSequencePreviewImageView?.layoutParams as? FrameLayout.LayoutParams
-            photoLp?.let {
-                it.width = FrameLayout.LayoutParams.MATCH_PARENT
-                it.height = FrameLayout.LayoutParams.MATCH_PARENT
-                it.gravity = Gravity.CENTER
-                photoSequencePreviewImageView?.layoutParams = it
-                photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.FIT_CENTER
-                photoSequencePreviewImageView?.translationX = 0f
-                photoSequencePreviewImageView?.translationY = 0f
-            }
-
-            val hwCanvas = findViewById<com.boostlyte.vydra.customviews.HandwritingCanvasView>(R.id.handwritingCanvasView)
-            val overlays = listOf(textOverlayView, draggableTextOverlay, imageOverlayView, draggableImageOverlay, cropOverlayView, videoMaskOverlayView, hwCanvas)
-            for (overlay in overlays) {
-                overlay?.let {
-                    val overlayParams = it.layoutParams as FrameLayout.LayoutParams
-                    overlayParams.width = FrameLayout.LayoutParams.MATCH_PARENT
-                    overlayParams.height = FrameLayout.LayoutParams.MATCH_PARENT
-                    overlayParams.gravity = Gravity.CENTER
-                    it.layoutParams = overlayParams
-                    it.translationX = 0f
-                    it.translationY = 0f
+            if (containerWidth > 0 && containerHeight > 0) {
+                val projectRatio = viewModel.project.value?.canvasAspectRatio?.aspectRatio
+                val baseVideoRatio = projectRatio ?: if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else {
+                    val format = if (::player.isInitialized) player.videoFormat else null
+                    if (format != null && format.width > 0 && format.height > 0) {
+                        val rot = format.rotationDegrees
+                        val vw = if (rot == 90 || rot == 270) format.height else format.width
+                        val vh = if (rot == 90 || rot == 270) format.width else format.height
+                        vw.toFloat() / vh.toFloat()
+                    } else 16f / 9f
                 }
-            }
+                val containerRatio = containerWidth.toFloat() / containerHeight.toFloat()
+                var finalWidth = containerWidth
+                var finalHeight = containerHeight
 
-            textOverlayView?.setVideoSize(finalWidth, finalHeight)
-            draggableTextOverlay?.setVideoSize(finalWidth, finalHeight)
-            imageOverlayView?.setVideoSize(finalWidth, finalHeight)
-            draggableImageOverlay?.setVideoSize(finalWidth, finalHeight)
-            cropOverlayView?.setVideoSize(finalWidth, finalHeight)
+                if (baseVideoRatio > containerRatio) {
+                    finalHeight = (containerWidth / baseVideoRatio).toInt()
+                } else {
+                    finalWidth = (containerHeight * baseVideoRatio).toInt()
+                }
+
+                val canvasLp = canvasContainer.layoutParams as? FrameLayout.LayoutParams
+                if (canvasLp != null) {
+                    if (canvasLp.width != finalWidth || canvasLp.height != finalHeight || canvasLp.gravity != Gravity.CENTER) {
+                        canvasLp.width = finalWidth
+                        canvasLp.height = finalHeight
+                        canvasLp.gravity = Gravity.CENTER
+                        canvasContainer.layoutParams = canvasLp
+                    }
+                }
+
+                if (!canvasContainer.clipChildren) canvasContainer.clipChildren = true
+                if (!canvasContainer.clipToPadding) canvasContainer.clipToPadding = true
+                mainVideoMaskContainer?.let {
+                    if (!it.clipChildren) it.clipChildren = true
+                    if (!it.clipToPadding) it.clipToPadding = true
+                }
+
+                val playerLp = playerView.layoutParams as? FrameLayout.LayoutParams
+                if (playerLp != null) {
+                    if (playerLp.width != FrameLayout.LayoutParams.MATCH_PARENT ||
+                        playerLp.height != FrameLayout.LayoutParams.MATCH_PARENT ||
+                        playerLp.gravity != Gravity.CENTER) {
+                        playerLp.width = FrameLayout.LayoutParams.MATCH_PARENT
+                        playerLp.height = FrameLayout.LayoutParams.MATCH_PARENT
+                        playerLp.gravity = Gravity.CENTER
+                        playerView.layoutParams = playerLp
+                    }
+                }
+                if (playerView.resizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT) {
+                    playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                }
+                if (playerView.translationX != 0f) playerView.translationX = 0f
+                if (playerView.translationY != 0f) playerView.translationY = 0f
+
+                val isImageCurrentlyVisible = photoSequencePreviewImageView?.visibility == View.VISIBLE
+                val photoLp = photoSequencePreviewImageView?.layoutParams as? FrameLayout.LayoutParams
+                if (photoLp != null) {
+                    if (photoLp.width != FrameLayout.LayoutParams.MATCH_PARENT ||
+                        photoLp.height != FrameLayout.LayoutParams.MATCH_PARENT ||
+                        photoLp.gravity != Gravity.CENTER) {
+                        photoLp.width = FrameLayout.LayoutParams.MATCH_PARENT
+                        photoLp.height = FrameLayout.LayoutParams.MATCH_PARENT
+                        photoLp.gravity = Gravity.CENTER
+                        photoSequencePreviewImageView?.layoutParams = photoLp
+                    }
+                }
+                if (!isImageCurrentlyVisible) {
+                    if (photoSequencePreviewImageView?.scaleType != ImageView.ScaleType.FIT_CENTER) {
+                        photoSequencePreviewImageView?.scaleType = ImageView.ScaleType.FIT_CENTER
+                    }
+                    if (photoSequencePreviewImageView?.translationX != 0f) photoSequencePreviewImageView?.translationX = 0f
+                    if (photoSequencePreviewImageView?.translationY != 0f) photoSequencePreviewImageView?.translationY = 0f
+                }
+
+                val hwCanvas = findViewById<com.boostlyte.vydra.customviews.HandwritingCanvasView>(R.id.handwritingCanvasView)
+                val overlays = listOf(textOverlayView, draggableTextOverlay, imageOverlayView, draggableImageOverlay, cropOverlayView, videoMaskOverlayView, hwCanvas)
+                for (overlay in overlays) {
+                    overlay?.let {
+                        val overlayParams = it.layoutParams as? FrameLayout.LayoutParams
+                        if (overlayParams != null && (overlayParams.width != FrameLayout.LayoutParams.MATCH_PARENT ||
+                            overlayParams.height != FrameLayout.LayoutParams.MATCH_PARENT ||
+                            overlayParams.gravity != Gravity.CENTER)) {
+                            overlayParams.width = FrameLayout.LayoutParams.MATCH_PARENT
+                            overlayParams.height = FrameLayout.LayoutParams.MATCH_PARENT
+                            overlayParams.gravity = Gravity.CENTER
+                            it.layoutParams = overlayParams
+                        }
+                        if (it.translationX != 0f) it.translationX = 0f
+                        if (it.translationY != 0f) it.translationY = 0f
+                    }
+                }
+
+                textOverlayView?.setVideoSize(finalWidth, finalHeight)
+                draggableTextOverlay?.setVideoSize(finalWidth, finalHeight)
+                imageOverlayView?.setVideoSize(finalWidth, finalHeight)
+                draggableImageOverlay?.setVideoSize(finalWidth, finalHeight)
+                cropOverlayView?.setVideoSize(finalWidth, finalHeight)
+            }
+        }
+        if (activeParent.width > 0 && activeParent.height > 0) {
+            applyLayout()
+        } else {
+            activeParent.post(applyLayout)
         }
     }
 
@@ -6952,11 +7037,12 @@ class VideoEditingActivity : AppCompatActivity() {
                     prepare()
                 }
             }
-            val rawVol = if (op.id == editingAudioOpId && currentAudioVolumeOverride != null) {
-                currentAudioVolumeOverride!!
-            } else {
-                op.volume
-            }
+            val activeEditingId = editingAudioOpId ?: viewModel.selectedOperationId.value
+            val isBeingEdited = (op.id == activeEditingId)
+            val tempOverride = if (isBeingEdited) {
+                currentAudioVolumeOverride ?: audioEditingToolbar?.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)?.value
+            } else null
+            val rawVol = tempOverride ?: op.volume
             val effectiveVol = if (isMasterMuted) 0f else rawVol.coerceIn(0f, 1f)
             if (bgPlayer.volume != effectiveVol) {
                 bgPlayer.volume = effectiveVol
