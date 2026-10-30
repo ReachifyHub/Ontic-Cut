@@ -118,6 +118,14 @@ object ProjectSerializer {
             }
             
             return try {
+                if (clazz == EditOperation.AddBackgroundAudio::class.java) {
+                    if (!jsonObject.has("volume")) {
+                        jsonObject.addProperty("volume", 1.0f)
+                    }
+                    if (!jsonObject.has("beats")) {
+                        jsonObject.add("beats", com.google.gson.JsonArray())
+                    }
+                }
                 baseGson.fromJson(jsonObject, clazz)
             } catch (e: Exception) {
                 android.util.Log.w("ProjectSerializer", "Failed to deserialize operation $type: ${e.message}")

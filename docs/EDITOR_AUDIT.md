@@ -223,31 +223,12 @@
 ### 3. Audio Tracks
 
 #### 3.1 Volume Slider
-- **Status:** `BROKEN` (Seed Issue Confirmed)
-- **Evidence:**
-  1. **Preview Breakdown:** In `VideoEditingActivity.kt:1741-1753`, `audioVolumeSlider?.addOnChangeListener` sets `bgAudioPlayerMap[id]?.volume = pVol`. However, during playback, `updateProgress()` periodically invokes `syncBgAudio()` every 50ms (lines 6690–6740). At line 6715:
-     ```kotlin
-     val effectiveVol = if (isMasterMuted) 0f else op.volume.coerceIn(0f, 1f)
-     if (bgPlayer.volume != effectiveVol) {
-         bgPlayer.volume = effectiveVol
-     }
-     ```
-     Because `addOnChangeListener` does NOT update `op.volume` in `viewModel.project` (only `onStopTrackingTouch` does), `syncBgAudio` continuously resets `bgPlayer.volume` back to the old `op.volume` (1.0f / 100%) every 50ms during preview playback!
-  2. **Export Breakdown:** When the user closes the audio editing toolbar by tapping Done (`btnAudioDone`) or Cancel, `exitAudioEditingMode()` is executed (lines 4400–4416). Line 4416 immediately calls `viewModel.selectOperation(null)`. The observer `selectedOperationId.observe` (lines 2254–2260) detects the null ID and invokes `exitAudioEditingMode()` a second time. Inside `exitAudioEditingMode`:
-     ```kotlin
-     viewModel.selectedOperationId.value?.let { id ->
-         val op = project?.operations?.find { ... }
-         if (op != null && op.volume != value) {
-             viewModel.updateOperation(op.copy(volume = value))
-         }
-     }
-     ```
-     Because `selectedOperationId.value` was already cleared to null by `selectOperation(null)`, the update block is completely bypassed, and the volume change is never persisted to the project!
-  3. **Main Video Clip Volume:** There is no volume slider for main track video clips in `video_editing_toolbar.xml`; only a binary Mute toggle (`btnVideoMute`) exists.
-- **Root-Cause Hypothesis:** 
-  - Preview: `syncBgAudio` polls uncommitted model state rather than current slider value.
-  - Export: `exitAudioEditingMode()` is called after `selectedOperationId` is cleared, dropping the dirty slider value.
-- **Fix Effort:** `M`
+- **Status:** `WORKS` (Resolved)
+- **Resolution & Evidence:**
+  1. **Real-time Preview Fix:** Introduced `currentAudioVolumeOverride` and `editingAudioOpId` in `VideoEditingActivity.kt`. In `syncBgAudio()`, if `op.id == editingAudioOpId && currentAudioVolumeOverride != null`, the override is used rather than stale `op.volume`. Slider changes update ExoPlayer immediately and maintain the set volume across 50ms playback sync intervals without resetting.
+  2. **Persistence & Export Fix:** Added re-entry guard (`isExitingAudioMode`) in `exitAudioEditingMode()`. The dirty slider value is committed to `EditOperation.AddBackgroundAudio` using `editingAudioOpId` before clearing selection. `ProjectSerializer` ensures backward compatibility so legacy JSON without `volume` defaults to 1.0f. In `VideoEditingViewModel.kt` (lines 1267–1272 merge path, 1499–1504 non-merge path), `volume=${String.format(Locale.US, "%.2f", safeVol)}` is applied in the FFmpeg audio filter chain.
+  3. **UI Restructure:** Toolbar restructured into 7 icon buttons in exact order: `Trim`, `Volume`, `Fade`, `Ducking`, `Beats`, `Delete`, `Done`. `audioTrimPanel` and `audioVolumePanel` are hidden by default on clip selection and mutually exclusive. Compact volume panel provides volume slider (0.0–2.0), numeric percentage readout, Cancel button (reverts preview and model), and Done button (commits model and closes panel). Undo hygiene: one snapshot generated on slider touch release (`onStopTrackingTouch`).
+- **Fix Effort:** Completed (`M`).
 
 #### 3.2 Trim Track
 - **Status:** `WORKS`

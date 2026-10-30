@@ -64,6 +64,13 @@ class VideoEditingViewModel : ViewModel() {
         _exportAudioOnly.value = audioOnly
     }
 
+    fun updateCanvasAspectRatio(aspectRatio: com.boostlyte.vydra.models.CanvasAspectRatio) {
+        executeCommand(com.boostlyte.vydra.commands.MutateProjectCommand("Change Canvas Ratio") { project ->
+            project.copy(canvasAspectRatio = aspectRatio)
+        })
+        markHasUnsavedEdits()
+    }
+
     val operations: StateFlow<List<EditOperation>>
         get() = MutableStateFlow(project.value?.operations ?: emptyList()).asStateFlow()
 
@@ -656,42 +663,77 @@ class VideoEditingViewModel : ViewModel() {
         val currentProject = _project.value ?: return null
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
 
-        var sourceVideoWidth = 1280
-        var sourceVideoHeight = 720
-        try {
-            val retriever = android.media.MediaMetadataRetriever()
-            try {
-                retriever.setDataSource(sourceFilePath)
-                val wStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                val hStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                val rStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
-                val w = wStr?.toIntOrNull() ?: 1280
-                val h = hStr?.toIntOrNull() ?: 720
-                val r = rStr?.toIntOrNull() ?: 0
-                if (r == 90 || r == 270) {
-                    sourceVideoWidth = h
-                    sourceVideoHeight = w
-                } else {
-                    sourceVideoWidth = w
-                    sourceVideoHeight = h
-                }
-            } finally {
-                retriever.release()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error extracting source video dimensions: ${e.message}")
-        }
-
-        if (currentProject.operations.isEmpty()) {
-            return "-y -i \"$sourceFilePath\" -c copy \"$outputFilePath\""
-        }
-
-        val operations = currentProject.operations
-
         val isMainImage = sourceFilePath.endsWith(".png", ignoreCase = true) ||
                           sourceFilePath.endsWith(".jpg", ignoreCase = true) ||
                           sourceFilePath.endsWith(".jpeg", ignoreCase = true) ||
                           sourceFilePath.endsWith(".webp", ignoreCase = true)
+
+        var sourceVideoWidth = 1280
+        var sourceVideoHeight = 720
+        if (isMainImage) {
+            try {
+                val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(sourceFilePath, opts)
+                if (opts.outWidth > 0 && opts.outHeight > 0) {
+                    var w = opts.outWidth
+                    var h = opts.outHeight
+                    try {
+                        val exif = android.media.ExifInterface(sourceFilePath)
+                        val orientation = exif.getAttributeInt(
+                            android.media.ExifInterface.TAG_ORIENTATION,
+                            android.media.ExifInterface.ORIENTATION_NORMAL
+                        )
+                        if (orientation == android.media.ExifInterface.ORIENTATION_ROTATE_90 ||
+                            orientation == android.media.ExifInterface.ORIENTATION_ROTATE_270 ||
+                            orientation == android.media.ExifInterface.ORIENTATION_TRANSPOSE ||
+                            orientation == android.media.ExifInterface.ORIENTATION_TRANSVERSE) {
+                            val temp = w
+                            w = h
+                            h = temp
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Exif orientation read failed: ${e.message}")
+                    }
+                    sourceVideoWidth = w
+                    sourceVideoHeight = h
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error extracting image dimensions: ${e.message}")
+            }
+        } else {
+            try {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(sourceFilePath)
+                    val wStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    val hStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    val rStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    val w = wStr?.toIntOrNull() ?: 1280
+                    val h = hStr?.toIntOrNull() ?: 720
+                    val r = rStr?.toIntOrNull() ?: 0
+                    if (r == 90 || r == 270) {
+                        sourceVideoWidth = h
+                        sourceVideoHeight = w
+                    } else {
+                        sourceVideoWidth = w
+                        sourceVideoHeight = h
+                    }
+                } finally {
+                    retriever.release()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error extracting source video dimensions: ${e.message}")
+            }
+        }
+
+        val targetCanvasRatio = currentProject.canvasAspectRatio ?: com.boostlyte.vydra.models.CanvasAspectRatio.fromDimensions(sourceVideoWidth, sourceVideoHeight)
+        val (targetWidth, targetHeight) = targetCanvasRatio.getTargetDimensions(_exportResolution.value)
+
+        if (currentProject.operations.isEmpty() && currentProject.canvasAspectRatio == null) {
+            return "-y -i \"$sourceFilePath\" -c copy \"$outputFilePath\""
+        }
+
+        val operations = currentProject.operations
 
         // Detect if source video has an audio stream
         val hasAudio = if (isMainImage) {
@@ -868,72 +910,26 @@ class VideoEditingViewModel : ViewModel() {
             val inputCount = 1 + mergeOp.videoUris.size
             val filterParts = mutableListOf<String>()
 
-            var mainWidth = 1280
-            var mainHeight = 720
+            var mainWidth = targetWidth
+            var mainHeight = targetHeight
             var sourceDurationMs = 0L
 
             if (isMainImage) {
-                try {
-                    val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    android.graphics.BitmapFactory.decodeFile(sourceFilePath, opts)
-                    if (opts.outWidth > 0 && opts.outHeight > 0) {
-                        var w = opts.outWidth
-                        var h = opts.outHeight
-                        try {
-                            val exif = android.media.ExifInterface(sourceFilePath)
-                            val orientation = exif.getAttributeInt(
-                                android.media.ExifInterface.TAG_ORIENTATION,
-                                android.media.ExifInterface.ORIENTATION_NORMAL
-                            )
-                            if (orientation == android.media.ExifInterface.ORIENTATION_ROTATE_90 ||
-                                orientation == android.media.ExifInterface.ORIENTATION_ROTATE_270 ||
-                                orientation == android.media.ExifInterface.ORIENTATION_TRANSPOSE ||
-                                orientation == android.media.ExifInterface.ORIENTATION_TRANSVERSE) {
-                                val temp = w
-                                w = h
-                                h = temp
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Exif orientation read failed: ${e.message}")
-                        }
-                        mainWidth = w
-                        mainHeight = h
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error extracting image dimensions: ${e.message}")
-                }
                 sourceDurationMs = 5000L
             } else {
                 try {
                     val retriever = android.media.MediaMetadataRetriever()
                     try {
                         retriever.setDataSource(sourceFilePath)
-                        val wStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                        val hStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                        val rStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
                         val dStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
-                        val w = wStr?.toIntOrNull() ?: 1280
-                        val h = hStr?.toIntOrNull() ?: 720
-                        val r = rStr?.toIntOrNull() ?: 0
                         sourceDurationMs = dStr?.toLongOrNull() ?: 0L
-                        if (r == 90 || r == 270) {
-                            mainWidth = h
-                            mainHeight = w
-                        } else {
-                            mainWidth = w
-                            mainHeight = h
-                        }
                     } finally {
                         retriever.release()
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error extracting dimensions: ${e.message}")
+                    Log.e(TAG, "Error extracting source duration: ${e.message}")
                 }
             }
-
-            // FFmpeg requires even dimensions
-            if (mainWidth % 2 != 0) mainWidth -= 1
-            if (mainHeight % 2 != 0) mainHeight -= 1
 
             val hasAudioArray = BooleanArray(inputCount)
             val durationsArray = DoubleArray(inputCount)
@@ -1064,7 +1060,7 @@ class VideoEditingViewModel : ViewModel() {
                 } else {
                     // Default COLOR
                     val color = bgOp?.colorHex ?: "black"
-                    val padColor = if (color.startsWith("#")) color else "black"
+                    val padColor = if (color.startsWith("#")) formatColorForFFmpeg(color) else "black"
                     // Create a solid color background of mainWidth x mainHeight
                     filterParts.add("color=c=$padColor:s=${mainWidth}x${mainHeight}:r=30[bg$i]")
                     filterParts.add("[pre$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease[fg$i]")
@@ -1214,11 +1210,11 @@ class VideoEditingViewModel : ViewModel() {
                 inputLabel = currentVideoLabel,
                 imageInputIndices = imageInputIndices,
                 density = density,
-                sourceVideoHeight = sourceVideoHeight
+                sourceVideoHeight = targetHeight
             )
             filterParts.addAll(sourceVideoStages)
             val finalVideoLabel = "[fmtv]"
-            filterParts.add("${tempVideoLabel}scale=-2:${_exportResolution.value},fps=${_exportFps.value},format=yuv420p$finalVideoLabel")
+            filterParts.add("${tempVideoLabel}scale=$targetWidth:$targetHeight,fps=${_exportFps.value},format=yuv420p$finalVideoLabel")
 
             if (audioMuted) {
                 filterParts.add("${currentAudioLabel}anullsink")
@@ -1441,7 +1437,7 @@ class VideoEditingViewModel : ViewModel() {
             inputLabel = currentInputVideoLabel,
             imageInputIndices = imageInputIndices,
             density = density,
-            sourceVideoHeight = sourceVideoHeight
+            sourceVideoHeight = targetHeight
         )
         filterComplexParts.addAll(videoStages)
 
@@ -1554,16 +1550,35 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         // ── Assemble the command ──
-        val hasVideoFilters = videoStages.isNotEmpty() || prepFilters.isNotEmpty()
+        val fmtLabel = "[fmtv]"
+        when {
+            bgOp?.type == EditOperation.CanvasBackground.BackgroundType.BLUR -> {
+                val blur = bgOp.blurRadius
+                val bgScale = "format=yuv420p,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight,boxblur=$blur"
+                val fgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease"
+                filterComplexParts.add("${finalVideoLabel}split=2[bg_nm_orig][fg_nm_orig]")
+                filterComplexParts.add("[bg_nm_orig]$bgScale[bg_nm]")
+                filterComplexParts.add("[fg_nm_orig]$fgScale[fg_nm]")
+                filterComplexParts.add("[bg_nm][fg_nm]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=${_exportFps.value},format=yuv420p$fmtLabel")
+            }
+            bgOp?.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgImageIndex != -1 -> {
+                val bgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight"
+                val fgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease"
+                filterComplexParts.add("[$bgImageIndex:v]$bgScale[bg_nm]")
+                filterComplexParts.add("${finalVideoLabel}$fgScale[fg_nm]")
+                filterComplexParts.add("[bg_nm][fg_nm]overlay=(W-w)/2:(H-h)/2:shortest=1,setsar=1,fps=${_exportFps.value},format=yuv420p$fmtLabel")
+            }
+            else -> {
+                val color = bgOp?.colorHex ?: "black"
+                val padColor = if (color.startsWith("#")) formatColorForFFmpeg(color) else "black"
+                filterComplexParts.add("${finalVideoLabel}scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2:color=$padColor,setsar=1,fps=${_exportFps.value},format=yuv420p$fmtLabel")
+            }
+        }
+        val mappedVideoLabel = fmtLabel
+        val hasVideoFilters = true
         val hasAudioFilters = finalAudioLabel != null
 
         if (hasVideoFilters || hasAudioFilters) {
-            var mappedVideoLabel = finalVideoLabel
-            if (hasVideoFilters) {
-                val fmtLabel = "[fmtv]"
-                filterComplexParts.add("${finalVideoLabel}scale=-2:${_exportResolution.value},fps=${_exportFps.value},format=yuv420p${fmtLabel}")
-                mappedVideoLabel = fmtLabel
-            }
             
             if (_exportAudioOnly.value && hasVideoFilters) {
                 filterComplexParts.add("${mappedVideoLabel}nullsink")
@@ -1624,7 +1639,7 @@ class VideoEditingViewModel : ViewModel() {
             val videoCodec = if (defaultEncoder == "software") "-c:v libx264 -pix_fmt yuv420p" else "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate"
             // If there are no video filters, we still need to apply the scale and fps output params
             if (!hasVideoFilters) {
-                cmd.append(" $videoCodec -vf scale=-2:${_exportResolution.value} -r ${_exportFps.value}")
+                cmd.append(" $videoCodec -vf scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2:color=black -r ${_exportFps.value}")
             } else {
                 cmd.append(" $videoCodec")
             }

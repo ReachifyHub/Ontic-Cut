@@ -476,6 +476,11 @@ class VideoEditingActivity : AppCompatActivity() {
     private var selectedVideoIndex: Int? = null
     private var videoEditingToolbar: View? = null
     private var audioEditingToolbar: View? = null
+    private var isExitingAudioMode = false
+    private var editingAudioOpId: String? = null
+    private var initialAudioVolume: Float = 1.0f
+    private var currentAudioVolumeOverride: Float? = null
+    private val isMasterMuted: Boolean get() = if (::player.isInitialized) player.volume == 0f else false
     private var backgroundEditingToolbar: View? = null
     private var speedEditingToolbar: View? = null
     private var cropEditingToolbar: View? = null
@@ -720,6 +725,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     } else {
                         closeHandwritingMode()
                     }
+                } else if (audioEditingToolbar?.visibility == View.VISIBLE) {
+                    exitAudioEditingMode(commit = true)
                 } else {
                     showQuitConfirmationDialog()
                 }
@@ -1672,92 +1679,104 @@ class VideoEditingActivity : AppCompatActivity() {
 
         audioEditingToolbar = try {
             findViewById<View>(R.id.audioEditingToolbar)?.also { toolbar ->
-                toolbar.findViewById<ImageButton>(R.id.btnAudioDone)?.setBounceClickListener {
-                    exitAudioEditingMode()
-                }
-                toolbar.findViewById<ImageButton>(R.id.btnAudioCancel)?.setBounceClickListener {
-                    exitAudioEditingMode()
-                }
-                toolbar.findViewById<ImageButton>(R.id.btnAudioDelete)?.setBounceClickListener {
-                    MaterialAlertDialogBuilder(this@VideoEditingActivity)
-                        .setTitle("Delete Audio")
-                        .setMessage("Are you sure you want to delete this audio track?")
-                        .setPositiveButton("Delete") { _, _ ->
-                            viewModel.selectedOperationId.value?.let { id ->
-                                viewModel.deleteOperation(id)
-                            }
-                            exitAudioEditingMode()
-                        }
-                        .setNegativeButton("Cancel", null)
-                        .show()
-                }
-                toolbar.findViewById<ImageButton>(R.id.btnAudioBeats)?.setBounceClickListener {
-                    val id = viewModel.selectedOperationId.value ?: return@setBounceClickListener
-                    val project = viewModel.project.value ?: return@setBounceClickListener
-                    val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio ?: return@setBounceClickListener
-                    
-                    if (op.beats.isNotEmpty()) {
-                        // Toggle off if already detected
-                        viewModel.updateOperation(op.copy(beats = emptyList()))
-                        android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_beats_cleared, android.widget.Toast.LENGTH_SHORT).show()
-                        toolbar.findViewById<ImageButton>(R.id.btnAudioBeats)?.setColorFilter(getColor(R.color.toolTextInactive))
-                        return@setBounceClickListener
-                    }
-                    
-                    android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_analyzing_beats, android.widget.Toast.LENGTH_SHORT).show()
-                    com.boostlyte.vydra.utils.AudioAnalyzer.detectBeats(this@VideoEditingActivity, op.audioUri) { beats ->
-                        runOnUiThread {
-                            if (beats.isNotEmpty()) {
-                                viewModel.updateOperation(op.copy(beats = beats))
-                                android.widget.Toast.makeText(this@VideoEditingActivity, "Found ${beats.size} beats!", android.widget.Toast.LENGTH_SHORT).show()
-                                toolbar.findViewById<ImageButton>(R.id.btnAudioBeats)?.setColorFilter(getColor(R.color.colorPrimary))
-                            } else {
-                                android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_no_clear_beats_found, android.widget.Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    }
-                }
-                toolbar.findViewById<ImageButton>(R.id.btnAudioDucking)?.setBounceClickListener {
-                    val id = viewModel.selectedOperationId.value ?: return@setBounceClickListener
-                    val project = viewModel.project.value ?: return@setBounceClickListener
-                    val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio ?: return@setBounceClickListener
+                val audioTrimPanel = toolbar.findViewById<View>(R.id.audioTrimPanel)
+                val audioVolumePanel = toolbar.findViewById<View>(R.id.audioVolumePanel)
+                val btnAudioTrim = toolbar.findViewById<ImageButton>(R.id.btnAudioTrim)
+                val btnAudioVolume = toolbar.findViewById<ImageButton>(R.id.btnAudioVolume)
+                val btnAudioFade = toolbar.findViewById<ImageButton>(R.id.btnAudioFade)
+                val btnAudioDucking = toolbar.findViewById<ImageButton>(R.id.btnAudioDucking)
+                val btnAudioBeats = toolbar.findViewById<ImageButton>(R.id.btnAudioBeats)
+                val btnAudioDelete = toolbar.findViewById<ImageButton>(R.id.btnAudioDelete)
+                val btnAudioDone = toolbar.findViewById<ImageButton>(R.id.btnAudioDone)
 
-                    val newDucking = !op.ducking
-                    viewModel.updateOperation(op.copy(ducking = newDucking))
-                    
-                    val color = if (newDucking) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive)
-                    toolbar.findViewById<ImageButton>(R.id.btnAudioDucking)?.setColorFilter(color)
-                    val msg = if (newDucking) "Audio ducking enabled" else "Audio ducking disabled"
-                    android.widget.Toast.makeText(this@VideoEditingActivity, msg, android.widget.Toast.LENGTH_SHORT).show()
+                fun updatePanelToggleButtons() {
+                    val isTrimOpen = audioTrimPanel?.visibility == View.VISIBLE
+                    btnAudioTrim?.setBackgroundResource(if (isTrimOpen) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+                    btnAudioTrim?.setColorFilter(if (isTrimOpen) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
+
+                    val isVolumeOpen = audioVolumePanel?.visibility == View.VISIBLE
+                    btnAudioVolume?.setBackgroundResource(if (isVolumeOpen) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+                    btnAudioVolume?.setColorFilter(if (isVolumeOpen) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
                 }
-                toolbar.findViewById<ImageButton>(R.id.btnAudioFade)?.setBounceClickListener {
-                    val id = viewModel.selectedOperationId.value ?: return@setBounceClickListener
-                    val project = viewModel.project.value ?: return@setBounceClickListener
-                    val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio ?: return@setBounceClickListener
-                    showFadeDialog(op)
+
+                // 1. Trim Toggle
+                btnAudioTrim?.setBounceClickListener {
+                    val willOpen = audioTrimPanel?.visibility != View.VISIBLE
+                    audioVolumePanel?.visibility = View.GONE
+                    audioTrimPanel?.visibility = if (willOpen) View.VISIBLE else View.GONE
+                    updatePanelToggleButtons()
                 }
+
+                // 2. Volume Toggle
+                btnAudioVolume?.setBounceClickListener {
+                    val willOpen = audioVolumePanel?.visibility != View.VISIBLE
+                    audioTrimPanel?.visibility = View.GONE
+                    audioVolumePanel?.visibility = if (willOpen) View.VISIBLE else View.GONE
+                    updatePanelToggleButtons()
+                }
+
+                // Volume Panel Controls: Slider, Cancel, Done
                 val volumeSlider = toolbar.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)
                 val tvVolumeValue = toolbar.findViewById<TextView>(R.id.tvAudioVolumeValue)
+
+                toolbar.findViewById<ImageButton>(R.id.btnVolumeCancel)?.setBounceClickListener {
+                    val opId = editingAudioOpId ?: viewModel.selectedOperationId.value
+                    volumeSlider?.value = initialAudioVolume.coerceIn(0f, 2f)
+                    tvVolumeValue?.text = "${(initialAudioVolume * 100).toInt()}%"
+                    currentAudioVolumeOverride = null
+                    if (opId != null) {
+                        val pVol = if (isMasterMuted) 0f else initialAudioVolume.coerceIn(0f, 1f)
+                        bgAudioPlayerMap[opId]?.volume = pVol
+                        val project = viewModel.project.value
+                        val op = project?.operations?.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == opId } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+                        if (op != null && op.volume != initialAudioVolume) {
+                            viewModel.updateOperation(op.copy(volume = initialAudioVolume))
+                        }
+                    }
+                    audioVolumePanel?.visibility = View.GONE
+                    updatePanelToggleButtons()
+                }
+
+                toolbar.findViewById<ImageButton>(R.id.btnVolumeDone)?.setBounceClickListener {
+                    val opId = editingAudioOpId ?: viewModel.selectedOperationId.value
+                    val currentVal = volumeSlider?.value ?: 1.0f
+                    currentAudioVolumeOverride = currentVal
+                    if (opId != null) {
+                        val project = viewModel.project.value
+                        val op = project?.operations?.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == opId } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+                        if (op != null && op.volume != currentVal) {
+                            viewModel.updateOperation(op.copy(volume = currentVal))
+                        }
+                    }
+                    audioVolumePanel?.visibility = View.GONE
+                    updatePanelToggleButtons()
+                }
+
                 volumeSlider?.addOnChangeListener { _, value, fromUser ->
                     tvVolumeValue?.text = "${(value * 100).toInt()}%"
                     val safeVol = value.coerceIn(0f, 2f)
-                    val pVol = safeVol.coerceIn(0f, 1f)
+                    currentAudioVolumeOverride = safeVol
+                    val pVol = if (isMasterMuted) 0f else safeVol.coerceIn(0f, 1f)
                     audioPreviewPlayer?.let { player ->
                         try {
                             player.setVolume(pVol, pVol)
                         } catch (_: Exception) {}
                     }
-                    viewModel.selectedOperationId.value?.let { id ->
-                        bgAudioPlayerMap[id]?.volume = pVol
+                    val opId = editingAudioOpId ?: viewModel.selectedOperationId.value
+                    if (opId != null) {
+                        bgAudioPlayerMap[opId]?.volume = pVol
                     }
                 }
+
                 volumeSlider?.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
                     override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
                     override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
                         val value = slider.value
-                        viewModel.selectedOperationId.value?.let { id ->
+                        currentAudioVolumeOverride = value
+                        val opId = editingAudioOpId ?: viewModel.selectedOperationId.value
+                        if (opId != null) {
                             val project = viewModel.project.value ?: return
-                            val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+                            val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == opId } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
                             if (op != null && op.volume != value) {
                                 viewModel.updateOperation(op.copy(volume = value))
                             }
@@ -1765,13 +1784,89 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                 })
 
+                // 3. Fade
+                btnAudioFade?.setBounceClickListener {
+                    val id = editingAudioOpId ?: viewModel.selectedOperationId.value ?: return@setBounceClickListener
+                    val project = viewModel.project.value ?: return@setBounceClickListener
+                    val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio ?: return@setBounceClickListener
+                    showFadeDialog(op)
+                }
+
+                // 4. Ducking
+                btnAudioDucking?.setBounceClickListener {
+                    val id = editingAudioOpId ?: viewModel.selectedOperationId.value ?: return@setBounceClickListener
+                    val project = viewModel.project.value ?: return@setBounceClickListener
+                    val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio ?: return@setBounceClickListener
+
+                    val newDucking = !op.ducking
+                    viewModel.updateOperation(op.copy(ducking = newDucking))
+
+                    btnAudioDucking.setBackgroundResource(if (newDucking) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+                    btnAudioDucking.setColorFilter(if (newDucking) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
+                    val msg = if (newDucking) "Audio ducking enabled" else "Audio ducking disabled"
+                    android.widget.Toast.makeText(this@VideoEditingActivity, msg, android.widget.Toast.LENGTH_SHORT).show()
+                }
+
+                // 5. Beats
+                btnAudioBeats?.setBounceClickListener {
+                    val id = editingAudioOpId ?: viewModel.selectedOperationId.value ?: return@setBounceClickListener
+                    val project = viewModel.project.value ?: return@setBounceClickListener
+                    val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio ?: return@setBounceClickListener
+
+                    if (op.beats.isNotEmpty()) {
+                        // Toggle off if already detected
+                        viewModel.updateOperation(op.copy(beats = emptyList()))
+                        android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_beats_cleared, android.widget.Toast.LENGTH_SHORT).show()
+                        btnAudioBeats.setBackgroundResource(R.drawable.tool_button_inactive)
+                        btnAudioBeats.setColorFilter(getColor(R.color.toolTextInactive))
+                        return@setBounceClickListener
+                    }
+
+                    android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_analyzing_beats, android.widget.Toast.LENGTH_SHORT).show()
+                    com.boostlyte.vydra.utils.AudioAnalyzer.detectBeats(this@VideoEditingActivity, op.audioUri) { beats ->
+                        runOnUiThread {
+                            if (beats.isNotEmpty()) {
+                                viewModel.updateOperation(op.copy(beats = beats))
+                                android.widget.Toast.makeText(this@VideoEditingActivity, "Found ${beats.size} beats!", android.widget.Toast.LENGTH_SHORT).show()
+                                btnAudioBeats.setBackgroundResource(R.drawable.tool_button_active)
+                                btnAudioBeats.setColorFilter(getColor(R.color.colorPrimary))
+                            } else {
+                                android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_no_clear_beats_found, android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                }
+
+                // 6. Delete
+                btnAudioDelete?.setBounceClickListener {
+                    MaterialAlertDialogBuilder(this@VideoEditingActivity)
+                        .setTitle("Delete Audio")
+                        .setMessage("Are you sure you want to delete this audio track?")
+                        .setPositiveButton("Delete") { _, _ ->
+                            val id = editingAudioOpId ?: viewModel.selectedOperationId.value
+                            if (id != null) {
+                                viewModel.deleteOperation(id)
+                            }
+                            exitAudioEditingMode(commit = false)
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+
+                // 7. Done
+                btnAudioDone?.setBounceClickListener {
+                    exitAudioEditingMode(commit = true)
+                }
+
+                // Trim track wiring
                 val trimTrack = toolbar.findViewById<com.boostlyte.vydra.customviews.TrackTrimView>(R.id.audioTrimTrack)
                 val tvTrimValue = toolbar.findViewById<TextView>(R.id.tvAudioTrimValues)
-                
+
                 trimTrack?.onTrimChanged = { startMs, endMs, _ ->
                     tvTrimValue?.text = "${formatDuration(startMs.toInt())} - ${formatDuration(endMs.toInt())}"
-                    viewModel.selectedOperationId.value?.let { id ->
-                        val project = viewModel.project.value ?: return@let
+                    val id = editingAudioOpId ?: viewModel.selectedOperationId.value
+                    val project = viewModel.project.value
+                    if (id != null && project != null) {
                         val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
                         if (op != null) {
                             viewModel.updateOperation(op.copy(
@@ -1785,7 +1880,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 trimTrack?.onTrimAdjustingWithDelta = { startMs, endMs, _, _ ->
                     tvTrimValue?.text = "${formatDuration(startMs.toInt())} - ${formatDuration(endMs.toInt())}"
                 }
-                
+
                 val btnAudioPreviewPlay = toolbar.findViewById<ImageButton>(R.id.btnAudioPreviewPlay)
                 btnAudioPreviewPlay?.setBounceClickListener {
                     if (audioPreviewPlayer?.isPlaying == true) {
@@ -1796,44 +1891,44 @@ class VideoEditingActivity : AppCompatActivity() {
                         return@setBounceClickListener
                     }
 
-                    viewModel.selectedOperationId.value?.let { id ->
-                        val project = viewModel.project.value ?: return@setBounceClickListener
-                        val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
-                        if (op != null) {
-                            try {
-                                audioPreviewPlayer = android.media.MediaPlayer().apply {
-                                    setDataSource(this@VideoEditingActivity, op.audioUri)
-                                    prepare()
-                                    val safeVol = op.volume.coerceIn(0f, 2f)
-                                    setVolume(safeVol, safeVol)
-                                    seekTo(op.internalStartMs.toInt())
-                                    start()
-                                    btnAudioPreviewPlay.setImageResource(R.drawable.ic_pause_24)
-                                    
-                                    val durationToPlay = if (op.internalEndMs > 0 && op.internalEndMs > op.internalStartMs) {
-                                        op.internalEndMs - op.internalStartMs
-                                    } else {
-                                        op.originalDurationMs - op.internalStartMs
-                                    }
-                                    
-                                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                                        try {
-                                            if (audioPreviewPlayer === this && isPlaying) {
-                                                stop()
-                                                release()
-                                                if (audioPreviewPlayer === this) {
-                                                    audioPreviewPlayer = null
-                                                }
-                                                btnAudioPreviewPlay.setImageResource(R.drawable.ic_play_24)
-                                            }
-                                        } catch (e: Exception) {
-                                            // Player was already released or invalid state
-                                        }
-                                    }, durationToPlay)
+                    val id = editingAudioOpId ?: viewModel.selectedOperationId.value ?: return@setBounceClickListener
+                    val project = viewModel.project.value ?: return@setBounceClickListener
+                    val op = project.operations.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+                    if (op != null) {
+                        try {
+                            audioPreviewPlayer = android.media.MediaPlayer().apply {
+                                setDataSource(this@VideoEditingActivity, op.audioUri)
+                                prepare()
+                                val currentVol = currentAudioVolumeOverride ?: op.volume
+                                val safeVol = currentVol.coerceIn(0f, 1f)
+                                setVolume(safeVol, safeVol)
+                                seekTo(op.internalStartMs.toInt())
+                                start()
+                                btnAudioPreviewPlay.setImageResource(R.drawable.ic_pause_24)
+
+                                val durationToPlay = if (op.internalEndMs > 0 && op.internalEndMs > op.internalStartMs) {
+                                    op.internalEndMs - op.internalStartMs
+                                } else {
+                                    op.originalDurationMs - op.internalStartMs
                                 }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Failed to preview audio segment", e)
+
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    try {
+                                        if (audioPreviewPlayer === this && isPlaying) {
+                                            stop()
+                                            release()
+                                            if (audioPreviewPlayer === this) {
+                                                audioPreviewPlayer = null
+                                            }
+                                            btnAudioPreviewPlay.setImageResource(R.drawable.ic_play_24)
+                                        }
+                                    } catch (e: Exception) {
+                                        // Player was already released or invalid state
+                                    }
+                                }, durationToPlay)
                             }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to preview audio segment", e)
                         }
                     }
                 }
@@ -2089,6 +2184,11 @@ class VideoEditingActivity : AppCompatActivity() {
             canvasBackgroundAction()
         }
 
+        findViewById<ImageButton>(R.id.btnCanvasRatio)?.setBounceClickListener {
+            setActiveToolButton(R.id.btnCanvasRatio)
+            showCanvasRatioBottomSheet()
+        }
+
         try {
             btnUndo = findViewById(R.id.btnUndo)
             btnRedo = findViewById(R.id.btnRedo)
@@ -2161,7 +2261,7 @@ class VideoEditingActivity : AppCompatActivity() {
 
     private fun setActiveToolButton(activeId: Int) {
         if (isShowingPreview) dismissPreview()
-        val toolIds = listOf(R.id.btnText, R.id.btnMediaOverlay, R.id.btnDraw, R.id.btnAudio, R.id.btnCrop, R.id.btnSubtitles, R.id.btnVoiceOver, R.id.btnCanvasBackground)
+        val toolIds = listOf(R.id.btnText, R.id.btnMediaOverlay, R.id.btnDraw, R.id.btnAudio, R.id.btnCrop, R.id.btnCanvasRatio, R.id.btnSubtitles, R.id.btnVoiceOver, R.id.btnCanvasBackground)
         for (id in toolIds) {
             val btn = findViewById<ImageButton>(id) ?: continue
             btn.setBackgroundResource(if (id == activeId) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
@@ -2316,6 +2416,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                     
                     updateCanvasBackgroundPreview()
+                    updateCanvasRatioButtonState()
                     renderTracks(project)
                     updateLayerReorderButtons()
                 }
@@ -2415,7 +2516,8 @@ class VideoEditingActivity : AppCompatActivity() {
             val containerHeight = activeParent.height.toFloat()
             if (containerWidth <= 0f || containerHeight <= 0f) return@post
 
-            val baseVideoRatio = if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else {
+            val projectRatio = viewModel.project.value?.canvasAspectRatio?.aspectRatio
+            val baseVideoRatio = projectRatio ?: if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else {
                 val format = if (::player.isInitialized) player.videoFormat else null
                 if (format != null && format.width > 0 && format.height > 0) {
                     val rot = format.rotationDegrees
@@ -2506,7 +2608,8 @@ class VideoEditingActivity : AppCompatActivity() {
             val containerHeight = activeParent.height
             if (containerWidth <= 0 || containerHeight <= 0) return@post
 
-            val baseVideoRatio = if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else 16f / 9f
+            val projectRatio = viewModel.project.value?.canvasAspectRatio?.aspectRatio
+            val baseVideoRatio = projectRatio ?: if (primaryVideoAspectRatio > 0f) primaryVideoAspectRatio else 16f / 9f
             val containerRatio = containerWidth.toFloat() / containerHeight.toFloat()
             var finalWidth = containerWidth
             var finalHeight = containerHeight
@@ -2738,6 +2841,81 @@ class VideoEditingActivity : AppCompatActivity() {
         backgroundEditingToolbar?.visibility = View.GONE
         editingControlsWrapper.visibility = View.VISIBLE
         setActiveToolButton(-1)
+    }
+
+    private fun updateCanvasRatioButtonState() {
+        val btnCanvasRatio = findViewById<ImageButton>(R.id.btnCanvasRatio) ?: return
+        val currentRatio = viewModel.project.value?.canvasAspectRatio ?: if (primaryVideoAspectRatio > 0f) {
+            val w = if (primaryVideoAspectRatio >= 1f) (primaryVideoAspectRatio * 1000).toInt() else 1000
+            val h = if (primaryVideoAspectRatio >= 1f) 1000 else (1000 / primaryVideoAspectRatio).toInt()
+            com.boostlyte.vydra.models.CanvasAspectRatio.fromDimensions(w, h)
+        } else {
+            com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9
+        }
+
+        val iconRes = when (currentRatio) {
+            com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9 -> R.drawable.ic_crop_16_9_24
+            com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16 -> R.drawable.ic_crop_portrait_24
+            com.boostlyte.vydra.models.CanvasAspectRatio.SQUARE_1_1 -> R.drawable.ic_crop_square_24
+        }
+        btnCanvasRatio.setImageResource(iconRes)
+    }
+
+    private fun showCanvasRatioBottomSheet() {
+        val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val view = layoutInflater.inflate(R.layout.bottom_sheet_canvas_ratio, null)
+        bottomSheet.setContentView(view)
+
+        val item16_9 = view.findViewById<View>(R.id.itemRatio16_9)
+        val item9_16 = view.findViewById<View>(R.id.itemRatio9_16)
+        val item1_1 = view.findViewById<View>(R.id.itemRatio1_1)
+
+        val check16_9 = view.findViewById<ImageView>(R.id.ivCheck16_9)
+        val check9_16 = view.findViewById<ImageView>(R.id.ivCheck9_16)
+        val check1_1 = view.findViewById<ImageView>(R.id.ivCheck1_1)
+
+        val currentRatio = viewModel.project.value?.canvasAspectRatio ?: if (primaryVideoAspectRatio > 0f) {
+            val w = if (primaryVideoAspectRatio >= 1f) (primaryVideoAspectRatio * 1000).toInt() else 1000
+            val h = if (primaryVideoAspectRatio >= 1f) 1000 else (1000 / primaryVideoAspectRatio).toInt()
+            com.boostlyte.vydra.models.CanvasAspectRatio.fromDimensions(w, h)
+        } else {
+            com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9
+        }
+
+        fun updateSelection(ratio: com.boostlyte.vydra.models.CanvasAspectRatio) {
+            item16_9.setBackgroundResource(if (ratio == com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9) R.drawable.bg_aspect_ratio_selected else R.drawable.bg_aspect_ratio_item)
+            item9_16.setBackgroundResource(if (ratio == com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16) R.drawable.bg_aspect_ratio_selected else R.drawable.bg_aspect_ratio_item)
+            item1_1.setBackgroundResource(if (ratio == com.boostlyte.vydra.models.CanvasAspectRatio.SQUARE_1_1) R.drawable.bg_aspect_ratio_selected else R.drawable.bg_aspect_ratio_item)
+
+            check16_9.visibility = if (ratio == com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9) View.VISIBLE else View.GONE
+            check9_16.visibility = if (ratio == com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16) View.VISIBLE else View.GONE
+            check1_1.visibility = if (ratio == com.boostlyte.vydra.models.CanvasAspectRatio.SQUARE_1_1) View.VISIBLE else View.GONE
+        }
+
+        updateSelection(currentRatio)
+
+        fun selectRatio(ratio: com.boostlyte.vydra.models.CanvasAspectRatio) {
+            viewModel.updateCanvasAspectRatio(ratio)
+            updateSelection(ratio)
+            updateCanvasRatioButtonState()
+            triggerCanvasLayoutUpdate()
+            updateCanvasBackgroundPreview()
+            bottomSheet.dismiss()
+        }
+
+        item16_9.setBounceClickListener { selectRatio(com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9) }
+        item9_16.setBounceClickListener { selectRatio(com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16) }
+        item1_1.setBounceClickListener { selectRatio(com.boostlyte.vydra.models.CanvasAspectRatio.SQUARE_1_1) }
+
+        view.findViewById<ImageButton>(R.id.btnCloseRatioSheet)?.setBounceClickListener {
+            bottomSheet.dismiss()
+        }
+
+        bottomSheet.setOnDismissListener {
+            setActiveToolButton(-1)
+        }
+
+        bottomSheet.show()
     }
 
     private var isHandwritingActive = false
@@ -3018,6 +3196,8 @@ class VideoEditingActivity : AppCompatActivity() {
         textEditingToolbar?.visibility = View.GONE
         imageEditingToolbar?.visibility = View.GONE
         videoEditingToolbar?.visibility = View.GONE
+        audioEditingToolbar?.findViewById<View>(R.id.audioVolumePanel)?.visibility = View.GONE
+        audioEditingToolbar?.findViewById<View>(R.id.audioTrimPanel)?.visibility = View.GONE
         audioEditingToolbar?.visibility = View.GONE
         cropEditingToolbar?.visibility = View.GONE
         subtitlesEditingToolbar?.visibility = View.GONE
@@ -3157,7 +3337,12 @@ class VideoEditingActivity : AppCompatActivity() {
                 // Start Recording
                 voiceOverFile = File(cacheDir, "voice_over_${System.currentTimeMillis()}.m4a")
                 try {
-                    mediaRecorder = android.media.MediaRecorder().apply {
+                    mediaRecorder = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        android.media.MediaRecorder(this@VideoEditingActivity)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        android.media.MediaRecorder()
+                    }).apply {
                         setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
                         setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
                         setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC)
@@ -4330,25 +4515,45 @@ class VideoEditingActivity : AppCompatActivity() {
     private fun enterAudioEditingMode(op: com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio) {
         closeActiveEditingModes()
         selectedVideoIndex = null
+        editingAudioOpId = op.id
+        initialAudioVolume = op.volume
+        currentAudioVolumeOverride = null
+
         audioEditingToolbar?.visibility = View.VISIBLE
         editingControlsWrapper.visibility = View.GONE
         audioEditingToolbar?.let { toolbar ->
+            val audioTrimPanel = toolbar.findViewById<View>(R.id.audioTrimPanel)
+            val audioVolumePanel = toolbar.findViewById<View>(R.id.audioVolumePanel)
+            audioTrimPanel?.visibility = View.GONE
+            audioVolumePanel?.visibility = View.GONE
+
+            val btnTrim = toolbar.findViewById<ImageButton>(R.id.btnAudioTrim)
+            val btnVolume = toolbar.findViewById<ImageButton>(R.id.btnAudioVolume)
+            btnTrim?.setBackgroundResource(R.drawable.tool_button_inactive)
+            btnTrim?.setColorFilter(getColor(R.color.toolTextInactive))
+            btnVolume?.setBackgroundResource(R.drawable.tool_button_inactive)
+            btnVolume?.setColorFilter(getColor(R.color.toolTextInactive))
+
             val slider = toolbar.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)
             val tvValue = toolbar.findViewById<TextView>(R.id.tvAudioVolumeValue)
-            slider?.value = op.volume.coerceIn(0f, 2f)
-            tvValue?.text = "${(op.volume * 100).toInt()}%"
-            bgAudioPlayerMap[op.id]?.volume = op.volume.coerceIn(0f, 1f)
+            val safeVol = op.volume.coerceIn(0f, 2f)
+            slider?.value = safeVol
+            tvValue?.text = "${(safeVol * 100).toInt()}%"
+            bgAudioPlayerMap[op.id]?.volume = if (isMasterMuted) 0f else safeVol.coerceIn(0f, 1f)
             
             val btnBeats = toolbar.findViewById<ImageButton>(R.id.btnAudioBeats)
-            btnBeats?.setColorFilter(if (op.beats.isNotEmpty()) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
+            val hasBeats = op.beats.isNotEmpty()
+            btnBeats?.setBackgroundResource(if (hasBeats) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+            btnBeats?.setColorFilter(if (hasBeats) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
 
             val btnDucking = toolbar.findViewById<ImageButton>(R.id.btnAudioDucking)
+            btnDucking?.setBackgroundResource(if (op.ducking) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
             btnDucking?.setColorFilter(if (op.ducking) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
 
             val btnFade = toolbar.findViewById<ImageButton>(R.id.btnAudioFade)
             val isFadeActive = op.fadeInDurationMs > 0 || op.fadeOutDurationMs > 0
+            btnFade?.setBackgroundResource(if (isFadeActive) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
             btnFade?.setColorFilter(if (isFadeActive) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
-
 
             val trimTrack = toolbar.findViewById<com.boostlyte.vydra.customviews.TrackTrimView>(R.id.audioTrimTrack)
             val tvTrimValue = toolbar.findViewById<TextView>(R.id.tvAudioTrimValues)
@@ -4397,32 +4602,51 @@ class VideoEditingActivity : AppCompatActivity() {
         }
     }
 
-    private fun exitAudioEditingMode() {
-        audioEditingToolbar?.let { toolbar ->
-            val slider = toolbar.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)
-            if (slider != null) {
-                val value = slider.value
-                viewModel.selectedOperationId.value?.let { id ->
-                    val project = viewModel.project.value
-                    val op = project?.operations?.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == id } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
-                    if (op != null && op.volume != value) {
-                        viewModel.updateOperation(op.copy(volume = value))
-                    }
+    private fun exitAudioEditingMode(commit: Boolean = true) {
+        if (isExitingAudioMode) return
+        isExitingAudioMode = true
+        try {
+            val opId = editingAudioOpId ?: viewModel.selectedOperationId.value
+            if (commit && opId != null) {
+                val slider = audioEditingToolbar?.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)
+                val finalVol = currentAudioVolumeOverride ?: slider?.value ?: initialAudioVolume
+                val project = viewModel.project.value
+                val op = project?.operations?.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == opId } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+                if (op != null && op.volume != finalVol) {
+                    viewModel.updateOperation(op.copy(volume = finalVol))
                 }
+            } else if (!commit && opId != null) {
+                val project = viewModel.project.value
+                val op = project?.operations?.find { it is com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio && it.id == opId } as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+                if (op != null && op.volume != initialAudioVolume) {
+                    viewModel.updateOperation(op.copy(volume = initialAudioVolume))
+                }
+                bgAudioPlayerMap[opId]?.volume = if (isMasterMuted) 0f else initialAudioVolume.coerceIn(0f, 1f)
             }
+
+            editingAudioOpId = null
+            currentAudioVolumeOverride = null
+
+            audioEditingToolbar?.findViewById<View>(R.id.audioVolumePanel)?.visibility = View.GONE
+            audioEditingToolbar?.findViewById<View>(R.id.audioTrimPanel)?.visibility = View.GONE
+            audioEditingToolbar?.visibility = View.GONE
+            editingControlsWrapper.visibility = View.VISIBLE
+
+            if (viewModel.selectedOperationId.value != null) {
+                viewModel.selectOperation(null)
+            }
+            
+            if (audioPreviewPlayer?.isPlaying == true) {
+                audioPreviewPlayer?.stop()
+            }
+            audioPreviewPlayer?.release()
+            audioPreviewPlayer = null
+            
+            audioEditingToolbar?.findViewById<ImageButton>(R.id.btnAudioPreviewPlay)?.setImageResource(R.drawable.ic_play_24)
+            setActiveToolButton(0)
+        } finally {
+            isExitingAudioMode = false
         }
-        audioEditingToolbar?.visibility = View.GONE
-        editingControlsWrapper.visibility = View.VISIBLE
-        viewModel.selectOperation(null)
-        
-        if (audioPreviewPlayer?.isPlaying == true) {
-            audioPreviewPlayer?.stop()
-        }
-        audioPreviewPlayer?.release()
-        audioPreviewPlayer = null
-        
-        audioEditingToolbar?.findViewById<ImageButton>(R.id.btnAudioPreviewPlay)?.setImageResource(R.drawable.ic_play_24)
-        setActiveToolButton(0)
     }
 
     private fun showFadeDialog(op: com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio) {
@@ -4478,6 +4702,10 @@ class VideoEditingActivity : AppCompatActivity() {
             val newFadeInMs = (fadeInSlider.value * 1000).toLong()
             val newFadeOutMs = (fadeOutSlider.value * 1000).toLong()
             viewModel.updateOperation(op.copy(fadeInDurationMs = newFadeInMs, fadeOutDurationMs = newFadeOutMs))
+            val isFadeActive = newFadeInMs > 0 || newFadeOutMs > 0
+            val btnFade = audioEditingToolbar?.findViewById<ImageButton>(R.id.btnAudioFade)
+            btnFade?.setBackgroundResource(if (isFadeActive) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+            btnFade?.setColorFilter(if (isFadeActive) getColor(R.color.colorPrimary) else getColor(R.color.toolTextInactive))
             bottomSheet.dismiss()
         }
 
@@ -4927,8 +5155,20 @@ class VideoEditingActivity : AppCompatActivity() {
                             retriever.release()
                             
                             if (bitmap != null) {
+                                val blurredBitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                    bitmap
+                                } else {
+                                    val factor = (bgOp.blurRadius.coerceIn(4, 50) / 4).coerceAtLeast(4)
+                                    val sw = (bitmap.width / factor).coerceAtLeast(16)
+                                    val sh = (bitmap.height / factor).coerceAtLeast(16)
+                                    val small = android.graphics.Bitmap.createScaledBitmap(bitmap, sw, sh, true)
+                                    val upscaled = android.graphics.Bitmap.createScaledBitmap(small, bitmap.width, bitmap.height, true)
+                                    if (small != bitmap && small != upscaled) small.recycle()
+                                    if (bitmap != upscaled) bitmap.recycle()
+                                    upscaled
+                                }
                                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                    bgPreviewImageView?.setImageBitmap(bitmap)
+                                    bgPreviewImageView?.setImageBitmap(blurredBitmap)
                                     bgPreviewImageView?.scaleType = ImageView.ScaleType.CENTER_CROP
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                                         val radius = bgOp.blurRadius.toFloat()
@@ -6712,7 +6952,12 @@ class VideoEditingActivity : AppCompatActivity() {
                     prepare()
                 }
             }
-            val effectiveVol = if (isMasterMuted) 0f else op.volume.coerceIn(0f, 1f)
+            val rawVol = if (op.id == editingAudioOpId && currentAudioVolumeOverride != null) {
+                currentAudioVolumeOverride!!
+            } else {
+                op.volume
+            }
+            val effectiveVol = if (isMasterMuted) 0f else rawVol.coerceIn(0f, 1f)
             if (bgPlayer.volume != effectiveVol) {
                 bgPlayer.volume = effectiveVol
             }

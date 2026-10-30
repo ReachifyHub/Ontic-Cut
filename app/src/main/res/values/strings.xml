@@ -58,6 +58,14 @@
     <string name="str_auto_captions">Auto Captions</string>
     <string name="str_auto_captions_desc">Generate synced captions from voiceover speech</string>
     <string name="str_regenerate_auto_captions">Regenerate Captions</string>
+    <string name="str_canvas_ratio">Ratio</string>
+    <string name="str_canvas_aspect_ratio">Canvas Aspect Ratio</string>
+    <string name="str_ratio_16_9">16:9</string>
+    <string name="str_ratio_16_9_desc">Landscape (YouTube, Standard)</string>
+    <string name="str_ratio_9_16">9:16</string>
+    <string name="str_ratio_9_16_desc">Portrait (Shorts, Reels, TikTok)</string>
+    <string name="str_ratio_1_1">1:1</string>
+    <string name="str_ratio_1_1_desc">Square (Instagram, Posts)</string>
     <string name="str_remove_auto_captions">Remove Auto Captions</string>
     <string name="str_no_voiceover_for_captions">A voiceover audio track is required to generate auto captions.</string>
     <string name="str_transcribe_voiceover_prompt">No transcription found for this voiceover. Would you like to transcribe it now?</string>
@@ -76,6 +84,7 @@
     <string name="str_beats">Beats</string>
     <string name="str_ducking">Ducking</string>
     <string name="str_fade">Fade</string>
+    <string name="str_volume">Volume</string>
     <string name="str_crop_aspect_ratio">Crop Aspect Ratio</string>
     <string name="str_16_9">16:9</string>
     <string name="str_9_16">9:16</string>

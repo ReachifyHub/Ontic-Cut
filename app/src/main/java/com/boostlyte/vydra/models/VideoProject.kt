@@ -3,6 +3,59 @@ package com.boostlyte.vydra.models
 import android.net.Uri
 import java.io.Serializable
 
+import kotlin.math.abs
+
+/**
+ * Global aspect ratio for the video project canvas.
+ */
+enum class CanvasAspectRatio(val ratioX: Int, val ratioY: Int, val label: String) {
+    LANDSCAPE_16_9(16, 9, "16:9"),
+    PORTRAIT_9_16(9, 16, "9:16"),
+    SQUARE_1_1(1, 1, "1:1");
+
+    val aspectRatio: Float get() = ratioX.toFloat() / ratioY.toFloat()
+
+    /**
+     * Calculates width and height for a given base resolution (e.g., 720, 1080),
+     * ensuring both dimensions are even integers for FFmpeg x264/MediaCodec encoding.
+     */
+    fun getTargetDimensions(resolution: Int): Pair<Int, Int> {
+        val res = resolution.coerceAtLeast(240)
+        return when (this) {
+            LANDSCAPE_16_9 -> {
+                val height = (res / 2) * 2
+                val width = (((height.toDouble() * 16.0 / 9.0).toInt()) / 2) * 2
+                Pair(width, height)
+            }
+            PORTRAIT_9_16 -> {
+                val width = (res / 2) * 2
+                val height = (((width.toDouble() * 16.0 / 9.0).toInt()) / 2) * 2
+                Pair(width, height)
+            }
+            SQUARE_1_1 -> {
+                val dim = (res / 2) * 2
+                Pair(dim, dim)
+            }
+        }
+    }
+
+    companion object {
+        fun fromDimensions(width: Int, height: Int): CanvasAspectRatio {
+            if (width <= 0 || height <= 0) return LANDSCAPE_16_9
+            val ratio = width.toFloat() / height.toFloat()
+            val diff16_9 = abs(ratio - (16f / 9f))
+            val diff9_16 = abs(ratio - (9f / 16f))
+            val diff1_1 = abs(ratio - 1f)
+
+            return when {
+                diff9_16 < diff16_9 && diff9_16 < diff1_1 -> PORTRAIT_9_16
+                diff1_1 < diff16_9 && diff1_1 < diff9_16 -> SQUARE_1_1
+                else -> LANDSCAPE_16_9
+            }
+        }
+    }
+}
+
 /**
  * VideoProject represents the complete state of a video editing session.
  * It stores all pending operations without rendering them to disk.
@@ -14,8 +67,21 @@ data class VideoProject(
     val scrubProxyUri: Uri? = null,
     val operations: List<EditOperation> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
-    val lastModifiedAt: Long = System.currentTimeMillis()
+    val lastModifiedAt: Long = System.currentTimeMillis(),
+    val canvasAspectRatio: CanvasAspectRatio? = null
 ) : Serializable {
+
+    /**
+     * Resolves the effective canvas aspect ratio, defaulting to source dimensions
+     * or 16:9 landscape if not explicitly specified.
+     */
+    fun getEffectiveCanvasAspectRatio(sourceWidth: Int = 0, sourceHeight: Int = 0): CanvasAspectRatio {
+        return canvasAspectRatio ?: if (sourceWidth > 0 && sourceHeight > 0) {
+            CanvasAspectRatio.fromDimensions(sourceWidth, sourceHeight)
+        } else {
+            CanvasAspectRatio.LANDSCAPE_16_9
+        }
+    }
     
     /**
      * Returns the total video duration that would be rendered.
@@ -98,7 +164,8 @@ data class EditRecipe(
     val createdAt: Long = System.currentTimeMillis(),
     val lastModifiedAt: Long = System.currentTimeMillis(),
     val durationMs: Long = 0L,
-    val clipCount: Int = 1
+    val clipCount: Int = 1,
+    val canvasAspectRatio: CanvasAspectRatio? = null
 ) : Serializable {
     
     /**
@@ -111,7 +178,8 @@ data class EditRecipe(
             scrubProxyUri = scrubProxyUri,
             operations = operations,
             createdAt = createdAt,
-            lastModifiedAt = lastModifiedAt
+            lastModifiedAt = lastModifiedAt,
+            canvasAspectRatio = canvasAspectRatio
         )
     }
     
@@ -134,7 +202,8 @@ data class EditRecipe(
                 createdAt = project.createdAt,
                 lastModifiedAt = project.lastModifiedAt,
                 durationMs = calculatedDuration,
-                clipCount = finalClipCount
+                clipCount = finalClipCount,
+                canvasAspectRatio = project.canvasAspectRatio
             )
         }
     }

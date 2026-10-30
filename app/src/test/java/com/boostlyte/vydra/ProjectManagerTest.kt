@@ -22,6 +22,7 @@ class ProjectManagerTest {
     @Before
     fun setUp() {
         mockDir = tempFolder.newFolder("Projects")
+        ProjectSerializer.uriDeserializerFallback = { str -> android.net.DummyUri.fromPath(str) }
     }
 
     @Test
@@ -93,5 +94,159 @@ class ProjectManagerTest {
         val thumb = ProjectManager.getThumbnailFile(file)
         assertEquals("MyProject.thumb.jpg", thumb.name)
         assertEquals(mockDir.absolutePath, thumb.parentFile?.absolutePath)
+    }
+
+    @Test
+    fun testCanvasAspectRatioSerialization() {
+        val dummyUri = android.net.DummyUri.INSTANCE
+        val recipe = EditRecipe(
+            projectName = "Ratio Project",
+            sourceUri = dummyUri,
+            sourceName = "portrait.mp4",
+            canvasAspectRatio = com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16
+        )
+
+        val json = ProjectSerializer.serialize(recipe)
+        assertNotNull(json)
+        assertTrue(json.contains("\"canvasAspectRatio\":\"PORTRAIT_9_16\""))
+
+        val deserialized = ProjectSerializer.deserialize(json)
+        assertNotNull(deserialized)
+        assertEquals(com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16, deserialized?.canvasAspectRatio)
+
+        val project = deserialized?.toVideoProject()
+        assertNotNull(project)
+        assertEquals(com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16, project?.canvasAspectRatio)
+        assertEquals(com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16, project?.getEffectiveCanvasAspectRatio())
+    }
+
+    @Test
+    fun testCanvasAspectRatioLegacyCompatibility() {
+        // Legacy JSON without canvasAspectRatio field
+        val legacyJson = """
+            {
+                "projectName": "Legacy 2025 Project",
+                "sourceUri": "file:///storage/emulated/0/DCIM/video.mp4",
+                "sourceName": "video.mp4",
+                "operations": [],
+                "durationMs": 10000,
+                "clipCount": 1
+            }
+        """.trimIndent()
+
+        val deserialized = ProjectSerializer.deserialize(legacyJson)
+        assertNotNull(deserialized)
+        assertNull(deserialized?.canvasAspectRatio)
+
+        val project = deserialized?.toVideoProject()
+        assertNotNull(project)
+        assertNull(project?.canvasAspectRatio)
+        // Defaults to 16:9 when no dimensions provided
+        assertEquals(com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9, project?.getEffectiveCanvasAspectRatio())
+        // Derives from source dimensions when available
+        assertEquals(com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16, project?.getEffectiveCanvasAspectRatio(1080, 1920))
+        assertEquals(com.boostlyte.vydra.models.CanvasAspectRatio.SQUARE_1_1, project?.getEffectiveCanvasAspectRatio(1080, 1080))
+    }
+
+    @Test
+    fun testCanvasAspectRatioTargetDimensions() {
+        // 1080p
+        val (w16_9, h16_9) = com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9.getTargetDimensions(1080)
+        assertEquals(1920, w16_9)
+        assertEquals(1080, h16_9)
+
+        val (w9_16, h9_16) = com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16.getTargetDimensions(1080)
+        assertEquals(1080, w9_16)
+        assertEquals(1920, h9_16)
+
+        val (w1_1, h1_1) = com.boostlyte.vydra.models.CanvasAspectRatio.SQUARE_1_1.getTargetDimensions(1080)
+        assertEquals(1080, w1_1)
+        assertEquals(1080, h1_1)
+
+        // 720p
+        val (w720_16_9, h720_16_9) = com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9.getTargetDimensions(720)
+        assertEquals(1280, w720_16_9)
+        assertEquals(720, h720_16_9)
+
+        val (w720_9_16, h720_9_16) = com.boostlyte.vydra.models.CanvasAspectRatio.PORTRAIT_9_16.getTargetDimensions(720)
+        assertEquals(720, w720_9_16)
+        assertEquals(1280, h720_9_16)
+
+        // Even dimensions guarantee for encoding
+        assertTrue(w16_9 % 2 == 0)
+        assertTrue(h16_9 % 2 == 0)
+        assertTrue(w9_16 % 2 == 0)
+        assertTrue(h9_16 % 2 == 0)
+    }
+
+    @Test
+    fun testAudioOperationVolumeSerializationAndPersistence() {
+        val dummyUri = android.net.DummyUri.INSTANCE
+        val audioOp = com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio(
+            id = "audio_test_123",
+            audioUri = dummyUri,
+            volume = 0.45f,
+            internalStartMs = 1000L,
+            internalEndMs = 5000L,
+            originalDurationMs = 10000L
+        )
+
+        val recipe = EditRecipe(
+            projectName = "Audio Volume Test",
+            sourceUri = dummyUri,
+            sourceName = "video.mp4",
+            operations = listOf(audioOp)
+        )
+
+        val json = ProjectSerializer.serialize(recipe)
+        assertNotNull(json)
+        assertTrue("Serialized JSON should contain volume", json.contains("\"volume\":0.45") || json.contains("\"volume\": 0.45"))
+
+        val deserialized = ProjectSerializer.deserialize(json)
+        assertNotNull(deserialized)
+        val deserializedOp = deserialized?.operations?.firstOrNull() as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+        assertNotNull(deserializedOp)
+        assertEquals(0.45f, deserializedOp?.volume ?: 0f, 0.001f)
+
+        // Legacy compatibility test: background audio JSON without volume field defaults to 1.0f
+        val legacyAudioJson = """
+            {
+                "projectName": "Legacy Audio Project",
+                "sourceUri": "file:///dummy.mp4",
+                "sourceName": "dummy.mp4",
+                "operations": [
+                    {
+                        "type": "AddBackgroundAudio",
+                        "id": "legacy_audio_1",
+                        "audioUri": "file:///audio.mp3",
+                        "audioName": "audio.mp3",
+                        "internalStartMs": 0,
+                        "internalEndMs": 4000,
+                        "originalDurationMs": 4000
+                    }
+                ]
+            }
+        """.trimIndent()
+
+        val legacyDeserialized = ProjectSerializer.deserialize(legacyAudioJson)
+        assertNotNull(legacyDeserialized)
+        val legacyOp = legacyDeserialized?.operations?.firstOrNull() as? com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio
+        assertNotNull(legacyOp)
+        assertEquals(1.0f, legacyOp?.volume ?: 0f, 0.001f)
+    }
+
+    @Test
+    fun testAudioExportVolumeFilter() {
+        fun formatVolumeFilter(volume: Float): String {
+            val safeVol = volume.coerceIn(0f, 2f)
+            return "volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}"
+        }
+
+        assertEquals("volume=0.50", formatVolumeFilter(0.5f))
+        assertEquals("volume=0.00", formatVolumeFilter(0.0f))
+        assertEquals("volume=1.00", formatVolumeFilter(1.0f))
+        assertEquals("volume=1.75", formatVolumeFilter(1.75f))
+        assertEquals("volume=2.00", formatVolumeFilter(2.5f)) // clamped to 2.0 max
+        assertEquals("volume=0.00", formatVolumeFilter(-0.5f)) // clamped to 0.0 min
     }
 }
