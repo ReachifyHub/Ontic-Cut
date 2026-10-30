@@ -148,10 +148,20 @@ fun VideoEditingViewModel.insertSequenceItems(
                 ops.add(newMergeOp)
             }
 
+            val finalOps = ops.map { op ->
+                when (op) {
+                    is EditOperation.Transition -> op.copy(index = op.index + newItems.size)
+                    is EditOperation.MuteClip -> op.copy(index = op.index + newItems.size)
+                    is EditOperation.ColorFilter -> op.copy(index = op.index + newItems.size)
+                    is EditOperation.Adjust -> op.copy(index = op.index + newItems.size)
+                    else -> op
+                }
+            }
+
             project.copy(
                 sourceUri = newPrimary.uri,
                 sourceName = newPrimary.uri.lastPathSegment ?: "media",
-                operations = ops
+                operations = finalOps
             )
         } else {
             // Insert between or at end
@@ -164,7 +174,16 @@ fun VideoEditingViewModel.insertSequenceItems(
             } else {
                 ops.add(newMergeOp)
             }
-            project.copy(operations = ops)
+            val finalOps = ops.map { op ->
+                when (op) {
+                    is EditOperation.Transition -> if (op.index >= insertIndex) op.copy(index = op.index + newItems.size) else op
+                    is EditOperation.MuteClip -> if (op.index >= insertIndex) op.copy(index = op.index + newItems.size) else op
+                    is EditOperation.ColorFilter -> if (op.index >= insertIndex) op.copy(index = op.index + newItems.size) else op
+                    is EditOperation.Adjust -> if (op.index >= insertIndex) op.copy(index = op.index + newItems.size) else op
+                    else -> op
+                }
+            }
+            project.copy(operations = finalOps)
         }
     })
 }
@@ -363,7 +382,23 @@ fun VideoEditingViewModel.splitVideoSegment(index: Int, localSplitTimeMs: Long, 
                 }
             }
         }
-        newOps
+
+        // Remap operations whose indices shifted due to the split:
+        // When clip `index` is split into two halves (at index and index + 1):
+        // 1. Any Transition at `trans.index >= index` shifts by +1 because the cut boundary
+        //    between clip `index` and `index+1` is now between `index+1` and `index+2`.
+        //    The new seam between the two halves (gap `index`) receives no transition.
+        // 2. Any per-clip operation (MuteClip, ColorFilter, Adjust) at `op.index > index` shifts by +1.
+        val finalOps = newOps.map { op ->
+            when (op) {
+                is EditOperation.Transition -> if (op.index >= index) op.copy(index = op.index + 1) else op
+                is EditOperation.MuteClip -> if (op.index > index) op.copy(index = op.index + 1) else op
+                is EditOperation.ColorFilter -> if (op.index > index) op.copy(index = op.index + 1) else op
+                is EditOperation.Adjust -> if (op.index > index) op.copy(index = op.index + 1) else op
+                else -> op
+            }
+        }
+        finalOps
     })
 }
 
@@ -420,8 +455,55 @@ fun VideoEditingViewModel.deleteSequenceSegment(index: Int) {
                 }
             }
         }
+
+        // Remap operations after clip deletion:
+        // 1. Any transition touching the deleted clip (`op.index == index - 1 || op.index == index`) is removed.
+        // 2. Any transition after the deleted clip (`op.index > index`) shifts left by -1 (`op.index - 1`).
+        // 3. Per-clip operations at `index` are removed; those at `op.index > index` shift left by -1.
+        val finalOps = mutableListOf<EditOperation>()
+        for (op in ops) {
+            when (op) {
+                is EditOperation.Transition -> {
+                    if (op.index == index - 1 || op.index == index) {
+                        // Drop: boundary touched the deleted clip
+                    } else if (op.index > index) {
+                        finalOps.add(op.copy(index = op.index - 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                is EditOperation.MuteClip -> {
+                    if (op.index == index) {
+                        // Drop
+                    } else if (op.index > index) {
+                        finalOps.add(op.copy(index = op.index - 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                is EditOperation.ColorFilter -> {
+                    if (op.index == index) {
+                        // Drop
+                    } else if (op.index > index) {
+                        finalOps.add(op.copy(index = op.index - 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                is EditOperation.Adjust -> {
+                    if (op.index == index) {
+                        // Drop
+                    } else if (op.index > index) {
+                        finalOps.add(op.copy(index = op.index - 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                else -> finalOps.add(op)
+            }
+        }
         
-        project.copy(sourceUri = newSourceUri, operations = ops)
+        project.copy(sourceUri = newSourceUri, operations = finalOps)
     })
 }
 

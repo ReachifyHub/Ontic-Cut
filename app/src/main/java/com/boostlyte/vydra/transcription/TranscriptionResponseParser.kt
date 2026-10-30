@@ -112,43 +112,54 @@ object TranscriptionResponseParser {
     }
 
     private fun parseJsonObject(root: JsonObject, rawResponse: String): TranscriptionResponse {
-        // 1. Check for text / transcript
-        val text = root.get("text")?.asString
-            ?: root.get("transcript")?.asString
+        // 1. Check for text / transcript / transcription at root or inside envelopes
+        val text = root.get("text")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root.get("transcript")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root.get("transcription")?.takeIf { it.isJsonPrimitive }?.asString
             ?: root.get("result")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root.getAsJsonObject("metadata")?.get("text")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root.getAsJsonObject("metadata")?.get("transcription")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root.getAsJsonObject("response")?.get("text")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root.getAsJsonObject("response")?.get("transcription")?.takeIf { it.isJsonPrimitive }?.asString
 
-        // 2. Check for duration
+        // 2. Check for duration at root or in metadata/result
         var durationSec: Double? = null
-        if (root.has("duration")) {
-            val dElem = root.get("duration")
-            durationSec = if (dElem.isJsonPrimitive && dElem.asJsonPrimitive.isNumber) {
-                dElem.asDouble
+        val durationElem = root.get("duration")
+            ?: root.getAsJsonObject("metadata")?.get("duration")
+            ?: root.getAsJsonObject("result")?.get("duration")
+        if (durationElem != null) {
+            durationSec = if (durationElem.isJsonPrimitive && durationElem.asJsonPrimitive.isNumber) {
+                durationElem.asDouble
             } else {
-                parseDurationString(dElem?.asString)
+                parseDurationString(durationElem.asString)
             }
         }
 
         // 3. Check for language
-        val language = root.get("language")?.asString
+        val language = root.get("language")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: root.getAsJsonObject("metadata")?.get("language")?.takeIf { it.isJsonPrimitive }?.asString
 
-        // 4. Check for structured words array at root or in result
+        // 4. Check for structured words array at root, metadata, result, or response
         val wordsArray = root.getAsJsonArray("words")
+            ?: root.getAsJsonObject("metadata")?.getAsJsonArray("words")
             ?: root.getAsJsonObject("result")?.getAsJsonArray("words")
             ?: root.getAsJsonObject("data")?.getAsJsonArray("words")
+            ?: root.getAsJsonObject("response")?.getAsJsonArray("words")
+            ?: root.getAsJsonObject("transcription")?.getAsJsonArray("words")
 
         val structuredWords = mutableListOf<TranscriptionWord>()
         if (wordsArray != null) {
             for (elem in wordsArray) {
                 if (!elem.isJsonObject) continue
                 val wObj = elem.asJsonObject
-                val wordText = wObj.get("word")?.asString
-                    ?: wObj.get("text")?.asString
+                val wordText = wObj.get("word")?.takeIf { it.isJsonPrimitive }?.asString
+                    ?: wObj.get("text")?.takeIf { it.isJsonPrimitive }?.asString
                     ?: continue
                 val start = parseFlexibleTimestamp(wObj.get("start") ?: wObj.get("startTime") ?: wObj.get("start_time"))
                 val end = parseFlexibleTimestamp(wObj.get("end") ?: wObj.get("endTime") ?: wObj.get("end_time"))
-                val score = wObj.get("score")?.asDouble
-                    ?: wObj.get("confidence")?.asDouble
-                    ?: wObj.get("prob")?.asDouble
+                val score = wObj.get("score")?.takeIf { it.isJsonPrimitive }?.asDouble
+                    ?: wObj.get("confidence")?.takeIf { it.isJsonPrimitive }?.asDouble
+                    ?: wObj.get("prob")?.takeIf { it.isJsonPrimitive }?.asDouble
 
                 structuredWords.add(
                     TranscriptionWord(
@@ -163,7 +174,9 @@ object TranscriptionResponseParser {
 
         // 5. Check for structured segments
         val segmentsArray = root.getAsJsonArray("segments")
+            ?: root.getAsJsonObject("metadata")?.getAsJsonArray("segments")
             ?: root.getAsJsonObject("result")?.getAsJsonArray("segments")
+            ?: root.getAsJsonObject("response")?.getAsJsonArray("segments")
         var segmentsList: List<TranscriptionSegment>? = null
         if (segmentsArray != null && segmentsArray.size() > 0) {
             segmentsList = try {

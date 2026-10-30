@@ -216,6 +216,10 @@ class VideoEditingActivity : AppCompatActivity() {
                     viewModel.finishExport()
                     android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_video_exported_to_gallery_succ, android.widget.Toast.LENGTH_LONG).show()
                 }
+                com.boostlyte.vydra.services.ExportService.ACTION_EXPORT_CANCELLED -> {
+                    viewModel.finishExport()
+                    android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_export_cancelled, android.widget.Toast.LENGTH_SHORT).show()
+                }
                 com.boostlyte.vydra.services.ExportService.ACTION_EXPORT_FAILURE -> {
                     val error = intent.getStringExtra(com.boostlyte.vydra.services.ExportService.EXTRA_ERROR) ?: "Unknown Error"
                     val errorCodeStr = intent.getStringExtra(com.boostlyte.vydra.services.ExportService.EXTRA_ERROR_CODE)
@@ -733,6 +737,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 addAction(com.boostlyte.vydra.services.ExportService.ACTION_EXPORT_PROGRESS)
                 addAction(com.boostlyte.vydra.services.ExportService.ACTION_EXPORT_SUCCESS)
                 addAction(com.boostlyte.vydra.services.ExportService.ACTION_EXPORT_FAILURE)
+                addAction(com.boostlyte.vydra.services.ExportService.ACTION_EXPORT_CANCELLED)
             }
         )
         
@@ -2469,19 +2474,20 @@ class VideoEditingActivity : AppCompatActivity() {
                 if (project != null) {
                     Log.d(TAG, "Project updated with ${project.getOperationCount()} operations")
 
-                    if (project.sourceUri.scheme == "file") {
-                        val projectSourcePath = project.sourceUri.path
-                        if (projectSourcePath != null && (!::tempInputFile.isInitialized || tempInputFile.absolutePath != projectSourcePath)) {
-                            tempInputFile = File(projectSourcePath)
-                            videoFileName = tempInputFile.name
-                            try {
-                                val r = android.media.MediaMetadataRetriever()
-                                r.setDataSource(tempInputFile.absolutePath)
-                                originalMainVideoDurationMs = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
-                                r.release()
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Error getting original duration: ${e.message}")
-                            }
+                    val projectSourcePath = when (project.sourceUri.scheme) {
+                        "file" -> project.sourceUri.path
+                        else -> uriToFilePathCache[project.sourceUri]
+                    }
+                    if (projectSourcePath != null && File(projectSourcePath).exists() && (!::tempInputFile.isInitialized || tempInputFile.absolutePath != projectSourcePath)) {
+                        tempInputFile = File(projectSourcePath)
+                        videoFileName = tempInputFile.name
+                        try {
+                            val r = android.media.MediaMetadataRetriever()
+                            r.setDataSource(tempInputFile.absolutePath)
+                            originalMainVideoDurationMs = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
+                            r.release()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error getting original duration: ${e.message}")
                         }
                     }
 
@@ -5497,6 +5503,19 @@ class VideoEditingActivity : AppCompatActivity() {
         videoUri = null
         viewModel.clearAllOperations() // wait, no initialize is better
         
+        // Clean up orphaned cache/proxy files in background
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                cacheDir.listFiles { f ->
+                    f.name.startsWith("proxy_") ||
+                    f.name.startsWith("extracted_audio_") ||
+                    f.name.startsWith("filter_script_") ||
+                    f.name.startsWith("reverse_") ||
+                    f.name.startsWith("speed_")
+                }?.forEach { it.delete() }
+            } catch (_: Exception) {}
+        }
+        
         // Keep timeline container visible, but hide its normal contents
         timelineContainer.visibility = View.VISIBLE
         playerContainer.visibility = View.INVISIBLE
@@ -6064,7 +6083,26 @@ class VideoEditingActivity : AppCompatActivity() {
 
                 viewModel.startExport()
 
-                val sourceFilePath = tempInputFile.absolutePath
+                val sourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
+                    tempInputFile.absolutePath
+                } else {
+                    val resolved = getFilePathFromUri(project.sourceUri)
+                    if (resolved != null && File(resolved).exists()) {
+                        tempInputFile = File(resolved)
+                        resolved
+                    } else {
+                        val isImg = isImageUri(project.sourceUri)
+                        val ext = if (isImg) ".jpg" else ".mp4"
+                        val fallback = copyContentUriToTempFile(project.sourceUri, "export_source", ext)
+                        if (fallback != null && fallback.exists()) {
+                            tempInputFile = fallback
+                            fallback.absolutePath
+                        } else {
+                            viewModel.exportError("Cannot access project source media")
+                            return@launch
+                        }
+                    }
+                }
                 val isAudioOnly = viewModel.exportAudioOnly.value
                 val ext = if (isAudioOnly) ".mp3" else ".mp4"
                 tempOutputFile = File(cacheDir, "temp_video_${System.currentTimeMillis()}$ext")
@@ -6410,7 +6448,110 @@ class VideoEditingActivity : AppCompatActivity() {
         }
     }
 
+    private var isPlayerListenerAttached = false
+
+    private fun ensurePlayerInitialized() {
+        if (!::player.isInitialized) {
+            player = ExoPlayer.Builder(this).build()
+            playerView.player = player
+        }
+        if (!isPlayerListenerAttached && ::player.isInitialized) {
+            attachPlayerListener()
+            isPlayerListenerAttached = true
+        }
+    }
+
+    private fun attachPlayerListener() {
+        player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) {
+                    // Reset UI components when video reaches the end
+                    val btnPlayPause = findViewById<ImageButton>(R.id.btnPlayPause)
+                    btnPlayPause.setImageResource(R.drawable.ic_play_24)
+                    if (::btnFullscreenPlayPause.isInitialized) {
+                        btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
+                    }
+                    isProgrammaticScroll = true
+                    timelineHorizontalScroll.scrollTo((getTotalSequenceDuration() * pixelsPerMs).toInt(), 0)
+                    isProgrammaticScroll = false
+
+                    pauseAllBgAudio()
+                    stopProgressUpdater()
+                    if (isShowingPreview) dismissPreview()
+                }
+                if (state == Player.STATE_READY) {
+                    isVideoLoaded = true
+                    val totalDuration = getTotalSequenceDuration()
+                    customVideoSeeker.setVideoDuration(totalDuration)
+                    timeRulerView.setVideoDuration(totalDuration)
+                    updateDurationDisplay(getGlobalPosition().toInt(), totalDuration.toInt())
+                    
+                    if (!isInitialFitDone && totalDuration > 0L) {
+                        timelineHorizontalScroll.post {
+                            val scrollWidth = timelineHorizontalScroll.width.toFloat()
+                            if (scrollWidth > 0) {
+                                val safeDuration = totalDuration
+                                val newPixelsPerMs = (scrollWidth - 32.dpToPx()) / safeDuration
+                                val density = resources.displayMetrics.density
+                                pixelsPerMs = newPixelsPerMs.coerceIn(0.001f * density, 2.0f * density)
+                                viewModel.project.value?.let { renderTracks(it) }
+                                isInitialFitDone = true
+                            }
+                        }
+                    }
+
+                    updateUIInteractionState()
+                }
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    btnPlayPause.setImageResource(R.drawable.ic_pause_24)
+                    if (::btnFullscreenPlayPause.isInitialized) {
+                        btnFullscreenPlayPause.setImageResource(R.drawable.ic_pause_24)
+                    }
+                    startProgressUpdater()
+                    syncBgAudio(getGlobalPosition(), true)
+                } else {
+                    btnPlayPause.setImageResource(R.drawable.ic_play_24)
+                    if (::btnFullscreenPlayPause.isInitialized) {
+                        btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
+                    }
+                    stopProgressUpdater()
+                    pauseAllBgAudio()
+                }
+            }
+
+            override fun onVideoSizeChanged(videoSize: com.google.android.exoplayer2.video.VideoSize) {
+            }
+
+            override fun onPositionDiscontinuity(reason: Int) {
+                if (isVideoLoaded) {
+                    syncUiWithPlayer()
+                }
+            }
+
+            override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
+                super.onPlayerError(error)
+                Log.e(TAG, "ExoPlayer Error: ${error.message}", error)
+                if (videoUri != null && missingMediaUris.contains(videoUri)) {
+                    Log.w(TAG, "Playback error caused by known missing media; continuing editing")
+                    isVideoLoaded = true
+                    isImportLoading = false
+                    loadingScreen.visibility = View.GONE
+                } else {
+                    showError("Unsupported video format or corrupted file.")
+                    isImportLoading = false
+                    isVideoLoaded = true
+                    loadingScreen.visibility = View.GONE
+                    finish()
+                }
+            }
+        })
+    }
+
     private fun setupExoPlayer() {
+        ensurePlayerInitialized()
         val projectUri = intent.getParcelableExtra<Uri>("PROJECT_URI")
         if (projectUri != null) {
             currentProjectUri = projectUri
@@ -6530,101 +6671,10 @@ class VideoEditingActivity : AppCompatActivity() {
             }
         }
         
-        if (!::player.isInitialized) {
-            player = ExoPlayer.Builder(this).build()
-            playerView.player = player
-        }
+        ensurePlayerInitialized()
 
         if (videoUri != null) {
             showLoading("Loading...")
-
-            player.addListener(object : Player.Listener {
-                override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_ENDED) {
-                        // Reset UI components when video reaches the end
-                        val btnPlayPause = findViewById<ImageButton>(R.id.btnPlayPause)
-                        btnPlayPause.setImageResource(R.drawable.ic_play_24)
-                        if (::btnFullscreenPlayPause.isInitialized) {
-                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
-                        }
-                        isProgrammaticScroll = true
-                        timelineHorizontalScroll.scrollTo((getTotalSequenceDuration() * pixelsPerMs).toInt(), 0)
-                        isProgrammaticScroll = false
-
-                        pauseAllBgAudio()
-                        stopProgressUpdater()
-                        if (isShowingPreview) dismissPreview()
-                    }
-                    if (state == Player.STATE_READY) {
-                        isVideoLoaded = true
-                        val totalDuration = getTotalSequenceDuration()
-                        customVideoSeeker.setVideoDuration(totalDuration)
-                        timeRulerView.setVideoDuration(totalDuration)
-                        updateDurationDisplay(getGlobalPosition().toInt(), totalDuration.toInt())
-                        
-                        if (!isInitialFitDone && totalDuration > 0L) {
-                            timelineHorizontalScroll.post {
-                                val scrollWidth = timelineHorizontalScroll.width.toFloat()
-                                if (scrollWidth > 0) {
-                                    val safeDuration = totalDuration
-                                    val newPixelsPerMs = (scrollWidth - 32.dpToPx()) / safeDuration
-                                    val density = resources.displayMetrics.density
-                                    pixelsPerMs = newPixelsPerMs.coerceIn(0.001f * density, 2.0f * density)
-                                    viewModel.project.value?.let { renderTracks(it) }
-                                    isInitialFitDone = true
-                                }
-                            }
-                        }
-
-                        updateUIInteractionState()
-                    }
-                }
-
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    if (isPlaying) {
-                        btnPlayPause.setImageResource(R.drawable.ic_pause_24)
-                        if (::btnFullscreenPlayPause.isInitialized) {
-                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_pause_24)
-                        }
-                        startProgressUpdater()
-                        syncBgAudio(getGlobalPosition(), true)
-                    } else {
-                        btnPlayPause.setImageResource(R.drawable.ic_play_24)
-                        if (::btnFullscreenPlayPause.isInitialized) {
-                            btnFullscreenPlayPause.setImageResource(R.drawable.ic_play_24)
-                        }
-                        stopProgressUpdater()
-                        pauseAllBgAudio()
-                    }
-                }
-
-                override fun onVideoSizeChanged(videoSize: com.google.android.exoplayer2.video.VideoSize) {
-                }
-
-                override fun onPositionDiscontinuity(reason: Int) {
-                    if (isVideoLoaded) {
-                        syncUiWithPlayer()
-                    }
-                }
-
-                override fun onPlayerError(error: com.google.android.exoplayer2.PlaybackException) {
-                    super.onPlayerError(error)
-                    Log.e(TAG, "ExoPlayer Error: ${error.message}", error)
-                    if (videoUri != null && missingMediaUris.contains(videoUri)) {
-                        Log.w(TAG, "Playback error caused by known missing media; continuing editing")
-                        isVideoLoaded = true
-                        isImportLoading = false
-                        loadingScreen.visibility = View.GONE
-                    } else {
-                        showError("Unsupported video format or corrupted file.")
-                        isImportLoading = false
-                        isVideoLoaded = true
-                        loadingScreen.visibility = View.GONE
-                        finish()
-                    }
-                }
-            })
-
             initializeVideoData()
             if (projectUri == null) {
                 val displayName = videoUri!!.lastPathSegment ?: "video"
@@ -8653,13 +8703,19 @@ class VideoEditingActivity : AppCompatActivity() {
         sliderDuration?.value = (Math.round(durationSec * 10f) / 10f).coerceIn(0.1f, 3.0f)
         tvDurationVal?.text = String.format(java.util.Locale.US, "%.1fs", durationSec)
 
-        sliderDuration?.addOnChangeListener { _, value, fromUser ->
+        sliderDuration?.addOnChangeListener { _, value, _ ->
             activeDurationMs = (value * 1000f).toLong()
             tvDurationVal?.text = String.format(java.util.Locale.US, "%.1fs", value)
-            if (fromUser && activeTransitionType != "none") {
-                applyTransitionToIndex(transitionIndex, activeTransitionType, activeDurationMs)
-            }
         }
+
+        sliderDuration?.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
+            override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                if (activeTransitionType != "none") {
+                    applyTransitionToIndex(transitionIndex, activeTransitionType, activeDurationMs)
+                }
+            }
+        })
 
         val transitions = listOf(
             Pair("none", "None"),

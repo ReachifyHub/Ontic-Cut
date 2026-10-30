@@ -201,11 +201,23 @@ class AutoAssembleManager(
         when (pipelineResult) {
             is TranscriptionPipelineResult.Success -> {
                 onProgress(90, "Transcribed! Aligning scene boundaries...")
-                val boundaries = SceneFuzzyMatcher.matchScenes(parsedScenes, pipelineResult.response, audioDurationMs)
+                var effectiveResponse = pipelineResult.response
+                if (effectiveResponse.words.isNullOrEmpty() && pipelineResult.localSavedFile.exists()) {
+                    try {
+                        val reloaded = findCachedTranscription(audioUri)
+                        if (reloaded != null && !reloaded.first.words.isNullOrEmpty()) {
+                            Log.i(TAG, "Using reloaded cached transcription with ${reloaded.first.words?.size} words")
+                            effectiveResponse = reloaded.first
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Fallback reload from cache failed: ${e.message}")
+                    }
+                }
+                val boundaries = SceneFuzzyMatcher.matchScenes(parsedScenes, effectiveResponse, audioDurationMs)
                 onProgress(100, "Scenes calculated successfully!")
                 AutoAssembleResult.Success(
                     boundaries = boundaries,
-                    transcriptionResponse = pipelineResult.response,
+                    transcriptionResponse = effectiveResponse,
                     wasCached = false
                 )
             }

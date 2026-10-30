@@ -12,12 +12,12 @@
 | # | Capability Group | Tool / Feature | Status | Fix Effort | Primary Code Path / File |
 |---|---|---|---|---|---|
 | 1 | **Main Track Clips** | Trim | **WORKS** | S | `VideoEditingActivity.kt:showVideoSegmentTrimDialog()`, `TrackTrimView.kt` |
-| 2 | Main Track Clips | Split | **UNSTABLE** | M | `VideoEditingActivity.kt:splitSelectedVideo()`, `VideoEditingViewModelExt.kt:splitVideoSegment()` |
+| 2 | Main Track Clips | Split | **FIXED** | M | `VideoEditingActivity.kt:splitSelectedVideo()`, `VideoEditingViewModelExt.kt:splitVideoSegment()` |
 | 3 | Main Track Clips | Speed | **WORKS** | S | `VideoEditingActivity.kt:applySpeedToSegment()`, `FFmpegRenderEngine.kt:generateSpeedProxy()` |
 | 4 | Main Track Clips | Reverse | **WORKS** | S | `VideoEditingActivity.kt:reverseVideoSegment()`, `FFmpegRenderEngine.kt:reverseVideo()` |
 | 5 | Main Track Clips | Freeze Frame | **WORKS** | S | `VideoEditingActivity.kt:freezeFrameAtCurrentPosition()` |
 | 6 | Main Track Clips | Reorder Clips | **FEATURE GAP** | L | Missing UI drag-and-drop / adapter move logic on `sequenceTrackContainer` |
-| 7 | Main Track Clips | Delete Clip | **UNSTABLE** | M | `VideoEditingActivity.kt:deleteSelectedVideo()`, `VideoEditingViewModelExt.kt:deleteSequenceSegment()` |
+| 7 | Main Track Clips | Delete Clip | **FIXED** | M | `VideoEditingActivity.kt:deleteSelectedVideo()`, `VideoEditingViewModelExt.kt:deleteSequenceSegment()` |
 | 8 | Main Track Clips | Duplicate Clip | **FEATURE GAP** | M | Missing duplicate action for main sequence items in `video_editing_toolbar.xml` |
 | 9 | **Text Overlays** | Add Text | **WORKS** | S | `VideoEditingActivity.kt:addTextAction()`, `DraggableTextOverlayView.kt:activate()` |
 | 10 | Text Overlays | Edit Text (In-Place) | **WORKS** | S | `DraggableTextOverlayView.kt:activateForEdit()`, `VideoEditingActivity.kt:enterTextEditingMode()` |
@@ -41,11 +41,11 @@
 | 28 | Audio Tracks | Voice Recording | **WORKS** | S | `VideoEditingActivity.kt:showVoiceOverDialog()`, `MediaRecorder` |
 | 29 | **Subtitles** | .SRT File Import | **WORKS** | S | `SubtitleParser.kt:parse()`, `VideoEditingActivity.kt:5380-5425` |
 | 30 | Subtitles | Auto-Captions Display & Edit | **WORKS** | M | `CaptionTrackView.kt`, `CaptionCueBuilder.kt`, `VideoEditingActivity.kt:7677-7706` |
-| 31 | **Transitions** | Apply Between Clips | **UNSTABLE** | M | `VideoEditingActivity.kt:8159-8173`, `VideoEditingViewModelExt.kt:addTransitionOperation()` |
+| 31 | **Transitions** | Apply Between Clips | **FIXED** | M | `VideoEditingActivity.kt:8159-8173`, `VideoEditingViewModelExt.kt:addTransitionOperation()` |
 | 32 | Transitions | Animated Toolbar Preview | **UNSTABLE** | S | `VideoEditingActivity.kt:8245-8280`, `dialog_transitions.xml` |
 | 33 | Transitions | Preview Playback | **BROKEN** | L | `VideoEditingActivity.kt:6593-6640`, `TransitionPreviewOverlayView.kt` |
-| 34 | Transitions | Export Rendering | **BROKEN** | L | `VideoEditingViewModel.kt:1083-1178` (`xfade` / `acrossfade` chaining) |
-| 35 | Transitions | Duration Control | **UNSTABLE** | S | `VideoEditingActivity.kt:8182-8188`, `dialog_transitions.xml:sliderTransitionDuration` |
+| 34 | Transitions | Export Rendering | **FIXED** | L | `VideoEditingViewModel.kt:1083-1178` (`xfade` / `acrossfade` chaining) |
+| 35 | Transitions | Duration Control | **FIXED** | S | `VideoEditingActivity.kt:8182-8188`, `dialog_transitions.xml:sliderTransitionDuration` |
 | 36 | **Overlays** | Image Overlays | **WORKS** | S | `DraggableImageOverlayView.kt`, `ImageOverlayView.kt`, `EditOperation.AddImageOverlay` |
 | 37 | Overlays | Stickers Catalog | **FEATURE GAP** | M | No built-in stickers catalog or picker; relies exclusively on user importing custom image files |
 | 38 | Overlays | GIFs | **WORKS** | S | `ImageOverlayView.kt:318-375`, `FFmpegRenderEngine.kt:generateVideoFromGif()` |
@@ -62,7 +62,7 @@
 | 49 | Freehand Drawing | Export Overlay Incorporation | **WORKS** | S | `VideoEditingActivity.kt:saveAndCommitHandwriting()`, `AddImageOverlay` |
 | 50 | **Export** | Resolution Options | **WORKS** | S | `export_quality_bottom_sheet_dialog.xml:cgResolution`, `VideoEditingViewModel.kt:setExportResolution()` |
 | 51 | Export | Progress Reporting | **WORKS** | S | `ExportService.kt:77-84`, `FFmpegRenderEngine.kt:271-279`, `VideoEditingActivity.kt:210-213` |
-| 52 | Export | Output Correctness | **UNSTABLE** | L | `VideoEditingViewModel.kt:buildConsolidatedFFmpegCommand()`, `FFmpegRenderEngine.kt:297-316` |
+| 52 | Export | Output Correctness | **FIXED** | L | `VideoEditingViewModel.kt:buildConsolidatedFFmpegCommand()`, `FFmpegRenderEngine.kt:297-316` |
 
 ---
 
@@ -77,11 +77,12 @@
 - **Fix Effort:** N/A (`S` if polish needed).
 
 #### 1.2 Split
-- **Status:** `UNSTABLE`
+- **Status:** `FIXED`
 - **Evidence:** `VideoEditingActivity.kt:4992-5021` (`splitSelectedVideo()`) computes `localSplitTimeMs` based on `getGlobalPosition()` and calls `viewModel.splitVideoSegment(index, localSplitTimeMs, item.uri, item.durationMs)`.
-- **Root-Cause Hypothesis:** 
-  1. `VideoEditingViewModelExt.kt:321-367` splits clip 0 into a trimmed primary clip and prepends a new `MergeItem` to `EditOperation.Merge`. However, it does not re-index existing `EditOperation.Transition` operations. Because transitions reference clips by fixed integer `index` (gap between clip `i` and `i+1`), splitting any clip shifts subsequent clip indices, causing all following transitions to attach to the wrong cut points or duplicate transitions at the split boundary.
-  2. Subtitle cues and audio offsets are not split or adjusted if split occurs across them.
+- **Root-Cause & Resolution:** 
+  1. Previously, `splitVideoSegment` split clip 0 or merge items without remapping transition operations, causing subsequent transitions to attach to wrong boundaries.
+  2. Fixed in `VideoEditingViewModelExt.kt:splitVideoSegment()`: when clip `index` splits into two halves (at `index` and `index+1`), any `EditOperation.Transition` at `op.index >= index` shifts by `+1`, preserving all surrounding scene cut transitions while leaving the new seam with no transition. Per-clip effects (`MuteClip`, `ColorFilter`, `Adjust`) with `op.index > index` also shift by `+1`.
+  3. Audio tracks and subtitles maintain absolute timeline coordinates anchored to the master timeline.
 - **Fix Effort:** `M`
 
 #### 1.3 Speed
@@ -109,11 +110,12 @@
 - **Fix Effort:** `L`
 
 #### 1.7 Delete Clip
-- **Status:** `UNSTABLE`
+- **Status:** `FIXED`
 - **Evidence:** `VideoEditingActivity.kt:1565-1574` shows confirmation dialog and calls `deleteSelectedVideo()` (lines 4880–4930), which invokes `viewModel.deleteSequenceSegment(index)`.
-- **Root-Cause Hypothesis:** 
-  1. Deleting clip index `i` deletes the segment and promotes the next clip if index 0 was deleted (`VideoEditingViewModelExt.kt:370-420`). However, it fails to update the index of all subsequent `EditOperation.Transition` items (`transOp.index`), causing transitions to shift to the wrong boundaries.
-  2. If the user deletes all clips, `clearProjectAndShowImportScreen()` is invoked, but background cached proxies for deleted clips are left orphaned in `cacheDir`.
+- **Root-Cause & Resolution:** 
+  1. Previously, deleting clip `i` removed the segment without updating transition indices, leaving orphaned transitions or shifting them to the wrong boundaries.
+  2. Fixed in `VideoEditingViewModelExt.kt:deleteSequenceSegment()`: any transition touching clip `index` (`op.index == index - 1 || op.index == index`) is cleanly removed, and any subsequent transition (`op.index > index`) shifts left by `-1`. Per-clip effects (`MuteClip`, `ColorFilter`, `Adjust`) at `index` are removed and subsequent indices shift `-1`.
+  3. Fixed in `VideoEditingActivity.kt:clearProjectAndShowImportScreen()`: on delete all, all operations are cleared and orphaned cache/proxy files (`proxy_*`, `extracted_audio_*`, `filter_script_*`, `speed_*`, `reverse_*`) are cleaned up asynchronously in a background coroutine.
 - **Fix Effort:** `M`
 
 #### 1.8 Duplicate Clip
@@ -285,9 +287,14 @@
 ### 5. Transitions
 
 #### 5.1 Apply Between Clips
-- **Status:** `UNSTABLE` (Seed Issue Confirmed)
-- **Evidence:** `showTransitionDialog(transitionIndex)` (`VideoEditingActivity.kt:8148-8230`) lists 20 transition types. Selecting a transition calls `applyTransitionToIndex(idx, transType, activeDurationMs)`.
-- **Root-Cause Hypothesis:** Transitions store cut location as a raw `index` integer (`transOp.index`). When clips are split, deleted, or re-assembled, these indices do not shift, causing transitions to be applied to wrong boundaries or become orphaned.
+- **Status:** `FIXED`
+- **Evidence:** `showTransitionDialog(transitionIndex)` (`VideoEditingActivity.kt:8622-8785`) lists 20 transition types. Selecting a transition calls `applyTransitionToIndex(idx, transType, activeDurationMs)`.
+- **Root-Cause & Resolution:** 
+  1. Transitions store cut location as integer `index` (gap between clip `i` and `i+1`).
+  2. Fixed index integrity across all timeline sequence operations:
+     - On Split (`VideoEditingViewModelExt.kt:splitVideoSegment()`): Any transition at `op.index >= index` shifts by `+1`, preserving connections across subsequent cuts.
+     - On Delete (`VideoEditingViewModelExt.kt:deleteSequenceSegment()`): Any transition at `op.index == index - 1 || op.index == index` touching the deleted clip is removed, and subsequent transitions (`op.index > index`) shift left by `-1`.
+     - On Insert (`VideoEditingViewModelExt.kt:insertSequenceItems()`): Existing transition indices shift appropriately.
 - **Fix Effort:** `M`
 
 #### 5.2 Animated Toolbar Preview
@@ -316,25 +323,20 @@
 - **Fix Effort:** `L`
 
 #### 5.4 Export Rendering
-- **Status:** `BROKEN` (Seed Issue Confirmed)
-- **Evidence:** 
-  In `VideoEditingViewModel.kt:1083-1178`:
-  1. Consecutive transitions chain FFmpeg `xfade` filters:
-     ```kotlin
-     filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedTransType}:duration=${transDuration}:offset=${offset}${xfvOut}")
-     ```
-     When two or more transitions occur in sequence, `baseStream.vLabel` is the output of the previous `xfade` (e.g. `[xfv0]`). However, unlike `flushPendingGroup` (which normalizes timestamps with `settb=1/30,setpts=N`), the output of an `xfade` filter does NOT have its timestamps reset before being piped into the next `xfade`.
-  2. Chaining multiple `xfade` and `acrossfade` filters without timestamp normalization causes non-monotonic PTS errors in FFmpeg, triggering encoding failure (`Conversion failed!` or empty video stream).
-- **Root-Cause Hypothesis:** FFmpeg `xfade` filter graph does not normalize presentation timestamps between chained transitions.
+- **Status:** `FIXED`
+- **Evidence:** `VideoEditingViewModel.kt:1083-1185` (`xfade` / `acrossfade` chaining) and `TransitionTimelineCalculator.kt`.
+- **Root-Cause & Resolution:** 
+  1. Root cause confirmed: In chained FFmpeg transitions, when a second xfade consumes the output of a prior xfade (`[xfv0]`), presentation timestamps were un-normalized, producing non-monotonic PTS errors and causing export failure ("Conversion failed!" or empty video track).
+  2. Fixed in `VideoEditingViewModel.kt`: Every `xfade` stage outputs to `[xfv${i}_raw]` and is immediately normalized with `settb=1/30,setpts=N` to `[norm_xfv${i}]`. Every `acrossfade` stage outputs to `[xfa${i}_raw]` and is immediately normalized with `asetpts=PTS-STARTPTS,aresample=async=1000` to `[norm_xfa${i}]`. Chained transitions consume these normalized labels.
+  3. Pure unit-tested timing model: Extracted `TransitionTimelineCalculator` enforcing invariant `totalDuration == sum(clipDurations) - sum(transitionDurations)` with strictly monotonic offsets.
 - **Fix Effort:** `L`
 
 #### 5.5 Duration Control
-- **Status:** `UNSTABLE`
-- **Evidence:** 
-  1. In `dialog_transitions.xml`, `sliderTransitionDuration` has an `addOnChangeListener` (line 8182) that calls `applyTransitionToIndex(...)` on every micro-tick from touch drag (`fromUser == true`).
-  2. Every micro-tick generates a new `UpdateOperationCommand` in the ViewModel undo stack (`_undoStack.value + historyState`), filling the entire 30-entry undo stack with minor duration adjustments in under a second.
-  3. As proven in 5.3, the preview player ignores this duration completely (`windowMs = 1000L`).
-- **Root-Cause Hypothesis:** Lack of slider debouncing / failure to use `addOnSliderTouchListener`, combined with hardcoded preview playback duration.
+- **Status:** `FIXED`
+- **Evidence:** `VideoEditingActivity.kt:8665-8685` (`sliderTransitionDuration`).
+- **Root-Cause & Resolution:** 
+  1. Root cause confirmed: `addOnChangeListener` called `applyTransitionToIndex` on every micro-tick during touch drags, generating dozens of `UpdateOperationCommand` instances that exhausted the 30-entry undo stack in under a second.
+  2. Fixed in `VideoEditingActivity.kt`: `addOnChangeListener` now strictly updates the live numeric label preview (`tvTransitionDurationValue`), while `applyTransitionToIndex` is invoked inside `addOnSliderTouchListener.onStopTrackingTouch()`, committing exactly once per gesture when the user releases the slider.
 - **Fix Effort:** `S`
 
 ---
@@ -451,12 +453,11 @@
 - **Fix Effort:** N/A (`S`).
 
 #### 9.3 Output Correctness
-- **Status:** `UNSTABLE`
-- **Evidence:**
-  1. Basic projects (single or merged clips, text, simple audio) render and export reliably to MediaStore gallery.
-  2. When multiple transitions are used, export fails or produces a video without a visual stream due to chained `xfade` PTS desynchronization.
-  3. When hardware encoder `h264_mediacodec` fails on certain chipsets, the software fallback to `libx264` triggers correctly (`FFmpegRenderEngine.kt:307-316`), but if complex filter graphs exceed shell command length, filter script fallback (`filter_script_*.txt`) can occasionally fail if temp files are cleaned up prematurely.
-- **Root-Cause Hypothesis:** Filter graph complexity issues around transitions and PTS timestamps.
+- **Status:** `FIXED`
+- **Evidence:** `VideoEditingViewModel.kt:1083-1185`, `FFmpegRenderEngine.kt:140-185`, `FFmpegRenderEngine.kt:270-350`.
+- **Root-Cause & Resolution:**
+  1. Chained `xfade`/`acrossfade` PTS desynchronization resolved: timestamps are normalized with `settb=1/30,setpts=N` and `asetpts=PTS-STARTPTS,aresample=async=1000` after each transition stage, preventing non-monotonic PTS errors.
+  2. Filter script lifecycle resolved: `filter_script_*.txt` files used for complex filter graphs are retained through execution and any hardware-to-software fallback retries, and are cleanly deleted in the `finally` block of `FFmpegRenderEngine.executeCommand()` and `exportFinal()`. Stale leftover scripts are also cleaned up on engine initialization.
 - **Fix Effort:** `L`
 
 ---

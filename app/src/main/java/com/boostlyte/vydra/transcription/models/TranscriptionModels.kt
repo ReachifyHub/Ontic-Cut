@@ -46,7 +46,7 @@ data class TranscriptionSegment(
  * Preserves the exact rawJson string returned by the server to avoid data loss.
  */
 data class TranscriptionResponse(
-    @SerializedName("text", alternate = ["transcript"]) val text: String? = null,
+    @SerializedName("text", alternate = ["transcript", "transcription"]) val text: String? = null,
     @SerializedName("segments") val segments: List<TranscriptionSegment>? = null,
     @SerializedName("words") val words: List<TranscriptionWord>? = null,
     @SerializedName("language") val language: String? = null,

@@ -1085,6 +1085,10 @@ class VideoEditingViewModel : ViewModel() {
             val transitionOps = List(inputCount - 1) { gapIdx ->
                 operations.filterIsInstance<EditOperation.Transition>().find { it.index == gapIdx }
             }
+            val transitionMath = TransitionTimelineCalculator.calculate(
+                clipDurationsSec = durationsArray.toList(),
+                transitions = operations.filterIsInstance<EditOperation.Transition>()
+            )
 
             // Chain xfade/acrossfade for transitions and concat for plain gaps.
             // Represents a finalized stream ready to be used as xfade input
@@ -1146,8 +1150,10 @@ class VideoEditingViewModel : ViewModel() {
                     val transDuration = rawTransDuration.coerceAtMost(baseStream.durationSec).coerceAtMost(durationsArray[gapIdx + 1])
                     val offset = (baseStream.durationSec - transDuration).coerceAtLeast(0.0)
 
-                    val xfvOut = "[xfv${transitionLabelCounter}]"
-                    val xfaOut = "[xfa${transitionLabelCounter}]"
+                    val rawXfvOut = "[xfv${transitionLabelCounter}_raw]"
+                    val rawXfaOut = "[xfa${transitionLabelCounter}_raw]"
+                    val normXfvOut = "[norm_xfv${transitionLabelCounter}]"
+                    val normXfaOut = "[norm_xfa${transitionLabelCounter}]"
                     val nextVLabel = "[norm${gapIdx + 1}]"
                     val nextALabel = "[anorm${gapIdx + 1}]"
 
@@ -1167,11 +1173,13 @@ class VideoEditingViewModel : ViewModel() {
                         else -> if (validXfadeTransitions.contains(rawType)) rawType else "fade"
                     }
 
-                    filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedTransType}:duration=${transDuration}:offset=${offset}${xfvOut}")
-                    filterParts.add("${baseStream.aLabel}${nextALabel}acrossfade=d=${transDuration}:c1=tri:c2=tri${xfaOut}")
+                    filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedTransType}:duration=${transDuration}:offset=${offset}${rawXfvOut}")
+                    filterParts.add("${baseStream.aLabel}${nextALabel}acrossfade=d=${transDuration}:c1=tri:c2=tri${rawXfaOut}")
+                    filterParts.add("${rawXfvOut}settb=1/30,setpts=N${normXfvOut}")
+                    filterParts.add("${rawXfaOut}asetpts=PTS-STARTPTS,aresample=async=1000${normXfaOut}")
 
                     val newDuration = offset + durationsArray[gapIdx + 1]
-                    currentStream = StreamInfo(xfvOut, xfaOut, newDuration)
+                    currentStream = StreamInfo(normXfvOut, normXfaOut, newDuration)
                     transitionLabelCounter++
                     // Next clip (gapIdx+1) has already been consumed by xfade — don't add it to pending
                 }

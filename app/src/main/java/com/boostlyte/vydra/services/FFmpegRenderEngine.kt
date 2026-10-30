@@ -81,6 +81,14 @@ class FFmpegRenderEngine(private val context: Context) {
         } catch (e: Exception) {
             Log.w(TAG, "Could not register FFmpegKit global log callback: ${e.message}")
         }
+
+        try {
+            context.cacheDir.listFiles { f -> f.name.startsWith("filter_script_") && f.name.endsWith(".txt") }?.forEach { f ->
+                if (System.currentTimeMillis() - f.lastModified() > 3600000L) {
+                    f.delete()
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     // ── Result type ───────────────────────────────────────────────────────────
@@ -132,6 +140,7 @@ class FFmpegRenderEngine(private val context: Context) {
      */
     suspend fun executeCommand(command: String, isRetry: Boolean = false): RenderResult {
         return withContext(Dispatchers.IO) {
+            val scriptFilePath = extractScriptFilePath(command)
             try {
                 Log.d(TAG, "Executing FFmpeg command: $command")
                 val session = FFmpegKit.execute(command)
@@ -169,6 +178,18 @@ class FFmpegRenderEngine(private val context: Context) {
                 Log.e(TAG, "Exception during FFmpeg execution: ${e.message}", e)
                 val diagnosticLog = createDiagnosticReport(context, command, null, null, null, e)
                 RenderResult.Failure(error = diagnosticLog)
+            } finally {
+                if (!isRetry && scriptFilePath != null) {
+                    try {
+                        val file = File(scriptFilePath)
+                        if (file.exists()) {
+                            file.delete()
+                            Log.d(TAG, "Cleaned up filter script file: $scriptFilePath")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to clean up filter script file: ${e.message}")
+                    }
+                }
             }
         }
     }
@@ -250,6 +271,7 @@ class FFmpegRenderEngine(private val context: Context) {
         isRetry: Boolean = false
     ): RenderResult {
         return withContext(Dispatchers.IO) {
+            val scriptFilePath = extractScriptFilePath(ffmpegCommand)
             try {
                 Log.d(TAG, "Executing FFmpeg command: $ffmpegCommand")
                 
@@ -321,6 +343,18 @@ class FFmpegRenderEngine(private val context: Context) {
                 Log.e(TAG, "Exception during FFmpeg execution: ${e.message}", e)
                 val diagnosticLog = createDiagnosticReport(context, ffmpegCommand, null, null, null, e)
                 RenderResult.Failure(error = diagnosticLog)
+            } finally {
+                if (!isRetry && scriptFilePath != null) {
+                    try {
+                        val file = File(scriptFilePath)
+                        if (file.exists()) {
+                            file.delete()
+                            Log.d(TAG, "Cleaned up filter script file: $scriptFilePath")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to clean up filter script file: ${e.message}")
+                    }
+                }
             }
         }
     }
@@ -767,5 +801,10 @@ class FFmpegRenderEngine(private val context: Context) {
 
         // Fallback: last whitespace-delimited token (for unquoted legacy commands)
         return command.trimEnd().split("\\s+".toRegex()).lastOrNull() ?: ""
+    }
+
+    private fun extractScriptFilePath(command: String): String? {
+        val regex = Regex("""-filter_complex_script\s+["']?([^"'\s]+)["']?""")
+        return regex.find(command)?.groupValues?.getOrNull(1)
     }
 }
