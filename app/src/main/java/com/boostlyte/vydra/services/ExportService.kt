@@ -39,6 +39,7 @@ class ExportService : Service() {
         const val ACTION_EXPORT_PROGRESS = "com.boostlyte.vydra.ACTION_EXPORT_PROGRESS"
         const val ACTION_EXPORT_SUCCESS = "com.boostlyte.vydra.ACTION_EXPORT_SUCCESS"
         const val ACTION_EXPORT_FAILURE = "com.boostlyte.vydra.ACTION_EXPORT_FAILURE"
+        const val ACTION_EXPORT_CANCELLED = "com.boostlyte.vydra.ACTION_EXPORT_CANCELLED"
 
         const val EXTRA_PROGRESS = "extra_progress"
         const val EXTRA_SAVED_URI = "extra_saved_uri"
@@ -111,7 +112,7 @@ class ExportService : Service() {
                     }
                     is FFmpegRenderEngine.RenderResult.Cancelled -> {
                         showCompletionNotification("Export Cancelled", "The export was cancelled", null)
-                        broadcastFailure("Export cancelled", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                        broadcastCancelled()
                     }
                 }
 
@@ -223,6 +224,11 @@ class ExportService : Service() {
         val intent = Intent(ACTION_EXPORT_SUCCESS).apply {
             putExtra(EXTRA_SAVED_URI, savedUri)
         }
+        LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+
+    private fun broadcastCancelled() {
+        val intent = Intent(ACTION_EXPORT_CANCELLED)
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
     }
 
