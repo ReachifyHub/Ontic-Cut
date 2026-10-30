@@ -333,19 +333,15 @@ class TextOverlayView @JvmOverloads constructor(
                     val lineY = startY + (index * textHeight)
 
                     if (op.borderThickness > 0) {
-                        paint.style = Paint.Style.STROKE
-                        paint.strokeWidth = op.borderThickness * scale
-                        paint.strokeJoin = Paint.Join.ROUND
-                        val borderColorInt = try { Color.parseColor(op.borderColor) } catch (e: Exception) { Color.BLACK }
-                        paint.color = Color.argb(alphaInt, Color.red(borderColorInt), Color.green(borderColorInt), Color.blue(borderColorInt))
-                        canvas.drawText(line, lineX, lineY, paint)
-
-                        paint.style = Paint.Style.FILL
-                        paint.color = Color.argb(alphaInt, Color.red(baseColorInt), Color.green(baseColorInt), Color.blue(baseColorInt))
+                        val shadowVal = op.borderThickness.toFloat()
+                        val radius = (shadowVal * 1.2f * scale).coerceAtLeast(1f)
+                        val offset = (shadowVal * 0.8f * scale).coerceAtLeast(1f)
+                        paint.setShadowLayer(radius, offset, offset, Color.argb((alphaInt * 0.75f).toInt(), 0, 0, 0))
                     } else {
-                        paint.style = Paint.Style.FILL
+                        paint.clearShadowLayer()
                     }
-                    
+                    paint.style = Paint.Style.FILL
+                    paint.color = Color.argb(alphaInt, Color.red(baseColorInt), Color.green(baseColorInt), Color.blue(baseColorInt))
                     canvas.drawText(line, lineX, lineY, paint)
                 }
             }

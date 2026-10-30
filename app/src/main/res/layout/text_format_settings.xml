@@ -1,201 +1,333 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:orientation="vertical"
-    android:padding="16dp"
+    android:maxHeight="320dp"
+    android:fillViewport="true"
+    android:scrollbars="vertical"
     android:background="@drawable/bg_bottom_nav_floating"
     android:elevation="12dp"
     android:layout_marginHorizontal="16dp"
     android:layout_marginBottom="8dp">
 
-    <!-- Fonts -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
-        <TextView
-            android:layout_width="100dp"
-            android:layout_height="wrap_content"
-            android:text="Font"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp" />
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Header: Title and Done Button -->
         <LinearLayout
-            android:id="@+id/btnSelectFont"
-            android:layout_width="0dp"
-            android:layout_height="44dp"
-            android:layout_weight="1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:paddingHorizontal="12dp"
-            android:background="@drawable/tool_button_inactive"
-            android:clickable="true"
-            android:focusable="true">
+            android:layout_marginBottom="12dp">
 
             <TextView
-                android:id="@+id/tvSelectedFontName"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Roboto Regular"
+                android:text="Text Format"
                 android:textColor="#FFFFFF"
-                android:textSize="14sp"
-                android:ellipsize="end"
-                android:maxLines="1" />
+                android:textSize="15sp"
+                android:fontFamily="sans-serif-medium" />
+
+            <ImageButton
+                android:id="@+id/btnFormatDone"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:background="@drawable/tool_button_inactive"
+                android:src="@drawable/ic_check_24"
+                android:padding="6dp"
+                android:scaleType="fitCenter"
+                app:tint="@color/colorPrimary"
+                android:contentDescription="Done" />
+        </LinearLayout>
+
+        <!-- ══ SECTION 1: TYPOGRAPHY ══ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Typography"
+            android:textColor="@color/colorPrimary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:textAllCaps="true"
+            android:layout_marginBottom="6dp" />
+
+        <!-- Font Selector -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="10dp">
+
+            <TextView
+                android:layout_width="90dp"
+                android:layout_height="wrap_content"
+                android:text="Font"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:id="@+id/btnSelectFont"
+                android:layout_width="0dp"
+                android:layout_height="44dp"
+                android:layout_weight="1"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingHorizontal="12dp"
+                android:background="@drawable/tool_button_inactive"
+                android:clickable="true"
+                android:focusable="true">
+
+                <TextView
+                    android:id="@+id/tvSelectedFontName"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Roboto Regular"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp"
+                    android:ellipsize="end"
+                    android:maxLines="1" />
+
+                <ImageView
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:src="@drawable/ic_arrow_drop_down_24"
+                    app:tint="#FFFFFF"
+                    android:contentDescription="Select Font" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Alignment (3 icon toggles with visible selected state) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="14dp">
+
+            <TextView
+                android:layout_width="90dp"
+                android:layout_height="wrap_content"
+                android:text="Alignment"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="horizontal"
+                android:gravity="center">
+
+                <ImageButton
+                    android:id="@+id/btnAlignLeft"
+                    android:layout_width="48dp"
+                    android:layout_height="44dp"
+                    android:background="@drawable/tool_button_inactive"
+                    android:src="@drawable/ic_align_left_24"
+                    android:padding="10dp"
+                    android:scaleType="fitCenter"
+                    app:tint="#FFFFFF"
+                    android:contentDescription="Align Left" />
+
+                <ImageButton
+                    android:id="@+id/btnAlignCenter"
+                    android:layout_width="48dp"
+                    android:layout_height="44dp"
+                    android:layout_marginHorizontal="8dp"
+                    android:background="@drawable/tool_button_active"
+                    android:src="@drawable/ic_align_center_24"
+                    android:padding="10dp"
+                    android:scaleType="fitCenter"
+                    app:tint="#FFFFFF"
+                    android:contentDescription="Align Center" />
+
+                <ImageButton
+                    android:id="@+id/btnAlignRight"
+                    android:layout_width="48dp"
+                    android:layout_height="44dp"
+                    android:background="@drawable/tool_button_inactive"
+                    android:src="@drawable/ic_align_right_24"
+                    android:padding="10dp"
+                    android:scaleType="fitCenter"
+                    app:tint="#FFFFFF"
+                    android:contentDescription="Align Right" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#22FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <!-- ══ SECTION 2: APPEARANCE ══ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Appearance"
+            android:textColor="@color/colorPrimary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:textAllCaps="true"
+            android:layout_marginBottom="6dp" />
+
+        <!-- Color Shortcut Note -->
+        <LinearLayout
+            android:id="@+id/btnColorShortcutNote"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingVertical="4dp"
+            android:background="?android:attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:layout_marginBottom="8dp">
 
             <ImageView
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:src="@drawable/ic_arrow_drop_down_24"
-                app:tint="#FFFFFF" />
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:src="@drawable/ic_palette_24"
+                app:tint="@color/toolTextInactive"
+                android:layout_marginEnd="6dp"
+                android:contentDescription="Color Note" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Tip: Tap Color tab below for full palette &amp; HSV picker"
+                android:textColor="@color/toolTextInactive"
+                android:textSize="11sp" />
         </LinearLayout>
-    </LinearLayout>
 
-    <!-- Opacity -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginTop="8dp">
+        <!-- Opacity Slider -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="90dp"
+                android:layout_height="wrap_content"
+                android:text="Opacity"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/seekOpacity"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:valueFrom="0"
+                android:valueTo="100"
+                android:stepSize="1"
+                android:value="100" />
+
+            <TextView
+                android:id="@+id/tvOpacityValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="100%"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:gravity="end" />
+        </LinearLayout>
+
+        <!-- Shadow Slider -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="90dp"
+                android:layout_height="wrap_content"
+                android:text="Shadow"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp" />
+
+            <com.google.android.material.slider.Slider
+                android:id="@+id/seekBorderWidth"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:valueFrom="0"
+                android:valueTo="20"
+                android:stepSize="1"
+                android:value="0" />
+
+            <TextView
+                android:id="@+id/tvShadowValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="Off"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:gravity="end" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#22FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <!-- ══ SECTION 3: SPACING ══ -->
         <TextView
-            android:layout_width="100dp"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Opacity"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp" />
-        <com.google.android.material.slider.Slider
-            android:id="@+id/seekOpacity"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:valueFrom="0"
-            android:valueTo="100"
-            android:stepSize="1"
-            android:value="100" />
-    </LinearLayout>
+            android:text="Spacing"
+            android:textColor="@color/colorPrimary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:textAllCaps="true"
+            android:layout_marginBottom="6dp" />
 
-    <!-- Border Thickness -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginTop="8dp">
-        <TextView
-            android:layout_width="100dp"
+        <!-- Line Spacing Slider -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Shadow"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp" />
-        <com.google.android.material.slider.Slider
-            android:id="@+id/seekBorderWidth"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:valueFrom="0"
-            android:valueTo="20"
-            android:stepSize="1"
-            android:value="0" />
-    </LinearLayout>
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
-    <!-- Letter Spacing -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginTop="8dp">
-        <TextView
-            android:layout_width="100dp"
-            android:layout_height="wrap_content"
-            android:text="Letter Spacing"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp" />
-        <com.google.android.material.slider.Slider
-            android:id="@+id/seekLetterSpacing"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:valueFrom="0"
-            android:valueTo="100"
-            android:stepSize="1"
-            android:value="50" />
-    </LinearLayout>
+            <TextView
+                android:layout_width="90dp"
+                android:layout_height="wrap_content"
+                android:text="Line Spacing"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp" />
 
-    <!-- Line Spacing -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginTop="8dp">
-        <TextView
-            android:layout_width="100dp"
-            android:layout_height="wrap_content"
-            android:text="Line Spacing"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp" />
-        <com.google.android.material.slider.Slider
-            android:id="@+id/seekLineSpacing"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:valueFrom="0"
-            android:valueTo="100"
-            android:stepSize="1"
-            android:value="50" />
-    </LinearLayout>
+            <com.google.android.material.slider.Slider
+                android:id="@+id/seekLineSpacing"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:valueFrom="0"
+                android:valueTo="100"
+                android:stepSize="1"
+                android:value="50" />
 
-    <!-- Alignment -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginTop="16dp">
-        <TextView
-            android:layout_width="100dp"
-            android:layout_height="wrap_content"
-            android:text="Alignment"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp" />
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnAlignLeft"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            app:icon="@drawable/ic_align_left_24"
-            app:iconGravity="textStart"
-            app:iconTint="#FFFFFF"
-            android:backgroundTint="@color/inactiveToolBackground" />
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnAlignCenter"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:layout_marginHorizontal="4dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            app:icon="@drawable/ic_align_center_24"
-            app:iconGravity="textStart"
-            app:iconTint="#FFFFFF"
-            android:backgroundTint="@color/colorPrimary" />
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnAlignRight"
-            android:layout_width="0dp"
-            android:layout_height="40dp"
-            android:layout_weight="1"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            app:icon="@drawable/ic_align_right_24"
-            app:iconGravity="textStart"
-            app:iconTint="#FFFFFF"
-            android:backgroundTint="@color/inactiveToolBackground" />
-    </LinearLayout>
+            <TextView
+                android:id="@+id/tvLineSpacingValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="0"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:gravity="end" />
+        </LinearLayout>
 
-</LinearLayout>
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

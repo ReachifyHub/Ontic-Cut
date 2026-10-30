@@ -17,6 +17,8 @@ import android.view.ScaleGestureDetector
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import com.boostlyte.vydra.models.EditOperation
+import com.boostlyte.vydra.models.TextPosition
 
 /**
  * DraggableTextOverlayView provides an inline, draggable text editing experience
@@ -117,8 +119,7 @@ class DraggableTextOverlayView @JvmOverloads constructor(
         maxLines = 5
         isCursorVisible = true
 
-        // Shadow for readability on any video background
-        setShadowLayer(4f, 2f, 2f, Color.BLACK)
+        setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
     }
 
     // ── Selection border paint ────────────────────────────────────────────────
@@ -227,9 +228,19 @@ class DraggableTextOverlayView @JvmOverloads constructor(
         relativeY = 0.5f
         currentColorString = "#FFFFFF"
         currentFontPath = null
+        currentOpacity = 1.0f
+        currentBorderThickness = 0
+        currentLineSpacing = 0f
+        currentLetterSpacing = 0f
+        currentTextAlign = "center"
 
+        setFontPath(null)
         editText.setText(initialText)
         editText.setTextColor(Color.WHITE)
+        setOpacity(1.0f)
+        setBorderThickness(0)
+        setLineSpacing(0f)
+        setTextAlign("center")
         updateFontSizeOnScreen()
         visibility = VISIBLE
 
@@ -252,7 +263,7 @@ class DraggableTextOverlayView @JvmOverloads constructor(
         currentBorderThickness = op.borderThickness
         currentBorderColor = op.borderColor
         currentTextAlign = op.textAlign
-        currentLetterSpacing = op.letterSpacing
+        currentLetterSpacing = 0f // Letter spacing removed per Option B
         currentLineSpacing = op.lineSpacing
         currentFontPath = op.fontPath
 
@@ -263,6 +274,11 @@ class DraggableTextOverlayView @JvmOverloads constructor(
         } catch (e: Exception) {
             editText.setTextColor(Color.WHITE)
         }
+        setOpacity(op.opacity)
+        setBorderThickness(op.borderThickness)
+        setLineSpacing(op.lineSpacing)
+        setTextAlign(op.textAlign)
+
         updateFontSizeOnScreen()
         visibility = VISIBLE
 
@@ -331,22 +347,18 @@ class DraggableTextOverlayView @JvmOverloads constructor(
 
     fun setBorderThickness(thickness: Int) {
         currentBorderThickness = thickness.coerceAtLeast(0)
-        val borderColor = try {
-            Color.parseColor(currentBorderColor)
-        } catch (e: Exception) {
-            Color.BLACK
-        }
-
         if (currentBorderThickness > 0) {
-            editText.setShadowLayer((currentBorderThickness * 1.2f).coerceAtLeast(1f), 0f, 0f, borderColor)
+            val radius = (currentBorderThickness * 1.2f).coerceAtLeast(1f)
+            val offset = (currentBorderThickness * 0.8f).coerceAtLeast(1f)
+            editText.setShadowLayer(radius, offset, offset, Color.argb(190, 0, 0, 0))
         } else {
-            editText.setShadowLayer(4f, 2f, 2f, Color.BLACK)
+            editText.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
         }
     }
 
     fun setLetterSpacing(spacing: Float) {
-        currentLetterSpacing = spacing
-        editText.letterSpacing = spacing
+        currentLetterSpacing = 0f
+        editText.letterSpacing = 0f
     }
 
     fun setLineSpacing(spacing: Float) {
@@ -581,6 +593,36 @@ class DraggableTextOverlayView @JvmOverloads constructor(
     fun getRelativeX(): Float = relativeX
     fun getRelativeY(): Float = relativeY
     fun getOpacity(): Float = currentOpacity
+    fun getFontSize(): Int = currentFontSize
+    fun getFontPath(): String? = currentFontPath
+    fun getBorderThickness(): Int = currentBorderThickness
+    fun getBorderColor(): String = currentBorderColor
+    fun getTextAlign(): String = currentTextAlign
+    fun getLineSpacing(): Float = currentLineSpacing
+
+    fun buildAddTextOperation(startTimeMs: Long, endTimeMs: Long, id: String = System.nanoTime().toString()): EditOperation.AddText? {
+        val text = editText.text.toString().trim()
+        if (text.isEmpty()) return null
+        updateRelativePosition()
+        return EditOperation.AddText(
+            text = text,
+            fontSize = currentFontSize,
+            position = TextPosition.fromLabel("Center Align"),
+            relativeX = relativeX,
+            relativeY = relativeY,
+            color = currentColorString,
+            startTimeMs = startTimeMs,
+            endTimeMs = endTimeMs,
+            id = id,
+            fontPath = currentFontPath,
+            opacity = currentOpacity,
+            borderThickness = currentBorderThickness,
+            borderColor = currentBorderColor,
+            textAlign = currentTextAlign,
+            letterSpacing = 0f,
+            lineSpacing = currentLineSpacing
+        )
+    }
 
     fun setProperties(rx: Float, ry: Float, op: Float) {
         relativeX = rx

@@ -163,23 +163,19 @@
 - **Fix Effort:** N/A (`S`).
 
 #### 2.7 Shadow
-- **Status:** `BROKEN`
-- **Evidence:** 
-  1. In `text_format_settings.xml:81-102`, the slider is labeled `Shadow` with ID `seekBorderWidth`.
-  2. In `VideoEditingActivity.kt:1230-1233`, moving this slider calls `draggableTextOverlay?.setBorderThickness(value.toInt())`.
-  3. In `DraggableTextOverlayView.kt:332-345`, `setBorderThickness()` sets a blurred shadow layer on the TextView if thickness > 0 (`editText.setShadowLayer(...)`), but stores it in `currentBorderThickness`.
-  4. In export (`VideoEditingViewModel.kt:232`), `borderThickness` maps to FFmpeg's `:borderw=${op.borderThickness}:bordercolor='...'`. In FFmpeg `drawtext`, `borderw` is a hard outline stroke, NOT a drop shadow (`shadowx`/`shadowy`/`shadowcolor`).
-- **Root-Cause Hypothesis:** Complete semantic mismatch and miswiring. The UI promises "Shadow", the preview applies a pseudo-outline via `setShadowLayer`, and export produces a solid stroke outline via `borderw`. There is no parameter or UI for shadow offset or shadow color.
-- **Fix Effort:** `S`
+- **Status:** `WORKS` (Resolved)
+- **Resolution & Evidence:**
+  1. **Preview Parity:** In `DraggableTextOverlayView.kt` and `TextOverlayView.kt`, removed legacy hardcoded drop shadow and replaced outline stroke rendering with dynamic true drop shadow (`setShadowLayer((thickness * 1.2f).coerceAtLeast(1f), (thickness * 0.8f).coerceAtLeast(1f), (thickness * 0.8f).coerceAtLeast(1f), Color.argb(190, 0, 0, 0))` when `borderThickness > 0`, and `setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)` / `clearShadowLayer()` when 0).
+  2. **Export Parity:** In `VideoEditingViewModel.kt` (`buildDrawtextExpr`), replaced hard outline `:borderw=${op.borderThickness}:bordercolor=...` with true drop shadow parameters `:shadowcolor=black@0.75:shadowx=$offset:shadowy=$offset`, scaling offset proportionally by `_exportResolution` (clamped to 0.5f..3.0f).
+  3. **Backward Compatibility:** Preserved `op.borderThickness` in the project model and serialization schema to avoid breaking existing saved `.vdprj` / `.lcprj` project files while delivering true drop shadow across preview and export.
+- **Fix Effort:** Completed (`S`).
 
 #### 2.8 Letter Spacing
-- **Status:** `UNSTABLE` (Partially Broken)
-- **Evidence:** 
-  1. In `VideoEditingActivity.kt:1235-1238`, `seekLetterSpacing` calls `draggableTextOverlay?.setLetterSpacing((value - 50f) / 100f)`.
-  2. In preview, `DraggableTextOverlayView.kt:347-350` sets `editText.letterSpacing = spacing`.
-  3. In export (`VideoEditingViewModel.kt:192-237`), `buildDrawtextExpr()` accepts `op: EditOperation.AddText`, but `op.letterSpacing` is NEVER referenced or included in the returned FFmpeg `drawtext` string.
-- **Root-Cause Hypothesis:** Missing export wiring. Letter spacing is visible during interactive preview, but completely stripped out upon rendering the final export.
-- **Fix Effort:** `S`
+- **Status:** `WORKS` (Resolved - Option B)
+- **Resolution & Evidence:**
+  1. **Option B Implementation:** FFmpeg's native `drawtext` filter does not support letter/character spacing. To eliminate preview vs export mismatch and preserve pipeline stability without risky bitmap rasterization of dynamic animated text, the letter spacing slider was cleanly removed from the redesigned format settings sheet.
+  2. **Backward Compatibility:** `DraggableTextOverlayView.kt` forces `letterSpacing = 0f` and ignores existing values safely without crashes. Stored `letterSpacing` values in existing `.vdprj` project files load without errors.
+- **Fix Effort:** Completed (`S`).
 
 #### 2.9 Line Spacing
 - **Status:** `WORKS`
@@ -194,17 +190,13 @@
 - **Fix Effort:** N/A (`S`).
 
 #### 2.11 Duplicate Text
-- **Status:** `BROKEN` (Seed Issue Confirmed)
-- **Evidence:** 
-  1. In `text_editing_toolbar.xml`, `btnTextDuplicate` calls `duplicateSelectedOverlay()` (`VideoEditingActivity.kt:3059-3102`).
-  2. If the user adds a new text overlay and taps Duplicate before exiting, `viewModel.selectedOperationId.value` is null, so `duplicateSelectedOverlay()` immediately returns at line 3060 without doing anything.
-  3. If an existing text overlay is selected, `duplicateSelectedOverlay()` creates `newOp`, adds it via `viewModel.addOperation(newOp)`, and immediately calls `viewModel.selectOperation(newOpId)`.
-  4. The observer `selectedOperationId.observe` (line 2240) fires on `newOpId` and invokes `enterTextEditingMode(isReEditing = true)`.
-  5. `enterTextEditingMode` calls `closeActiveEditingModes()` (line 3028), which observes `isTextEditingActive == true` and invokes `draggableTextOverlay?.commitText()`.
-  6. `commitText()` calls `onTextCommitted` (lines 1089–1120), which queries `viewModel.selectedOperationId.value`. However, `selectedOperationId` was ALREADY set to `newOpId`. It therefore overwrites the newly created duplicate with the old text's state!
-  7. `commitText()` then calls `deactivate()` (line 300), which sets `draggableTextOverlay.visibility = View.GONE`.
-- **Root-Cause Hypothesis:** Race condition and lifecycle conflict. Selecting the new duplicate while an active text session is open forces `commitText()` to fire against the newly selected ID, destroying the duplicate's separate identity and deactivating the overlay view.
-- **Fix Effort:** `M`
+- **Status:** `WORKS` (Resolved)
+- **Resolution & Evidence:**
+  1. **Re-entrancy Guard & Order of Operations:** Added `isDuplicatingOverlay` re-entrancy flag in `VideoEditingActivity.kt`. Guarded `closeActiveEditingModes()` and `onTextCommitted` so that selecting a newly duplicated overlay never triggers a re-entrant commit that overwrites the duplicate with stale source data or deactivates the overlay view.
+  2. **Uncommitted New Text Support:** In `duplicateSelectedOverlay()`, if a user taps Duplicate during an active text session (whether editing an existing overlay or creating a brand-new overlay with null ID), the active session is committed first to the project model.
+  3. **Clean Duplicate Creation & Undo Hygiene:** Generates a new `EditOperation.AddText` with unique nanoTime ID, and slight offset (`(relativeX + 0.05f).coerceIn(0.05f, 0.95f)`, `(relativeY + 0.05f).coerceIn(0.05f, 0.95f)`). Dispatches `viewModel.addOperation(newOp)` which adds exactly 1 undo entry, then selects `newOpId`.
+  4. **Immediate Visibility & Selection:** Swapped order in `selectedOperationId.collect` so `enterTextEditingMode(isReEditing = true)` runs before `draggableTextOverlay?.activateForEdit(op)`, ensuring the duplicate is immediately visible and active in the editor.
+- **Fix Effort:** Completed (`M`).
 
 #### 2.12 Keyframes
 - **Status:** `WORKS`

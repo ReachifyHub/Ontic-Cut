@@ -236,11 +236,15 @@ class VideoEditingViewModel : ViewModel() {
         } else {
             ""
         }
-        val borderPart = if (op.borderThickness > 0) ":borderw=${op.borderThickness}:bordercolor='${formatColorForFFmpeg(op.borderColor)}'" else ""
+        val shadowPart = if (op.borderThickness > 0) {
+            val resScale = (_exportResolution.value.toFloat() / 720f).coerceIn(0.5f, 3.0f)
+            val offset = maxOf(1, Math.round(op.borderThickness * 0.8f * resScale))
+            ":shadowcolor=black@0.75:shadowx=$offset:shadowy=$offset"
+        } else ""
         val alignPart = if (op.textAlign.isNotEmpty()) ":text_align=${op.textAlign}" else ""
         val lineSpacingPart = if (op.lineSpacing != 0f) ":line_spacing=${op.lineSpacing.toInt()}" else ""
         
-        return "drawtext=${fontPart}text='$escapedText':fontcolor='${formatColorForFFmpeg(op.color)}':fontsize=${op.fontSize}:$positionPart$enablePart$alphaPart$borderPart$alignPart$lineSpacingPart"
+        return "drawtext=${fontPart}text='$escapedText':fontcolor='${formatColorForFFmpeg(op.color)}':fontsize=${op.fontSize}:$positionPart$enablePart$alphaPart$shadowPart$alignPart$lineSpacingPart"
     }
 
     private fun buildFFmpegMaskAlphaExpr(

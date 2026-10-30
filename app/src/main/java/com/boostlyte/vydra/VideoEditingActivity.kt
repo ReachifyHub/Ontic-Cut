@@ -308,8 +308,50 @@ class VideoEditingActivity : AppCompatActivity() {
             showFontManagerBottomSheet { selectedFont ->
                 tvSelectedFontName?.text = selectedFont.name
                 draggableTextOverlay?.setFontPath(selectedFont.path)
+                val selectedId = viewModel.selectedOperationId.value
+                if (selectedId != null) {
+                    val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText
+                    if (op != null) {
+                        viewModel.updateOperation(op.copy(fontPath = selectedFont.path))
+                    }
+                }
             }
         }
+    }
+
+    private fun populateTextFormatPanel(formatContainer: View?) {
+        val container = formatContainer ?: return
+        val seekOpacity = container.findViewById<com.google.android.material.slider.Slider>(R.id.seekOpacity)
+        val tvOpacity = container.findViewById<TextView>(R.id.tvOpacityValue)
+        val seekBorderWidth = container.findViewById<com.google.android.material.slider.Slider>(R.id.seekBorderWidth)
+        val tvShadow = container.findViewById<TextView>(R.id.tvShadowValue)
+        val seekLineSpacing = container.findViewById<com.google.android.material.slider.Slider>(R.id.seekLineSpacing)
+        val tvLineSpacing = container.findViewById<TextView>(R.id.tvLineSpacingValue)
+        val btnAlignL = container.findViewById<ImageButton>(R.id.btnAlignLeft)
+        val btnAlignC = container.findViewById<ImageButton>(R.id.btnAlignCenter)
+        val btnAlignR = container.findViewById<ImageButton>(R.id.btnAlignRight)
+
+        setupTextFontSelector(container)
+
+        val opacity = draggableTextOverlay?.getOpacity() ?: 1.0f
+        val opacityVal = (opacity * 100f).coerceIn(0f, 100f)
+        seekOpacity?.value = opacityVal
+        tvOpacity?.text = "${opacityVal.toInt()}%"
+
+        val shadowThickness = draggableTextOverlay?.getBorderThickness() ?: 0
+        val shadowVal = shadowThickness.toFloat().coerceIn(0f, 20f)
+        seekBorderWidth?.value = shadowVal
+        tvShadow?.text = if (shadowThickness == 0) "Off" else "$shadowThickness"
+
+        val lineSpacing = draggableTextOverlay?.getLineSpacing() ?: 0f
+        val lineVal = ((lineSpacing / 2f) + 50f).coerceIn(0f, 100f)
+        seekLineSpacing?.value = lineVal
+        tvLineSpacing?.text = "${lineSpacing.toInt()}"
+
+        val align = draggableTextOverlay?.getTextAlign()?.lowercase() ?: "center"
+        btnAlignL?.setBackgroundResource(if (align == "left" || align == "l") R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+        btnAlignC?.setBackgroundResource(if (align == "center" || align == "c" || (align != "left" && align != "right" && align != "l" && align != "r")) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+        btnAlignR?.setBackgroundResource(if (align == "right" || align == "r") R.drawable.tool_button_active else R.drawable.tool_button_inactive)
     }
 
     private fun setupSubtitleFontSelector(subtitlesToolbar: View?) {
@@ -464,6 +506,7 @@ class VideoEditingActivity : AppCompatActivity() {
     private var draggableTextOverlay: DraggableTextOverlayView? = null
     private var textEditingToolbar: View? = null
     private var isTextEditingActive = false
+    private var isDuplicatingOverlay = false
 
     // Inline image overlay editing state
     private var draggableImageOverlay: DraggableImageOverlayView? = null
@@ -1100,60 +1143,62 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                 }
                 overlay.onTextCommitted = { text, fontSize, relX, relY, color, fontPath, opacity, borderThickness, borderColor, textAlign, letterSpacing, lineSpacing ->
-                    val selectedId = viewModel.selectedOperationId.value
-                    if (isKeyframeEditingMode) {
-                        if (selectedId != null) {
-                            val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText
-                            if (op != null) {
-                                val globalTimeMs = getGlobalPosition()
-                                val start = op.startTimeMs ?: 0L
-                                val relativeTimeMs = globalTimeMs - start
-                                val currentList = op.positionKeyframes.toMutableList()
-                                val existingIndex = currentList.indexOfFirst { Math.abs(it.timeMs - relativeTimeMs) < 150 }
-                                val newPoint = EditOperation.KeyframePoint(relativeTimeMs, relX, relY)
-                                if (existingIndex != -1) {
-                                    currentList[existingIndex] = newPoint
-                                } else {
-                                    currentList.add(newPoint)
+                    if (!isDuplicatingOverlay) {
+                        val selectedId = viewModel.selectedOperationId.value
+                        if (isKeyframeEditingMode) {
+                            if (selectedId != null) {
+                                val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText
+                                if (op != null) {
+                                    val globalTimeMs = getGlobalPosition()
+                                    val start = op.startTimeMs ?: 0L
+                                    val relativeTimeMs = globalTimeMs - start
+                                    val currentList = op.positionKeyframes.toMutableList()
+                                    val existingIndex = currentList.indexOfFirst { Math.abs(it.timeMs - relativeTimeMs) < 150 }
+                                    val newPoint = EditOperation.KeyframePoint(relativeTimeMs, relX, relY)
+                                    if (existingIndex != -1) {
+                                        currentList[existingIndex] = newPoint
+                                    } else {
+                                        currentList.add(newPoint)
+                                    }
+                                    val newOp = op.copy(positionKeyframes = currentList)
+                                    viewModel.updateOperation(newOp)
                                 }
-                                val newOp = op.copy(positionKeyframes = currentList)
-                                viewModel.updateOperation(newOp)
-                            }
-                        }
-                    } else {
-                        if (selectedId != null) {
-                            val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText
-                            if (op != null) {
-                                viewModel.updateOperation(op.copy(
-                                    text = text, fontSize = fontSize, relativeX = relX, relativeY = relY, color = color,
-                                    fontPath = fontPath, opacity = opacity, borderThickness = borderThickness, borderColor = borderColor,
-                                    textAlign = textAlign, letterSpacing = letterSpacing, lineSpacing = lineSpacing
-                                ))
                             }
                         } else {
-                        val start = getGlobalPosition()
-                        val end = minOf(start + 3000L, getTotalSequenceDuration())
-                        viewModel.addTextOperation(
-                            text = text,
-                            fontSize = fontSize,
-                            position = "Center Align",
-                            relativeX = relX,
-                            relativeY = relY,
-                            color = color,
-                            startTimeMs = start,
-                            endTimeMs = end,
-                            fontPath = fontPath,
-                            opacity = opacity,
-                            borderThickness = borderThickness,
-                            borderColor = borderColor,
-                            textAlign = textAlign,
-                            letterSpacing = letterSpacing,
-                            lineSpacing = lineSpacing
-                        )
+                            if (selectedId != null) {
+                                val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText
+                                if (op != null) {
+                                    viewModel.updateOperation(op.copy(
+                                        text = text, fontSize = fontSize, relativeX = relX, relativeY = relY, color = color,
+                                        fontPath = fontPath, opacity = opacity, borderThickness = borderThickness, borderColor = borderColor,
+                                        textAlign = textAlign, letterSpacing = letterSpacing, lineSpacing = lineSpacing
+                                    ))
+                                }
+                            } else {
+                                val start = getGlobalPosition()
+                                val end = minOf(start + 3000L, getTotalSequenceDuration())
+                                viewModel.addTextOperation(
+                                    text = text,
+                                    fontSize = fontSize,
+                                    position = "Center Align",
+                                    relativeX = relX,
+                                    relativeY = relY,
+                                    color = color,
+                                    startTimeMs = start,
+                                    endTimeMs = end,
+                                    fontPath = fontPath,
+                                    opacity = opacity,
+                                    borderThickness = borderThickness,
+                                    borderColor = borderColor,
+                                    textAlign = textAlign,
+                                    letterSpacing = letterSpacing,
+                                    lineSpacing = lineSpacing
+                                )
+                            }
+                            viewModel.selectOperation(null)
+                            exitTextEditingMode()
+                        }
                     }
-                    viewModel.selectOperation(null)
-                    exitTextEditingMode()
-                }
                 }
             }
         } catch (e: Exception) {
@@ -1226,57 +1271,105 @@ class VideoEditingActivity : AppCompatActivity() {
 
                 btnFormat?.setBounceClickListener {
                     draggableTextOverlay?.hideKeyboard()
-                    
                     resetTabs()
                     formatContainer?.visibility = View.VISIBLE
                     btnFormat.setColorFilter(getColor(R.color.colorPrimary))
+                    populateTextFormatPanel(formatContainer)
                 }
-                
+
                 // Format UI listeners
+                val btnFormatDone = formatContainer?.findViewById<ImageButton>(R.id.btnFormatDone)
+                btnFormatDone?.setBounceClickListener {
+                    resetTabs()
+                    btnKeyboard?.setColorFilter(getColor(R.color.colorPrimary))
+                }
+
+                val btnColorShortcutNote = formatContainer?.findViewById<View>(R.id.btnColorShortcutNote)
+                btnColorShortcutNote?.setBounceClickListener {
+                    btnPalette?.performClick()
+                }
+
                 setupTextFontSelector(formatContainer)
 
                 val seekOpacity = formatContainer?.findViewById<Slider>(R.id.seekOpacity)
-                seekOpacity?.addOnChangeListener { _, value, _ ->
-                    draggableTextOverlay?.setOpacity(value / 100f)
+                val tvOpacity = formatContainer?.findViewById<TextView>(R.id.tvOpacityValue)
+                seekOpacity?.addOnChangeListener { _, value, fromUser ->
+                    if (fromUser) {
+                        draggableTextOverlay?.setOpacity(value / 100f)
+                    }
+                    tvOpacity?.text = "${value.toInt()}%"
                 }
-                
+                seekOpacity?.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: Slider) {}
+                    override fun onStopTrackingTouch(slider: Slider) {
+                        val selectedId = viewModel.selectedOperationId.value ?: return
+                        val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText ?: return
+                        viewModel.updateOperation(op.copy(opacity = slider.value / 100f))
+                    }
+                })
+
                 val seekBorderWidth = formatContainer?.findViewById<Slider>(R.id.seekBorderWidth)
-                seekBorderWidth?.addOnChangeListener { _, value, _ ->
-                    draggableTextOverlay?.setBorderThickness(value.toInt())
+                val tvShadow = formatContainer?.findViewById<TextView>(R.id.tvShadowValue)
+                seekBorderWidth?.addOnChangeListener { _, value, fromUser ->
+                    if (fromUser) {
+                        draggableTextOverlay?.setBorderThickness(value.toInt())
+                    }
+                    tvShadow?.text = if (value.toInt() == 0) "Off" else "${value.toInt()}"
                 }
-                
-                val seekLetterSpacing = formatContainer?.findViewById<Slider>(R.id.seekLetterSpacing)
-                seekLetterSpacing?.addOnChangeListener { _, value, _ ->
-                    draggableTextOverlay?.setLetterSpacing((value - 50f) / 100f)
-                }
+                seekBorderWidth?.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: Slider) {}
+                    override fun onStopTrackingTouch(slider: Slider) {
+                        val selectedId = viewModel.selectedOperationId.value ?: return
+                        val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText ?: return
+                        viewModel.updateOperation(op.copy(borderThickness = slider.value.toInt()))
+                    }
+                })
 
                 val seekLineSpacing = formatContainer?.findViewById<Slider>(R.id.seekLineSpacing)
-                seekLineSpacing?.addOnChangeListener { _, value, _ ->
-                    draggableTextOverlay?.setLineSpacing((value - 50f) * 2f)
+                val tvLineSpacing = formatContainer?.findViewById<TextView>(R.id.tvLineSpacingValue)
+                seekLineSpacing?.addOnChangeListener { _, value, fromUser ->
+                    val spacingPx = (value - 50f) * 2f
+                    if (fromUser) {
+                        draggableTextOverlay?.setLineSpacing(spacingPx)
+                    }
+                    tvLineSpacing?.text = "${spacingPx.toInt()}"
                 }
-                
-                val btnAlignL = formatContainer?.findViewById<android.widget.Button>(R.id.btnAlignLeft)
-                val btnAlignC = formatContainer?.findViewById<android.widget.Button>(R.id.btnAlignCenter)
-                val btnAlignR = formatContainer?.findViewById<android.widget.Button>(R.id.btnAlignRight)
-                
-                btnAlignL?.setOnClickListener { 
-                    draggableTextOverlay?.setTextAlign("left")
-                    btnAlignL.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.colorPrimary))
-                    btnAlignC?.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.inactiveToolBackground))
-                    btnAlignR?.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.inactiveToolBackground))
+                seekLineSpacing?.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: Slider) {}
+                    override fun onStopTrackingTouch(slider: Slider) {
+                        val selectedId = viewModel.selectedOperationId.value ?: return
+                        val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText ?: return
+                        val spacingPx = (slider.value - 50f) * 2f
+                        viewModel.updateOperation(op.copy(lineSpacing = spacingPx))
+                    }
+                })
+
+                val btnAlignL = formatContainer?.findViewById<ImageButton>(R.id.btnAlignLeft)
+                val btnAlignC = formatContainer?.findViewById<ImageButton>(R.id.btnAlignCenter)
+                val btnAlignR = formatContainer?.findViewById<ImageButton>(R.id.btnAlignRight)
+
+                fun updateAlignmentButtons(align: String) {
+                    val norm = align.lowercase()
+                    btnAlignL?.setBackgroundResource(if (norm == "left" || norm == "l") R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+                    btnAlignC?.setBackgroundResource(if (norm == "center" || norm == "c" || (norm != "left" && norm != "right" && norm != "l" && norm != "r")) R.drawable.tool_button_active else R.drawable.tool_button_inactive)
+                    btnAlignR?.setBackgroundResource(if (norm == "right" || norm == "r") R.drawable.tool_button_active else R.drawable.tool_button_inactive)
                 }
-                btnAlignC?.setOnClickListener { 
-                    draggableTextOverlay?.setTextAlign("center") 
-                    btnAlignL?.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.inactiveToolBackground))
-                    btnAlignC.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.colorPrimary))
-                    btnAlignR?.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.inactiveToolBackground))
+
+                fun applyAlignment(align: String) {
+                    draggableTextOverlay?.setTextAlign(align)
+                    updateAlignmentButtons(align)
+                    val selectedId = viewModel.selectedOperationId.value
+                    if (selectedId != null) {
+                        val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == selectedId } as? EditOperation.AddText
+                        if (op != null) {
+                            viewModel.updateOperation(op.copy(textAlign = align))
+                        }
+                    }
                 }
-                btnAlignR?.setOnClickListener { 
-                    draggableTextOverlay?.setTextAlign("right") 
-                    btnAlignL?.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.inactiveToolBackground))
-                    btnAlignC?.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.inactiveToolBackground))
-                    btnAlignR.backgroundTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.colorPrimary))
-                }
+
+                btnAlignL?.setBounceClickListener { applyAlignment("left") }
+                btnAlignC?.setBounceClickListener { applyAlignment("center") }
+                btnAlignR?.setBounceClickListener { applyAlignment("right") }
 
                 toolbar.findViewById<View>(R.id.btnTextKeyframe)?.setBounceClickListener {
                     enterKeyframeEditingMode(isText = true)
@@ -2345,12 +2438,12 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                     when (op) {
                         is EditOperation.AddText -> {
-                            draggableTextOverlay?.activateForEdit(op)
                             enterTextEditingMode(isReEditing = true)
+                            draggableTextOverlay?.activateForEdit(op)
                         }
                         is EditOperation.AddImageOverlay -> {
-                            draggableImageOverlay?.activateForEdit(op)
                             enterImageEditingModeForEdit(op.rotationAngle)
+                            draggableImageOverlay?.activateForEdit(op)
                         }
                         is EditOperation.AddBackgroundAudio -> {
                             enterAudioEditingMode(op)
@@ -3267,7 +3360,7 @@ class VideoEditingActivity : AppCompatActivity() {
         if (isHandwritingActive) {
             closeHandwritingMode()
         }
-        if (isTextEditingActive) {
+        if (isTextEditingActive && !isDuplicatingOverlay) {
             draggableTextOverlay?.commitText()
             isTextEditingActive = false
         }
@@ -3300,8 +3393,10 @@ class VideoEditingActivity : AppCompatActivity() {
         textEditingToolbar?.visibility = View.VISIBLE
         textEditingToolbar?.let { toolbar ->
             toolbar.findViewById<View>(R.id.colorPickerContainer)?.visibility = View.GONE
+            toolbar.findViewById<View>(R.id.formatSettingsContainer)?.visibility = View.GONE
             toolbar.findViewById<ImageButton>(R.id.btnTextKeyboardTab)?.setColorFilter(getColor(R.color.colorPrimary))
             toolbar.findViewById<ImageButton>(R.id.btnTextPaletteTab)?.setColorFilter(getColor(R.color.toolTextInactive))
+            toolbar.findViewById<ImageButton>(R.id.btnTextFormatTab)?.setColorFilter(getColor(R.color.toolTextInactive))
             setupColorPicker(toolbar)
         }
         findViewById<LinearLayout>(R.id.editingControlsWrapper)?.visibility = View.GONE
@@ -3322,47 +3417,95 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private fun duplicateSelectedOverlay() {
-        val selectedId = viewModel.selectedOperationId.value ?: return
-        val currentProject = viewModel.project.value ?: return
-        val op = currentProject.operations.find {
-            when (it) {
-                is EditOperation.AddText -> it.id == selectedId
-                is EditOperation.AddImageOverlay -> it.id == selectedId
-                else -> false
+        if (isDuplicatingOverlay) return
+        isDuplicatingOverlay = true
+        try {
+            // 1. If currently in text editing mode, commit the active text first so it exists in the project model
+            if (isTextEditingActive && draggableTextOverlay?.visibility == View.VISIBLE) {
+                val currentText = draggableTextOverlay?.getText()?.trim() ?: ""
+                if (currentText.isNotEmpty()) {
+                    val currentSelectedId = viewModel.selectedOperationId.value
+                    if (currentSelectedId != null) {
+                        val op = viewModel.project.value?.operations?.find { (it as? EditOperation.AddText)?.id == currentSelectedId } as? EditOperation.AddText
+                        if (op != null) {
+                            val updated = op.copy(
+                                text = currentText,
+                                fontSize = draggableTextOverlay?.getFontSize() ?: op.fontSize,
+                                relativeX = draggableTextOverlay?.getRelativeX() ?: op.relativeX,
+                                relativeY = draggableTextOverlay?.getRelativeY() ?: op.relativeY,
+                                color = draggableTextOverlay?.getTextColor() ?: op.color,
+                                fontPath = draggableTextOverlay?.getFontPath() ?: op.fontPath,
+                                opacity = draggableTextOverlay?.getOpacity() ?: op.opacity,
+                                borderThickness = draggableTextOverlay?.getBorderThickness() ?: op.borderThickness,
+                                borderColor = draggableTextOverlay?.getBorderColor() ?: op.borderColor,
+                                textAlign = draggableTextOverlay?.getTextAlign() ?: op.textAlign,
+                                letterSpacing = 0f,
+                                lineSpacing = draggableTextOverlay?.getLineSpacing() ?: op.lineSpacing
+                            )
+                            viewModel.updateOperation(updated)
+                        }
+                    } else {
+                        val start = getGlobalPosition()
+                        val end = minOf(start + 3000L, getTotalSequenceDuration())
+                        val newOriginalId = System.nanoTime().toString()
+                        val originalOp = draggableTextOverlay?.buildAddTextOperation(start, end, id = newOriginalId)
+                        if (originalOp != null) {
+                            viewModel.addOperation(originalOp)
+                            viewModel.selectOperation(newOriginalId)
+                        }
+                    }
+                }
+                isTextEditingActive = false
+                draggableTextOverlay?.deactivate()
+                textEditingToolbar?.visibility = View.GONE
             }
-        } ?: return
 
-        val newOp = when (op) {
-            is EditOperation.AddText -> {
-                val newX = ((op.relativeX ?: 0.5f) + 0.05f).coerceIn(0f, 1f)
-                val newY = ((op.relativeY ?: 0.5f) + 0.05f).coerceIn(0f, 1f)
-                op.copy(
-                    id = System.nanoTime().toString(),
-                    relativeX = newX,
-                    relativeY = newY
-                )
+            // 2. Identify selected overlay to duplicate
+            val selectedId = viewModel.selectedOperationId.value ?: return
+            val currentProject = viewModel.project.value ?: return
+            val op = currentProject.operations.find {
+                when (it) {
+                    is EditOperation.AddText -> it.id == selectedId
+                    is EditOperation.AddImageOverlay -> it.id == selectedId
+                    else -> false
+                }
+            } ?: return
+
+            // 3. Create duplicate with offset clamped to 0.05..0.95
+            val newOp = when (op) {
+                is EditOperation.AddText -> {
+                    val newX = ((op.relativeX ?: 0.5f) + 0.05f).coerceIn(0.05f, 0.95f)
+                    val newY = ((op.relativeY ?: 0.5f) + 0.05f).coerceIn(0.05f, 0.95f)
+                    op.copy(
+                        id = System.nanoTime().toString(),
+                        relativeX = newX,
+                        relativeY = newY
+                    )
+                }
+                is EditOperation.AddImageOverlay -> {
+                    val newX = (op.relativeX + 0.05f).coerceIn(0.05f, 0.95f)
+                    val newY = (op.relativeY + 0.05f).coerceIn(0.05f, 0.95f)
+                    op.copy(
+                        id = System.nanoTime().toString(),
+                        relativeX = newX,
+                        relativeY = newY
+                    )
+                }
+                else -> null
             }
-            is EditOperation.AddImageOverlay -> {
-                val newX = (op.relativeX + 0.05f).coerceIn(0f, 1f)
-                val newY = (op.relativeY + 0.05f).coerceIn(0f, 1f)
-                op.copy(
-                    id = System.nanoTime().toString(),
-                    relativeX = newX,
-                    relativeY = newY
-                )
+
+            val newOpId = when (newOp) {
+                is EditOperation.AddText -> newOp.id
+                is EditOperation.AddImageOverlay -> newOp.id
+                else -> null
             }
-            else -> null
-        }
 
-        val newOpId = when (newOp) {
-            is EditOperation.AddText -> newOp.id
-            is EditOperation.AddImageOverlay -> newOp.id
-            else -> null
-        }
-
-        if (newOp != null && newOpId != null) {
-            viewModel.addOperation(newOp)
-            viewModel.selectOperation(newOpId)
+            if (newOp != null && newOpId != null) {
+                viewModel.addOperation(newOp)
+                viewModel.selectOperation(newOpId)
+            }
+        } finally {
+            isDuplicatingOverlay = false
         }
     }
 
