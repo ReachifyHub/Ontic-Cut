@@ -249,4 +249,41 @@ class ProjectManagerTest {
         assertEquals("volume=2.00", formatVolumeFilter(2.5f)) // clamped to 2.0 max
         assertEquals("volume=0.00", formatVolumeFilter(-0.5f)) // clamped to 0.0 min
     }
+
+    @Test
+    fun testDoubleEncodedProjectDeserialization() {
+        val dummyUri = android.net.DummyUri.INSTANCE
+        val recipe = EditRecipe(
+            projectName = "Double Encoded Test",
+            sourceUri = dummyUri,
+            sourceName = "test.mp4"
+        )
+        val singleJson = ProjectSerializer.serialize(recipe)
+        // Simulate double-encoding where outer string is quoted JSON string
+        val doubleEncodedJson = com.google.gson.Gson().toJson(singleJson)
+        assertTrue(doubleEncodedJson.startsWith("\"{\\\""))
+
+        val deserialized = ProjectSerializer.deserialize(doubleEncodedJson)
+        assertNotNull(deserialized)
+        assertEquals("Double Encoded Test", deserialized.projectName)
+        assertEquals("test.mp4", deserialized.sourceName)
+    }
+
+    @Test
+    fun testBomAndMarkdownFenceStripping() {
+        val json = """
+            ```json
+            {
+              "projectName": "Fenced Project",
+              "sourceName": "video.mp4",
+              "sourceUri": "file:///test.mp4",
+              "operations": []
+            }
+            ```
+        """.trimIndent()
+        val withBom = "\uFEFF$json"
+        val deserialized = ProjectSerializer.deserialize(withBom)
+        assertNotNull(deserialized)
+        assertEquals("Fenced Project", deserialized.projectName)
+    }
 }

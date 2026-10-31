@@ -166,9 +166,12 @@ class MediaPickerBottomSheet : BottomSheetDialogFragment() {
         updateLayoutManagerForType(currentMediaType)
 
         adapter = MediaAdapter(displayedItems) { selectedItem ->
-            onMediaSelectedListener?.invoke(selectedItem.uri)
-            onMultipleMediaSelectedListener?.invoke(listOf(selectedItem.uri))
             dismiss()
+            if (onMultipleMediaSelectedListener != null) {
+                onMultipleMediaSelectedListener?.invoke(listOf(selectedItem.uri))
+            } else {
+                onMediaSelectedListener?.invoke(selectedItem.uri)
+            }
         }
         rvMediaGrid.adapter = adapter
 

@@ -40,6 +40,7 @@ class ExportService : Service() {
         const val ACTION_EXPORT_SUCCESS = "com.boostlyte.vydra.ACTION_EXPORT_SUCCESS"
         const val ACTION_EXPORT_FAILURE = "com.boostlyte.vydra.ACTION_EXPORT_FAILURE"
         const val ACTION_EXPORT_CANCELLED = "com.boostlyte.vydra.ACTION_EXPORT_CANCELLED"
+        const val ACTION_CANCEL_EXPORT = "com.boostlyte.vydra.ACTION_CANCEL_EXPORT"
 
         const val EXTRA_PROGRESS = "extra_progress"
         const val EXTRA_SAVED_URI = "extra_saved_uri"
@@ -62,6 +63,24 @@ class ExportService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
             stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (intent.action == ACTION_CANCEL_EXPORT) {
+            Log.d(TAG, "Received ACTION_CANCEL_EXPORT")
+            serviceScope.launch {
+                try {
+                    ffmpegEngine.cancelAllSessions()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error cancelling sessions: ${e.message}")
+                } finally {
+                    broadcastCancelled()
+                    val manager = getSystemService(NotificationManager::class.java)
+                    manager?.cancel(NOTIFICATION_ID)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
             return START_NOT_STICKY
         }
 
@@ -111,7 +130,9 @@ class ExportService : Service() {
                         Log.e(TAG, "Export failed: ${result.error}")
                     }
                     is FFmpegRenderEngine.RenderResult.Cancelled -> {
-                        showCompletionNotification("Export Cancelled", "The export was cancelled", null)
+                        Log.d(TAG, "Export was cancelled by user")
+                        val manager = getSystemService(NotificationManager::class.java)
+                        manager?.cancel(NOTIFICATION_ID)
                         broadcastCancelled()
                     }
                 }

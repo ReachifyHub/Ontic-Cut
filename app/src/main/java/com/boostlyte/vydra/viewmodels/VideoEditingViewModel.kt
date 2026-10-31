@@ -1045,7 +1045,7 @@ class VideoEditingViewModel : ViewModel() {
                 }
 
                 if (motionFilter != null) {
-                    filterParts.add("[pre$i]$motionFilter,setsar=1,fps=30,format=yuv420p[norm$i]")
+                    filterParts.add("[pre$i]$motionFilter[raw_stage$i]")
                 } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.BLUR) {
                     val blur = bgOp.blurRadius
                     val bgScale = "format=yuv420p,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight,boxblur=$blur"
@@ -1053,14 +1053,14 @@ class VideoEditingViewModel : ViewModel() {
                     filterParts.add("[pre$i]split=2[bg_orig$i][fg_orig$i]")
                     filterParts.add("[bg_orig$i]$bgScale[bg$i]")
                     filterParts.add("[fg_orig$i]$fgScale[fg$i]")
-                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=30,format=yuv420p[norm$i]")
+                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2[raw_stage$i]")
                 } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgImageIndex != -1) {
                     val bgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight"
                     val fgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease"
                     filterParts.add("[$bgImageIndex:v]$bgScale[bg$i]")
                     filterParts.add("[pre$i]$fgScale[fg$i]")
                     // Use shortest=1 in case the loop goes on forever, but we specified -loop 1 which creates an infinite stream for image
-                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1,setsar=1,fps=30,format=yuv420p[norm$i]")
+                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$i]")
                 } else {
                     // Default COLOR
                     val color = bgOp?.colorHex ?: "black"
@@ -1068,8 +1068,11 @@ class VideoEditingViewModel : ViewModel() {
                     // Create a solid color background of mainWidth x mainHeight
                     filterParts.add("color=c=$padColor:s=${mainWidth}x${mainHeight}:r=30[bg$i]")
                     filterParts.add("[pre$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease[fg$i]")
-                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1,setsar=1,fps=30,format=yuv420p[norm$i]")
+                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$i]")
                 }
+
+                // Explicit normalization stage for clip i: guarantees exact resolution, padding, SAR, fps, and pixel format before xfade/transitions
+                filterParts.add("[raw_stage$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm$i]")
 
                 val isClipMuted = operations.filterIsInstance<EditOperation.MuteClip>().find { it.index == i }?.isMuted ?: false
                 if (hasAudioArray[i] && !isClipMuted) {
@@ -1110,7 +1113,7 @@ class VideoEditingViewModel : ViewModel() {
                     val inputs = clipIndices.joinToString("") { "[norm$it][anorm$it]" }
                     // concat then normalize timestamps for proper xfade offsets
                     filterParts.add("${inputs}concat=n=${clipIndices.size}:v=1:a=1${vOut}${aOut}")
-                    filterParts.add("${vOut}settb=1/30,setpts=N[norm${concatLabelCounter}v]")
+                    filterParts.add("${vOut}settb=1/30,setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm${concatLabelCounter}v]")
                     filterParts.add("${aOut}asetpts=PTS-STARTPTS[anorm${concatLabelCounter}a]")
                     val totalDur = clipIndices.sumOf { durationsArray[it] }
                     concatLabelCounter++
@@ -1139,7 +1142,7 @@ class VideoEditingViewModel : ViewModel() {
                             val vOut = "[ccat${concatLabelCounter}v]"
                             val aOut = "[ccat${concatLabelCounter}a]"
                             filterParts.add("${currentStream.vLabel}${currentStream.aLabel}${leftStream.vLabel}${leftStream.aLabel}concat=n=2:v=1:a=1${vOut}${aOut}")
-                            filterParts.add("${vOut}settb=1/30,setpts=N[norm${concatLabelCounter}v]")
+                            filterParts.add("${vOut}settb=1/30,setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm${concatLabelCounter}v]")
                             filterParts.add("${aOut}asetpts=PTS-STARTPTS[anorm${concatLabelCounter}a]")
                             concatLabelCounter++
                             StreamInfo("[norm${concatLabelCounter - 1}v]", "[anorm${concatLabelCounter - 1}a]", currentStream.durationSec + leftStream.durationSec)
@@ -1175,7 +1178,7 @@ class VideoEditingViewModel : ViewModel() {
 
                     filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedTransType}:duration=${transDuration}:offset=${offset}${rawXfvOut}")
                     filterParts.add("${baseStream.aLabel}${nextALabel}acrossfade=d=${transDuration}:c1=tri:c2=tri${rawXfaOut}")
-                    filterParts.add("${rawXfvOut}settb=1/30,setpts=N${normXfvOut}")
+                    filterParts.add("${rawXfvOut}settb=1/30,setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p${normXfvOut}")
                     filterParts.add("${rawXfaOut}asetpts=PTS-STARTPTS,aresample=async=1000${normXfaOut}")
 
                     val newDuration = offset + durationsArray[gapIdx + 1]
@@ -1198,7 +1201,7 @@ class VideoEditingViewModel : ViewModel() {
                     val aOut = "[ccat${concatLabelCounter}a]"
                     // concat then normalize timestamps
                     filterParts.add("${currentStream.vLabel}${currentStream.aLabel}${remainingStream.vLabel}${remainingStream.aLabel}concat=n=2:v=1:a=1${vOut}${aOut}")
-                    filterParts.add("${vOut}settb=1/30,setpts=N[norm${concatLabelCounter}v]")
+                    filterParts.add("${vOut}settb=1/30,setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm${concatLabelCounter}v]")
                     filterParts.add("${aOut}asetpts=PTS-STARTPTS[anorm${concatLabelCounter}a]")
                     concatLabelCounter++
                     StreamInfo("[norm${concatLabelCounter - 1}v]", "[anorm${concatLabelCounter - 1}a]", currentStream.durationSec + remainingStream.durationSec)
@@ -1369,7 +1372,7 @@ class VideoEditingViewModel : ViewModel() {
                 }
                 val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
                     ?.getString("default_encoder", "hardware") ?: "hardware"
-                val videoCodec = if (defaultEncoder == "software") "-c:v libx264 -pix_fmt yuv420p" else "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate"
+                val videoCodec = if (defaultEncoder == "software") "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p" else "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate"
                 cmd.append(" $videoCodec")
                 
                 if (!audioMuted) {
@@ -1648,7 +1651,7 @@ class VideoEditingViewModel : ViewModel() {
             }
             val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
                 ?.getString("default_encoder", "hardware") ?: "hardware"
-            val videoCodec = if (defaultEncoder == "software") "-c:v libx264 -pix_fmt yuv420p" else "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate"
+            val videoCodec = if (defaultEncoder == "software") "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p" else "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate"
             // If there are no video filters, we still need to apply the scale and fps output params
             if (!hasVideoFilters) {
                 cmd.append(" $videoCodec -vf scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2:color=black -r ${_exportFps.value}")

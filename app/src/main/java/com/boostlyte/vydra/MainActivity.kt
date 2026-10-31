@@ -149,6 +149,45 @@ class MainActivity : AppCompatActivity() {
             openProjectLauncher.launch(arrayOf("*/*"))
         }
 
+        binding.btnImportSticky.setBounceClickListener {
+            Log.d("ButtonClick", "Launching video selection from sticky bar.")
+            selectVideo()
+        }
+
+        binding.btnOpenProjectSticky.setBounceClickListener {
+            Log.d("ButtonClick", "Launching project selection from sticky bar.")
+            openProjectLauncher.launch(arrayOf("*/*"))
+        }
+
+        // Show side-by-side action bar when scrolling down to projects
+        binding.layoutHomeContent.setOnScrollChangeListener(
+            androidx.core.widget.NestedScrollView.OnScrollChangeListener { _, _, scrollY, _, _ ->
+                val threshold = (110 * resources.displayMetrics.density).toInt()
+                if (scrollY > threshold) {
+                    if (binding.layoutStickySideBySide.visibility != View.VISIBLE) {
+                        binding.layoutStickySideBySide.visibility = View.VISIBLE
+                        binding.layoutStickySideBySide.translationY = -15f
+                        binding.layoutStickySideBySide.animate()
+                            .alpha(1f)
+                            .translationY(0f)
+                            .setDuration(200)
+                            .start()
+                    }
+                } else {
+                    if (binding.layoutStickySideBySide.visibility == View.VISIBLE && binding.layoutStickySideBySide.alpha > 0f) {
+                        binding.layoutStickySideBySide.animate()
+                            .alpha(0f)
+                            .translationY(-15f)
+                            .setDuration(160)
+                            .withEndAction {
+                                binding.layoutStickySideBySide.visibility = View.GONE
+                            }
+                            .start()
+                    }
+                }
+            }
+        )
+
         // Initialize bottom navigation tab backgrounds
         val attrs = intArrayOf(android.R.attr.selectableItemBackgroundBorderless)
         val ta = obtainStyledAttributes(attrs)
@@ -550,21 +589,14 @@ class MainActivity : AppCompatActivity() {
 
 
 
+    private var lastNavigationTime = 0L
+
     private fun selectVideo() {
         Log.d("VideoSelection", "Launching video picker.")
         val picker = com.boostlyte.vydra.customviews.MediaPickerBottomSheet().apply {
             initialMediaType = com.boostlyte.vydra.customviews.MediaPickerBottomSheet.MediaType.VIDEO
             showCategoryTabs = true
             showAudioTab = false
-            onMediaSelectedListener = { uri ->
-                try {
-                    val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    contentResolver.takePersistableUriPermission(uri, takeFlags)
-                } catch (e: Exception) {
-                    Log.d("VideoSelection", "Could not take persistable permission: ${e.message}")
-                }
-                navigateToEditingScreen(uri)
-            }
             onMultipleMediaSelectedListener = { uris ->
                 if (uris.isNotEmpty()) {
                     val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -591,6 +623,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun navigateToEditingScreen(uris: List<Uri>) {
         if (uris.isEmpty()) return
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastNavigationTime < 1000L) {
+            Log.w("Navigation", "Throttling duplicate navigateToEditingScreen call")
+            return
+        }
+        lastNavigationTime = now
         Log.d("Navigation", "Navigating to editing screen with ${uris.size} media URI(s)")
         val firstUri = uris.first()
         val intent = Intent(this, VideoEditingActivity::class.java).apply {

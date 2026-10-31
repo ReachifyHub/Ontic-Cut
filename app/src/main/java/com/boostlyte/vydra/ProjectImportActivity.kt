@@ -240,9 +240,14 @@ class ProjectImportActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error loading project", e)
+                Log.w(TAG, "Error loading project: ${e.message}")
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(this@ProjectImportActivity, "Error loading project", Toast.LENGTH_SHORT).show()
+                    val message = if (e is com.google.gson.JsonSyntaxException) {
+                        "Invalid project file format"
+                    } else {
+                        "Error loading project: ${e.message}"
+                    }
+                    Toast.makeText(this@ProjectImportActivity, message, Toast.LENGTH_SHORT).show()
                     finish()
                 }
             }

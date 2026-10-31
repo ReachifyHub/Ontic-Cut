@@ -98,7 +98,15 @@ object ProjectManager {
             var durationMs = 0L
             var clipCount = 1
             try {
-                val content = file.readText()
+                var content = file.readText().removePrefix("\uFEFF").trim()
+                if (content.startsWith("\"") && content.endsWith("\"")) {
+                    try {
+                        val parsed = com.google.gson.JsonParser.parseString(content)
+                        if (parsed.isJsonPrimitive && parsed.asJsonPrimitive.isString) {
+                            content = parsed.asString.trim()
+                        }
+                    } catch (_: Exception) {}
+                }
                 val json = JSONObject(content)
                 durationMs = json.optLong("durationMs", 0L)
                 clipCount = json.optInt("clipCount", 1)

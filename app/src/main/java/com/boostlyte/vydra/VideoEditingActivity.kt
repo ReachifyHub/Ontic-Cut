@@ -223,15 +223,22 @@ class VideoEditingActivity : AppCompatActivity() {
                 com.boostlyte.vydra.services.ExportService.ACTION_EXPORT_FAILURE -> {
                     val error = intent.getStringExtra(com.boostlyte.vydra.services.ExportService.EXTRA_ERROR) ?: "Unknown Error"
                     val errorCodeStr = intent.getStringExtra(com.boostlyte.vydra.services.ExportService.EXTRA_ERROR_CODE)
-                    val resolvedErrorCode = when {
-                        errorCodeStr == ErrorCode.GALLERY_SAVE_FAILED.code -> ErrorCode.GALLERY_SAVE_FAILED
-                        errorCodeStr == ErrorCode.FFMPEG_EXECUTION_FAILED.code -> ErrorCode.FFMPEG_EXECUTION_FAILED
-                        errorCodeStr == ErrorCode.UNEXPECTED_CRASH.code -> ErrorCode.UNEXPECTED_CRASH
-                        error.contains("gallery", ignoreCase = true) || error.contains("save video", ignoreCase = true) -> ErrorCode.GALLERY_SAVE_FAILED
-                        else -> ErrorCode.FFMPEG_EXECUTION_FAILED
+
+                    if (error.contains("cancelled", ignoreCase = true) || error.contains("return code: 255") || error.contains("ReturnCode: 255") || error.contains("code 255") || error.contains("255")) {
+                        Log.d(TAG, "Export failure reported was actually cancellation, ignoring crash report")
+                        viewModel.finishExport()
+                        android.widget.Toast.makeText(this@VideoEditingActivity, R.string.toast_export_cancelled, android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        val resolvedErrorCode = when {
+                            errorCodeStr == ErrorCode.GALLERY_SAVE_FAILED.code -> ErrorCode.GALLERY_SAVE_FAILED
+                            errorCodeStr == ErrorCode.FFMPEG_EXECUTION_FAILED.code -> ErrorCode.FFMPEG_EXECUTION_FAILED
+                            errorCodeStr == ErrorCode.UNEXPECTED_CRASH.code -> ErrorCode.UNEXPECTED_CRASH
+                            error.contains("gallery", ignoreCase = true) || error.contains("save video", ignoreCase = true) -> ErrorCode.GALLERY_SAVE_FAILED
+                            else -> ErrorCode.FFMPEG_EXECUTION_FAILED
+                        }
+                        viewModel.exportError(error)
+                        showProErrorDialog(resolvedErrorCode, error)
                     }
-                    viewModel.exportError(error)
-                    showProErrorDialog(resolvedErrorCode, error)
                 }
             }
         }
@@ -6060,94 +6067,104 @@ class VideoEditingActivity : AppCompatActivity() {
             var tempOutputFile: File? = null
             var concatFile: File? = null
             try {
-                // Autosave project state before export
-                try {
-                    val curProj = viewModel.project.value
-                    if (curProj != null) {
-                        val recipe = com.boostlyte.vydra.models.EditRecipe.fromVideoProject(
-                            currentProjectFile?.nameWithoutExtension ?: curProj.sourceName,
-                            curProj,
-                            durationMs = getTotalSequenceDuration(),
-                            clipCount = getSequenceItems().size
-                        )
-                        val target = currentProjectFile ?: com.boostlyte.vydra.utils.ProjectManager.generateUniqueProjectFile(this@VideoEditingActivity, recipe.projectName)
-                        withContext(Dispatchers.IO) {
-                            com.boostlyte.vydra.utils.ProjectManager.saveProject(this@VideoEditingActivity, recipe, target)
-                        }
-                        currentProjectFile = target
-                        viewModel.markProjectSaved()
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Autosave before export failed: ${e.message}")
-                }
-
                 viewModel.startExport()
+                exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = "Preparing export..."
+                exportScreen.findViewById<TextView>(R.id.tvExportPercentage)?.text = "0%"
 
-                val sourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
-                    tempInputFile.absolutePath
-                } else {
-                    val resolved = getFilePathFromUri(project.sourceUri)
-                    if (resolved != null && File(resolved).exists()) {
-                        tempInputFile = File(resolved)
-                        resolved
-                    } else {
-                        val isImg = isImageUri(project.sourceUri)
-                        val ext = if (isImg) ".jpg" else ".mp4"
-                        val fallback = copyContentUriToTempFile(project.sourceUri, "export_source", ext)
-                        if (fallback != null && fallback.exists()) {
-                            tempInputFile = fallback
-                            fallback.absolutePath
-                        } else {
-                            viewModel.exportError("Cannot access project source media")
-                            return@launch
-                        }
-                    }
-                }
                 val isAudioOnly = viewModel.exportAudioOnly.value
                 val ext = if (isAudioOnly) ".mp3" else ".mp4"
                 tempOutputFile = File(cacheDir, "temp_video_${System.currentTimeMillis()}$ext")
                 val tempOutputPath = tempOutputFile.absolutePath
 
-                var ffmpegCommand = viewModel.buildConsolidatedFFmpegCommand(
-                    sourceFilePath = sourceFilePath,
-                    outputFilePath = tempOutputPath,
-                    fontFilePath = fontFilePath,
-                    context = this@VideoEditingActivity
-                )
+                val prepResult = withContext(Dispatchers.IO) {
+                    // Autosave project state before export
+                    try {
+                        val curProj = viewModel.project.value
+                        if (curProj != null) {
+                            val recipe = com.boostlyte.vydra.models.EditRecipe.fromVideoProject(
+                                currentProjectFile?.nameWithoutExtension ?: curProj.sourceName,
+                                curProj,
+                                durationMs = getTotalSequenceDuration(),
+                                clipCount = getSequenceItems().size
+                            )
+                            val target = currentProjectFile ?: com.boostlyte.vydra.utils.ProjectManager.generateUniqueProjectFile(this@VideoEditingActivity, recipe.projectName)
+                            com.boostlyte.vydra.utils.ProjectManager.saveProject(this@VideoEditingActivity, recipe, target)
+                            currentProjectFile = target
+                            withContext(Dispatchers.Main) {
+                                viewModel.markProjectSaved()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Autosave before export failed: ${e.message}")
+                    }
 
-                if (ffmpegCommand == null) {
-                    viewModel.exportError("Failed to build FFmpeg command")
-                    return@launch
-                }
+                    val sourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
+                        tempInputFile.absolutePath
+                    } else {
+                        val resolved = getFilePathFromUri(project.sourceUri)
+                        if (resolved != null && File(resolved).exists()) {
+                            tempInputFile = File(resolved)
+                            resolved
+                        } else {
+                            val isImg = isImageUri(project.sourceUri)
+                            val fExt = if (isImg) ".jpg" else ".mp4"
+                            val fallback = copyContentUriToTempFile(project.sourceUri, "export_source", fExt)
+                            if (fallback != null && fallback.exists()) {
+                                tempInputFile = fallback
+                                fallback.absolutePath
+                            } else {
+                                return@withContext null
+                            }
+                        }
+                    }
 
-                Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
+                    var ffmpegCommand = viewModel.buildConsolidatedFFmpegCommand(
+                        sourceFilePath = sourceFilePath,
+                        outputFilePath = tempOutputPath,
+                        fontFilePath = fontFilePath,
+                        context = this@VideoEditingActivity
+                    )
 
-                val currentProject = viewModel.project.value
-                if (currentProject != null && ffmpegCommand.contains("(CONCAT_LIST:")) {
-                    val cmdSnapshot = ffmpegCommand
-                    concatFile = withContext(Dispatchers.IO) {
-                        val concatListStart = cmdSnapshot.indexOf("(CONCAT_LIST:") + "(CONCAT_LIST:".length
-                        val concatListEnd = cmdSnapshot.lastIndexOf(")")
+                    if (ffmpegCommand == null) {
+                        return@withContext null
+                    }
+
+                    Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
+
+                    var generatedConcat: File? = null
+                    if (ffmpegCommand.contains("(CONCAT_LIST:")) {
+                        val concatListStart = ffmpegCommand.indexOf("(CONCAT_LIST:") + "(CONCAT_LIST:".length
+                        val concatListEnd = ffmpegCommand.lastIndexOf(")")
                         if (concatListStart > 13 && concatListEnd > concatListStart) {
-                            val concatList = cmdSnapshot.substring(concatListStart, concatListEnd)
+                            val concatList = ffmpegCommand.substring(concatListStart, concatListEnd)
                             val processedConcatList = processConcatList(concatList)
 
                             val file = File(cacheDir, "concat_${System.currentTimeMillis()}.txt")
                             file.writeText(processedConcatList)
-                            file
-                        } else null
+                            generatedConcat = file
+
+                            ffmpegCommand = ffmpegCommand
+                                .replace("{CONCAT_FILE_PATH}", file.absolutePath)
+                                .substring(0, ffmpegCommand.indexOf("(CONCAT_LIST:"))
+                                .trim()
+                        }
                     }
 
-                    if (concatFile != null) {
-                        ffmpegCommand = ffmpegCommand
-                            .replace("{CONCAT_FILE_PATH}", concatFile.absolutePath)
-                            .substring(0, ffmpegCommand.indexOf("(CONCAT_LIST:"))
-                            .trim()
-                    }
+                    Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
+                    val totalDurationSecs = getTotalSequenceDuration() / 1000.0
+                    Triple(ffmpegCommand, generatedConcat, totalDurationSecs)
                 }
 
-                Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
-                val totalDurationSecs = getTotalSequenceDuration() / 1000.0
+                if (prepResult == null) {
+                    tempOutputFile?.let { if (it.exists()) it.delete() }
+                    viewModel.exportError("Cannot access project source media or build command")
+                    return@launch
+                }
+
+                val (ffmpegCommand, generatedConcat, totalDurationSecs) = prepResult
+                concatFile = generatedConcat
+
+                exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = getString(R.string.str_please_don_t_close_the_app)
 
                 // Start ExportService
                 val intent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
@@ -6402,7 +6419,14 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private fun cancelExport() {
-        lifecycleScope.launch {
+        try {
+            val cancelIntent = Intent(this, com.boostlyte.vydra.services.ExportService::class.java).apply {
+                action = com.boostlyte.vydra.services.ExportService.ACTION_CANCEL_EXPORT
+            }
+            startService(cancelIntent)
+        } catch (_: Exception) {}
+
+        lifecycleScope.launch(Dispatchers.IO) {
             try {
                 ffmpegEngine.cancelAllSessions()
             } catch (e: Exception) {
@@ -6410,7 +6434,7 @@ class VideoEditingActivity : AppCompatActivity() {
             }
         }
         exportJob?.cancel()
-        viewModel.exportError("Export cancelled")
+        viewModel.finishExport()
         Toast.makeText(this, R.string.toast_export_cancelled, Toast.LENGTH_SHORT).show()
     }
 

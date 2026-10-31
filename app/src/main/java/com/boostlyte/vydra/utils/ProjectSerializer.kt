@@ -144,15 +144,67 @@ object ProjectSerializer {
     }
     
     fun deserialize(json: String): EditRecipe {
-        val recipe = gson.fromJson(json, EditRecipe::class.java)
-        val sanitizedOps = recipe.operations.filterNot { 
-            it is EditOperation.MuteAudio && (it.id.startsWith("skipped_unknown_") || it.id.startsWith("skipped_failed_"))
-        }
-        return recipe.copy(operations = sanitizedOps)
+        return deserializeString(json)
     }
 
     fun deserialize(reader: java.io.Reader): EditRecipe {
-        val recipe = gson.fromJson(reader, EditRecipe::class.java)
+        val raw = reader.readText()
+        return deserializeString(raw)
+    }
+
+    private fun deserializeString(rawInput: String): EditRecipe {
+        var raw = rawInput.removePrefix("\uFEFF").trim()
+        
+        // Strip markdown code fences if present (e.g. ```json ... ```)
+        if (raw.startsWith("```")) {
+            raw = raw.substringAfter("\n").substringBeforeLast("```").trim()
+        }
+
+        var jsonElement: JsonElement = try {
+            com.google.gson.JsonParser.parseString(raw)
+        } catch (e: Exception) {
+            throw com.google.gson.JsonSyntaxException("Malformed project JSON: ${e.message}", e)
+        }
+
+        // Unwrap string primitives if the JSON was double-encoded or stored as a quoted string
+        var unwrapCount = 0
+        while (jsonElement.isJsonPrimitive && jsonElement.asJsonPrimitive.isString && unwrapCount < 5) {
+            val unwrapped = jsonElement.asString.trim()
+            if (unwrapped.startsWith("{") && unwrapped.endsWith("}")) {
+                jsonElement = try {
+                    com.google.gson.JsonParser.parseString(unwrapped)
+                } catch (e: Exception) {
+                    break
+                }
+                unwrapCount++
+            } else {
+                break
+            }
+        }
+
+        if (!jsonElement.isJsonObject) {
+            throw com.google.gson.JsonSyntaxException(
+                "Invalid project format: Expected a JSON object representing EditRecipe, but got ${jsonElement.javaClass.simpleName}"
+            )
+        }
+
+        val jsonObject = jsonElement.asJsonObject
+
+        // Backward compatibility / migration for legacy or slightly different project schemas:
+        if (!jsonObject.has("sourceUri") && jsonObject.has("uri")) {
+            jsonObject.add("sourceUri", jsonObject.get("uri"))
+        }
+        if (!jsonObject.has("sourceName") && jsonObject.has("name")) {
+            jsonObject.add("sourceName", jsonObject.get("name"))
+        }
+        if (!jsonObject.has("projectName")) {
+            val fallbackName = jsonObject.get("sourceName")?.asString ?: "Imported Project"
+            jsonObject.addProperty("projectName", fallbackName)
+        }
+
+        val recipe = gson.fromJson(jsonObject, EditRecipe::class.java)
+            ?: throw com.google.gson.JsonSyntaxException("Parsed project recipe was null")
+
         val sanitizedOps = recipe.operations.filterNot { 
             it is EditOperation.MuteAudio && (it.id.startsWith("skipped_unknown_") || it.id.startsWith("skipped_failed_"))
         }

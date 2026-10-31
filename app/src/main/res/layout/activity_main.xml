@@ -39,8 +39,88 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- Sticky Side-By-Side Action Bar (smoothly appears when user scrolls up to see projects) -->
+    <LinearLayout
+        android:id="@+id/layoutStickySideBySide"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/layoutTopHeader"
+        android:orientation="horizontal"
+        android:paddingHorizontal="20dp"
+        android:paddingVertical="8dp"
+        android:background="@color/background"
+        android:elevation="6dp"
+        android:translationZ="6dp"
+        android:visibility="gone"
+        android:alpha="0">
+
+        <!-- Sticky New Project Button -->
+        <LinearLayout
+            android:id="@+id/btnImportSticky"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:background="@drawable/bg_hero_bento_primary"
+            android:clickable="true"
+            android:focusable="true"
+            android:foreground="?attr/selectableItemBackground"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:paddingHorizontal="14dp">
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_add_24"
+                app:tint="@color/onPrimaryContainer" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="@string/str_new_project"
+                android:textColor="@color/textColor"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <!-- Sticky Import Project Button -->
+        <LinearLayout
+            android:id="@+id/btnOpenProjectSticky"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_hero_bento_secondary"
+            android:clickable="true"
+            android:focusable="true"
+            android:foreground="?attr/selectableItemBackground"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:paddingHorizontal="14dp">
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_folder_24"
+                app:tint="@color/onPrimaryContainer" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Import Project"
+                android:textColor="@color/textColor"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:singleLine="true" />
+        </LinearLayout>
+    </LinearLayout>
+
     <!-- Home Page Content (Bento Style Layout) -->
-    <ScrollView
+    <androidx.core.widget.NestedScrollView
         android:id="@+id/layoutHomeContent"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
@@ -49,6 +129,7 @@
         android:paddingTop="12dp"
         android:paddingBottom="100dp"
         android:clipToPadding="false"
+        android:fillViewport="true"
         android:overScrollMode="never"
         android:scrollbars="none"
         android:visibility="visible">
@@ -58,120 +139,119 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
-            <!-- Hero Bento Card: New Project -->
+            <!-- Action Cards: Each contains the screen width stacked like before -->
             <LinearLayout
-                android:id="@+id/btnImport"
+                android:id="@+id/layoutStackedCards"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:minHeight="210dp"
-                android:background="@drawable/bg_hero_bento_primary"
-                android:clickable="true"
-                android:focusable="true"
-                android:foreground="?attr/selectableItemBackground"
-                android:gravity="bottom"
-                android:orientation="vertical"
-                android:padding="24dp"
-                android:elevation="8dp">
+                android:orientation="vertical">
 
-                <RelativeLayout
+                <!-- Hero Bento Card: New Project (Full width hero card) -->
+                <LinearLayout
+                    android:id="@+id/btnImport"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="16dp">
+                    android:minHeight="165dp"
+                    android:background="@drawable/bg_hero_bento_primary"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:foreground="?attr/selectableItemBackground"
+                    android:gravity="bottom"
+                    android:orientation="vertical"
+                    android:padding="20dp"
+                    android:elevation="4dp">
 
-                    <View
-                        android:layout_width="56dp"
-                        android:layout_height="56dp"
-                        android:background="@drawable/circle_primary_container" />
+                    <RelativeLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="16dp">
 
-                    <ImageView
-                        android:layout_width="28dp"
-                        android:layout_height="28dp"
-                        android:layout_centerVertical="true"
-                        android:layout_marginStart="14dp"
-                        android:src="@drawable/ic_add_24"
-                        app:tint="@color/onPrimaryContainer" />
-                </RelativeLayout>
+                        <View
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:background="@drawable/circle_primary_container" />
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/str_new_project"
-                    android:textColor="@color/textColor"
-                    android:textSize="24sp"
-                    android:fontFamily="sans-serif-medium" />
+                        <ImageView
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_centerVertical="true"
+                            android:layout_marginStart="12dp"
+                            android:src="@drawable/ic_add_24"
+                            app:tint="@color/onPrimaryContainer" />
+                    </RelativeLayout>
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="Your next edit starts right here."
-                    android:textColor="@color/iconSecondary"
-                    android:textSize="13sp"
-                    android:fontFamily="sans-serif" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/str_new_project"
+                        android:textColor="@color/textColor"
+                        android:textSize="18sp"
+                        android:fontFamily="sans-serif-medium" />
 
-            </LinearLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="Start new video or image edit"
+                        android:textColor="@color/iconSecondary"
+                        android:textSize="13sp"
+                        android:fontFamily="sans-serif" />
 
-            <!-- Secondary Bento Card: Open Project -->
-            <LinearLayout
-                android:id="@+id/btnOpenProject"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="150dp"
-                android:layout_marginTop="16dp"
-                android:background="@drawable/bg_hero_bento_secondary"
-                android:clickable="true"
-                android:focusable="true"
-                android:foreground="?attr/selectableItemBackground"
-                android:gravity="center_vertical"
-                android:orientation="vertical"
-                android:padding="24dp"
-                android:elevation="4dp">
+                </LinearLayout>
 
-                <RelativeLayout
+                <!-- Secondary Bento Card: Import Project (Full width hero card) -->
+                <LinearLayout
+                    android:id="@+id/btnOpenProject"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="12dp">
+                    android:minHeight="115dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_hero_bento_secondary"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:foreground="?attr/selectableItemBackground"
+                    android:gravity="bottom"
+                    android:orientation="vertical"
+                    android:padding="18dp"
+                    android:elevation="4dp">
 
-                    <View
-                        android:layout_width="48dp"
-                        android:layout_height="48dp"
-                        android:background="@drawable/circle_primary_container" />
+                    <RelativeLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="12dp">
 
-                    <ImageView
-                        android:layout_width="24dp"
-                        android:layout_height="24dp"
-                        android:layout_centerVertical="true"
-                        android:layout_marginStart="12dp"
-                        android:src="@drawable/ic_folder_24"
-                        app:tint="@color/onPrimaryContainer" />
+                        <View
+                            android:layout_width="44dp"
+                            android:layout_height="44dp"
+                            android:background="@drawable/circle_primary_container" />
 
-                    <ImageView
-                        android:layout_width="20dp"
-                        android:layout_height="20dp"
-                        android:layout_alignParentEnd="true"
-                        android:layout_centerVertical="true"
-                        android:src="@drawable/ic_arrow_up_right_24"
-                        app:tint="@color/iconSecondary"
-                        android:alpha="0.5" />
-                </RelativeLayout>
+                        <ImageView
+                            android:layout_width="22dp"
+                            android:layout_height="22dp"
+                            android:layout_centerVertical="true"
+                            android:layout_marginStart="11dp"
+                            android:src="@drawable/ic_folder_24"
+                            app:tint="@color/onPrimaryContainer" />
+                    </RelativeLayout>
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Open Project"
-                    android:textColor="@color/textColor"
-                    android:textSize="18sp"
-                    android:fontFamily="sans-serif-medium" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Import Project"
+                        android:textColor="@color/textColor"
+                        android:textSize="17sp"
+                        android:fontFamily="sans-serif-medium" />
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="Load saved .vdprj file to resume editing"
-                    android:textColor="@color/iconSecondary"
-                    android:textSize="13sp"
-                    android:fontFamily="sans-serif"
-                    android:visibility="visible" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Load .vdprj or .lcprj project file"
+                        android:textColor="@color/iconSecondary"
+                        android:textSize="12sp"
+                        android:fontFamily="sans-serif" />
+
+                </LinearLayout>
 
             </LinearLayout>
 
@@ -265,7 +345,7 @@
 
         </LinearLayout>
 
-    </ScrollView>
+    </androidx.core.widget.NestedScrollView>
 
     <!-- Settings Page Content (Bento Style Layout) -->
     <ScrollView

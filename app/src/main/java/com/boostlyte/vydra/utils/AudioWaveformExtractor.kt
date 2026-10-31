@@ -12,12 +12,63 @@ import java.nio.ByteOrder
 object AudioWaveformExtractor {
 
     /**
+     * Checks if a media file actually contains an audio stream.
+     */
+    fun hasAudioStream(path: String): Boolean {
+        val file = File(path)
+        if (!file.exists() || file.length() == 0L) return false
+
+        val lower = path.lowercase()
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
+            lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".bmp") ||
+            lower.endsWith(".heic") || lower.endsWith(".heif")
+        ) {
+            return false
+        }
+
+        val extractor = android.media.MediaExtractor()
+        try {
+            extractor.setDataSource(path)
+            val trackCount = extractor.trackCount
+            for (i in 0 until trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("audio/")) {
+                    return true
+                }
+            }
+            return false
+        } catch (e: Exception) {
+            val retriever = android.media.MediaMetadataRetriever()
+            return try {
+                retriever.setDataSource(path)
+                val hasAudio = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+                val mime = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
+                hasAudio.equals("yes", ignoreCase = true) || mime.startsWith("audio/")
+            } catch (ex: Exception) {
+                false
+            } finally {
+                try { retriever.release() } catch (ignored: Exception) {}
+            }
+        } finally {
+            try {
+                extractor.release()
+            } catch (ignored: Exception) {}
+        }
+    }
+
+    /**
      * Extracts an audio waveform from a video or audio file using FFmpeg.
      * @param videoPath The absolute path to the media file.
      * @param targetSamples The number of data points (amplitudes) to generate (e.g. 500 for a detailed wave).
      * @return A FloatArray of normalized amplitudes (0.0 to 1.0), or null if extraction failed.
      */
     suspend fun extractWaveform(context: Context, videoPath: String, targetSamples: Int = 300): FloatArray? = withContext(Dispatchers.IO) {
+        if (!hasAudioStream(videoPath)) {
+            Log.d("AudioWaveformExtractor", "File has no audio stream, skipping PCM extraction: $videoPath")
+            return@withContext null
+        }
+
         val pcmFile = File(context.cacheDir, "temp_waveform_${System.currentTimeMillis()}.pcm")
         
         try {
@@ -27,7 +78,7 @@ object AudioWaveformExtractor {
             
             val session = FFmpegKit.execute(command)
             if (!session.returnCode.isValueSuccess) {
-                Log.e("AudioWaveformExtractor", "FFmpeg failed to extract PCM: ${session.failStackTrace}")
+                Log.w("AudioWaveformExtractor", "FFmpeg could not extract PCM from $videoPath (code=${session.returnCode})")
                 return@withContext null
             }
             

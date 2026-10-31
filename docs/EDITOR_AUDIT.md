@@ -493,3 +493,35 @@
 
 10. **Audio Fade & Ducking Inaudible in Preview [UNSTABLE - Effort: M]**
     - *Why #10:* Audio fades and sidechain ducking are implemented in export filter graphs, but completely absent during playback in ExoPlayer. Creators cannot audition music ducking under voiceover before exporting.
+
+---
+
+## Production Reliability & Pipeline Fixes (October 2026 Update)
+
+### 1. Export Cancellation Handling (Exit Code 255)
+- **Problem:** When creators tapped "Cancel" during an export, `FFmpegKit` returned return code 255 (SIGTERM/Cancelled). Because `FFmpegRenderEngine` only checked `ReturnCode.isSuccess()`, non-zero codes were treated as fatal failures, triggering Error Code `LC-101` and opening `ErrorDisplayActivity` (VYDRA CRASH REPORT).
+- **Resolution:**
+  - Added explicit cancellation checks in `FFmpegRenderEngine.executeCommand()` and `exportFinal()`: checks `ReturnCode.isCancel(returnCode) || returnCode?.getValue() == 255 || e is CancellationException`.
+  - On cancellation, `FFmpegRenderEngine` cleans up the output file and returns `RenderResult.Cancelled`.
+  - Added `ACTION_CANCEL_EXPORT` to `ExportService` to cancel sessions, clean temp files, remove notifications, and broadcast `ACTION_EXPORT_CANCELLED`.
+  - In `VideoEditingActivity`, `cancelExport()` sends `ACTION_CANCEL_EXPORT`, cancels coroutines, calls `viewModel.finishExport()` to cleanly dismiss progress UI, and suppresses crash report dialogs.
+
+### 2. Export Preparation Offloaded from Main Thread (ANR Prevention)
+- **Problem:** For Auto Assembled projects with 40+ images, Ken Burns keyframes, and captions, running `buildConsolidatedFFmpegCommand()`, URI caching, and filter script serialization on `Dispatchers.Main` blocked the UI thread, causing Android ANR crashes that dropped creators back to the Home Screen.
+- **Resolution:**
+  - `VideoEditingActivity.saveAction()` now updates UI to `"Preparing export..."` on the Main Thread and offloads all heavy preparation (autosave, source URI copy, command compilation, concat file writing, and duration calculation) to `withContext(Dispatchers.IO)`.
+  - Only when the command is fully generated does execution transfer back to `Dispatchers.Main` to start `ExportService`.
+
+### 3. Home Screen Responsive Layout & Full Project List Scrolling
+- **Problem:** On mobile screens, vertically stacked large Bento cards for "New Project" and "Open Project" occupied almost all vertical space. Inside standard `ScrollView`, `RecyclerView` wrap_content failed to scroll or display older projects beyond the first 2.
+- **Resolution:**
+  - Refactored `layoutHomeContent` from `ScrollView` to `androidx.core.widget.NestedScrollView` with `fillViewport="true"`.
+  - Placed "New Project" and "Import Project" side-by-side in a responsive horizontal `LinearLayout` with equal weight (`layout_weight="1"`), clean padding, and compact elevation.
+  - Enabled smooth nested scrolling so all saved projects (5, 10, or more) are fully visible and scrollable.
+
+### 4. Transition Smoothness & Strict Input Normalization for `xfade`
+- **Problem:** Chained transitions between Auto Assembled images with varying aspect ratios or proxy resolutions suffered from jitter, glitches, or black frames because FFmpeg `xfade` requires identical input dimensions, SAR, framerate, and pixel format.
+- **Resolution:**
+  - Added strict normalization filter stages to each sequence item before entering transitions:
+    `scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p`.
+  - Applied the same normalization to intermediate `xfade` and `concat` stage outputs so all chained transition inputs have identical resolution, aspect ratio, SAR=1, 30 fps, and YUV420P format.

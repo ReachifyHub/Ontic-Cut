@@ -71,8 +71,13 @@ class FFmpegRenderEngine(private val context: Context) {
                 }
 
                 when (log.level) {
-                    Level.AV_LOG_ERROR, Level.AV_LOG_FATAL, Level.AV_LOG_PANIC, Level.AV_LOG_STDERR
-                        -> Log.e(TAG, "[ffmpeg] $msg")
+                    Level.AV_LOG_ERROR, Level.AV_LOG_FATAL, Level.AV_LOG_PANIC, Level.AV_LOG_STDERR -> {
+                        if (msg.contains("Output file does not contain any stream", ignoreCase = true)) {
+                            Log.d(TAG, "[ffmpeg] $msg")
+                        } else {
+                            Log.e(TAG, "[ffmpeg] $msg")
+                        }
+                    }
                     Level.AV_LOG_WARNING
                         -> Log.w(TAG, "[ffmpeg] $msg")
                     else -> Log.v(TAG, "[ffmpeg] $msg")
@@ -153,7 +158,15 @@ class FFmpegRenderEngine(private val context: Context) {
                 val outputPath = extractOutputPath(command)
                 val missingVideo = isMissingVideoStream(command, logs, outputPath)
 
-                if (ReturnCode.isSuccess(returnCode) && !missingVideo) {
+                val isCancelled = ReturnCode.isCancel(returnCode) || returnCode?.getValue() == 255
+                if (isCancelled) {
+                    Log.d(TAG, "FFmpeg session was cancelled (return code: $returnCode)")
+                    val outputPath = extractOutputPath(command)
+                    if (outputPath != null) {
+                        try { File(outputPath).delete() } catch (_: Exception) {}
+                    }
+                    RenderResult.Cancelled
+                } else if (ReturnCode.isSuccess(returnCode) && !missingVideo) {
                     RenderResult.Success(
                         outputPath = outputPath,
                         session = session
@@ -163,7 +176,7 @@ class FFmpegRenderEngine(private val context: Context) {
 
                     if (!isRetry && command.contains("h264_mediacodec")) {
                         Log.w(TAG, "Hardware encoder h264_mediacodec failed or produced no video stream. Falling back to software encoder libx264. Error:\n$diagnosticLog")
-                        val fallbackCommand = command.replace("h264_mediacodec", "libx264")
+                        val fallbackCommand = command.replace("h264_mediacodec", "libx264 -preset veryfast -threads 0")
                         return@withContext executeCommand(fallbackCommand, isRetry = true)
                     } else if (!isRetry && command.contains("libx264")) {
                         Log.w(TAG, "Software encoder libx264 failed. Falling back to hardware encoder h264_mediacodec. Error:\n$diagnosticLog")
@@ -175,9 +188,14 @@ class FFmpegRenderEngine(private val context: Context) {
                     RenderResult.Failure(error = diagnosticLog, session = session)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Exception during FFmpeg execution: ${e.message}", e)
-                val diagnosticLog = createDiagnosticReport(context, command, null, null, null, e)
-                RenderResult.Failure(error = diagnosticLog)
+                if (e is kotlinx.coroutines.CancellationException) {
+                    Log.d(TAG, "FFmpeg command cancelled via coroutine cancellation")
+                    RenderResult.Cancelled
+                } else {
+                    Log.e(TAG, "Exception during FFmpeg execution: ${e.message}", e)
+                    val diagnosticLog = createDiagnosticReport(context, command, null, null, null, e)
+                    RenderResult.Failure(error = diagnosticLog)
+                }
             } finally {
                 if (!isRetry && scriptFilePath != null) {
                     try {
@@ -318,7 +336,15 @@ class FFmpegRenderEngine(private val context: Context) {
                 val outputPath = extractOutputPath(ffmpegCommand)
                 val missingVideo = isMissingVideoStream(ffmpegCommand, logs, outputPath)
 
-                if (ReturnCode.isSuccess(returnCode) && !missingVideo) {
+                val isCancelled = ReturnCode.isCancel(returnCode) || returnCode?.getValue() == 255
+                if (isCancelled) {
+                    Log.d(TAG, "FFmpeg export session was cancelled by user (return code: ${returnCode?.getValue()})")
+                    val outputPath = extractOutputPath(ffmpegCommand)
+                    if (outputPath != null) {
+                        try { File(outputPath).delete() } catch (_: Exception) {}
+                    }
+                    RenderResult.Cancelled
+                } else if (ReturnCode.isSuccess(returnCode) && !missingVideo) {
                     RenderResult.Success(
                         outputPath = outputPath,
                         session = session
@@ -328,7 +354,7 @@ class FFmpegRenderEngine(private val context: Context) {
 
                     if (!isRetry && ffmpegCommand.contains("h264_mediacodec")) {
                         Log.w(TAG, "Hardware encoder h264_mediacodec failed or produced no video stream. Falling back to software encoder libx264. Error:\n$diagnosticLog")
-                        val fallbackCommand = ffmpegCommand.replace("h264_mediacodec", "libx264")
+                        val fallbackCommand = ffmpegCommand.replace("h264_mediacodec", "libx264 -preset veryfast -threads 0")
                         return@withContext exportFinal(fallbackCommand, totalDurationSecs, onProgress, isRetry = true)
                     } else if (!isRetry && ffmpegCommand.contains("libx264")) {
                         Log.w(TAG, "Software encoder libx264 failed. Falling back to hardware encoder h264_mediacodec. Error:\n$diagnosticLog")
@@ -340,9 +366,14 @@ class FFmpegRenderEngine(private val context: Context) {
                     RenderResult.Failure(error = diagnosticLog, session = session)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Exception during FFmpeg execution: ${e.message}", e)
-                val diagnosticLog = createDiagnosticReport(context, ffmpegCommand, null, null, null, e)
-                RenderResult.Failure(error = diagnosticLog)
+                if (e is kotlinx.coroutines.CancellationException) {
+                    Log.d(TAG, "FFmpeg export cancelled via coroutine cancellation")
+                    RenderResult.Cancelled
+                } else {
+                    Log.e(TAG, "Exception during FFmpeg execution: ${e.message}", e)
+                    val diagnosticLog = createDiagnosticReport(context, ffmpegCommand, null, null, null, e)
+                    RenderResult.Failure(error = diagnosticLog)
+                }
             } finally {
                 if (!isRetry && scriptFilePath != null) {
                     try {
