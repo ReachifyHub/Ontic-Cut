@@ -299,4 +299,8 @@
     <string name="credits_zero_dialog_title">No Transcription Credits</string>
     <string name="credits_zero_dialog_message">You have 0 transcription credits. Auto Assemble requires credits to transcribe your voiceover with Whisper AI.\n\nPlease purchase credits via WhatsApp to continue.</string>
     <string name="credits_low_banner">Low credit balance (%1$d mins remaining)</string>
+    <string name="str_move_left">Move Left</string>
+    <string name="str_move_right">Move Right</string>
+    <string name="str_split_boundary_hint">Move playhead inside a clip to split.</string>
+    <string name="str_insert_gap_hint">Move playhead to a gap between clips to insert, or select a clip and use Replace.</string>
 </resources>

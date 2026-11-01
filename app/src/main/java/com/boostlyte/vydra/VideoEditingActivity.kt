@@ -1012,6 +1012,12 @@ class VideoEditingActivity : AppCompatActivity() {
         }
 
         btnTimelineAdd.setBounceClickListener {
+            val insertIdx = calculatePlayheadInsertionIndex()
+            if (insertIdx == null) {
+                Toast.makeText(this, "Move playhead to a gap between clips to insert, or select a clip and use Replace.", Toast.LENGTH_LONG).show()
+                return@setBounceClickListener
+            }
+            pendingInsertIndex = insertIdx
             openFilePickerMerge()
         }
 
@@ -1674,6 +1680,36 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
                 toolbar.findViewById<ImageButton>(R.id.btnVideoSplit)?.setBounceClickListener {
                     splitSelectedVideo()
+                }
+                toolbar.findViewById<ImageButton>(R.id.btnVideoDuplicate)?.setBounceClickListener {
+                    val index = selectedVideoIndex ?: return@setBounceClickListener
+                    val sequenceItems = getSequenceItems()
+                    if (index in sequenceItems.indices) {
+                        val currentPrimary = sequenceItems.firstOrNull()
+                        viewModel.duplicateSequenceSegment(index, currentPrimary)
+                        selectedVideoIndex = index + 1
+                        Toast.makeText(this@VideoEditingActivity, "Clip duplicated", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                toolbar.findViewById<ImageButton>(R.id.btnVideoMoveLeft)?.setBounceClickListener {
+                    val index = selectedVideoIndex ?: return@setBounceClickListener
+                    if (index > 0) {
+                        val sequenceItems = getSequenceItems()
+                        val currentPrimary = sequenceItems.firstOrNull()
+                        viewModel.swapSequenceSegments(index, index - 1, currentPrimary)
+                        selectedVideoIndex = index - 1
+                        updateReorderButtonStates(index - 1, sequenceItems.size)
+                    }
+                }
+                toolbar.findViewById<ImageButton>(R.id.btnVideoMoveRight)?.setBounceClickListener {
+                    val index = selectedVideoIndex ?: return@setBounceClickListener
+                    val sequenceItems = getSequenceItems()
+                    if (index < sequenceItems.size - 1) {
+                        val currentPrimary = sequenceItems.firstOrNull()
+                        viewModel.swapSequenceSegments(index, index + 1, currentPrimary)
+                        selectedVideoIndex = index + 1
+                        updateReorderButtonStates(index + 1, sequenceItems.size)
+                    }
                 }
                 toolbar.findViewById<ImageButton>(R.id.btnVideoTrim)?.setBounceClickListener {
                     selectedVideoIndex?.let { index ->
@@ -2491,13 +2527,23 @@ class VideoEditingActivity : AppCompatActivity() {
                     if (projectSourcePath != null && File(projectSourcePath).exists() && (!::tempInputFile.isInitialized || tempInputFile.absolutePath != projectSourcePath)) {
                         tempInputFile = File(projectSourcePath)
                         videoFileName = tempInputFile.name
-                        try {
-                            val r = android.media.MediaMetadataRetriever()
-                            r.setDataSource(tempInputFile.absolutePath)
-                            originalMainVideoDurationMs = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
-                            r.release()
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error getting original duration: ${e.message}")
+                        val isImg = isImageUri(project.sourceUri) || isImageFile(tempInputFile)
+                        if (isImg) {
+                            val existingTrim = project.operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
+                            originalMainVideoDurationMs = existingTrim?.let { it.endMs - it.startMs } ?: 5000L
+                        } else {
+                            try {
+                                val r = android.media.MediaMetadataRetriever()
+                                if (setRetrieverDataSourceSafely(r, tempInputFile, project.sourceUri)) {
+                                    val dur = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                                    if (dur > 0L) {
+                                        originalMainVideoDurationMs = dur
+                                    }
+                                }
+                                r.release()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error getting original duration: ${e.message}")
+                            }
                         }
                     }
 
@@ -4633,6 +4679,8 @@ class VideoEditingActivity : AppCompatActivity() {
             videoEditingToolbar?.let { toolbar ->
                 updateVideoMuteButtonState(toolbar, index)
             }
+            updateReorderButtonStates(index, getSequenceItems().size)
+            updateSplitButtonState()
         }
         if (::player.isInitialized && player.isPlaying) {
             player.pause()
@@ -5474,33 +5522,82 @@ class VideoEditingActivity : AppCompatActivity() {
         cropOverlayView?.visibility = if (ratio == "Custom") View.VISIBLE else View.GONE
     }
 
-    private fun splitSelectedVideo() {
-        val index = selectedVideoIndex ?: return
-        val globalPos = getGlobalPosition()
-        
+    private fun updateReorderButtonStates(index: Int, totalClips: Int) {
+        val btnLeft = videoEditingToolbar?.findViewById<ImageButton>(R.id.btnVideoMoveLeft)
+        val btnRight = videoEditingToolbar?.findViewById<ImageButton>(R.id.btnVideoMoveRight)
+
+        val canMoveLeft = index > 0
+        val canMoveRight = index < totalClips - 1
+
+        btnLeft?.isEnabled = canMoveLeft
+        btnLeft?.alpha = if (canMoveLeft) 1.0f else 0.35f
+
+        btnRight?.isEnabled = canMoveRight
+        btnRight?.alpha = if (canMoveRight) 1.0f else 0.35f
+    }
+
+    private fun updateSplitButtonState() {
+        val selectedIdx = selectedVideoIndex ?: return
         val sequenceItems = getSequenceItems()
-        if (index < 0 || index >= sequenceItems.size) return
-        
-        val item = sequenceItems[index]
-        
-        // Calculate the clip's starting global position
-        var clipStartGlobal = 0L
-        for (i in 0 until index) {
-            clipStartGlobal += sequenceItems[i].trimmedDurationMs
-        }
-        val clipEndGlobal = clipStartGlobal + item.trimmedDurationMs
-        
-        // Check if the seeker is inside this clip
-        if (globalPos <= clipStartGlobal || globalPos >= clipEndGlobal) {
-            Toast.makeText(this, R.string.toast_seeker_is_not_over_the_selecte, Toast.LENGTH_SHORT).show()
+        val btnSplit = videoEditingToolbar?.findViewById<ImageButton>(R.id.btnVideoSplit) ?: return
+        if (selectedIdx !in sequenceItems.indices) {
+            btnSplit.isEnabled = false
+            btnSplit.alpha = 0.35f
             return
         }
-        
-        // Calculate the local split time inside the clip's own timeline
-        val localOffset = globalPos - clipStartGlobal
-        val localSplitTimeMs = item.trimStartMs + localOffset
-        
-        viewModel.splitVideoSegment(index, localSplitTimeMs, item.uri, item.durationMs)
+        val playheadMs = getExactPlayheadPosition()
+        var start = 0L
+        for (i in 0 until selectedIdx) {
+            start += sequenceItems[i].trimmedDurationMs
+        }
+        val end = start + sequenceItems[selectedIdx].trimmedDurationMs
+        val isInside = playheadMs > start + 50L && playheadMs < end - 50L
+        btnSplit.isEnabled = isInside
+        btnSplit.alpha = if (isInside) 1.0f else 0.35f
+    }
+
+    private fun splitSelectedVideo() {
+        val sequenceItems = getSequenceItems()
+        if (sequenceItems.isEmpty()) return
+
+        val playheadMs = getExactPlayheadPosition()
+
+        // 1. Identify which sequence clip the playhead is currently over
+        var targetIndex = -1
+        var clipStartGlobal = 0L
+        var clipEndGlobal = 0L
+        var accumMs = 0L
+
+        for ((i, item) in sequenceItems.withIndex()) {
+            val start = accumMs
+            val end = accumMs + item.trimmedDurationMs
+            if (playheadMs > start + 50L && playheadMs < end - 50L) {
+                targetIndex = i
+                clipStartGlobal = start
+                clipEndGlobal = end
+                break
+            }
+            accumMs = end
+        }
+
+        val selectedIdx = selectedVideoIndex
+        if (selectedIdx != null && selectedIdx != targetIndex) {
+            Toast.makeText(this, "Move playhead inside a clip to split.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (targetIndex == -1) {
+            Toast.makeText(this, "Move playhead inside a clip to split.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val item = sequenceItems[targetIndex]
+        val localOffsetTimeline = playheadMs - clipStartGlobal
+        val sourceOffsetMs = (localOffsetTimeline * item.speed).toLong()
+        val localSplitTimeMs = item.trimStartMs + sourceOffsetMs
+        val safeSplitMs = localSplitTimeMs.coerceIn(item.trimStartMs + 1L, item.trimEndMs - 1L)
+
+        viewModel.splitVideoSegment(targetIndex, safeSplitMs, item.uri, item.durationMs)
         selectedVideoIndex = null
         exitVideoEditingMode()
     }
@@ -5756,7 +5853,11 @@ class VideoEditingActivity : AppCompatActivity() {
             if (mergeItems.isNotEmpty()) {
                 isImportLoading = true
                 showLoading("Importing media...")
-                viewModel.addMergeOperation(mergeItems)
+                val sequenceItems = getSequenceItems()
+                val targetIdx = pendingInsertIndex ?: calculatePlayheadInsertionIndex() ?: sequenceItems.size
+                pendingInsertIndex = null
+                val currentPrimary = sequenceItems.firstOrNull()
+                viewModel.insertSequenceItems(targetIdx, mergeItems, currentPrimary)
                 Toast.makeText(this@VideoEditingActivity, "${mergeItems.size} clip(s) added to sequence", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this@VideoEditingActivity, R.string.toast_failed_to_load_selected_video, Toast.LENGTH_SHORT).show()
@@ -6734,17 +6835,28 @@ class VideoEditingActivity : AppCompatActivity() {
         val sourceDuration = if (originalMainVideoDurationMs > 0L) {
             originalMainVideoDurationMs
         } else {
-            try {
-                val r = android.media.MediaMetadataRetriever()
+            val isMainImg = isImageUri(sourceUri) || (::tempInputFile.isInitialized && (isImageUri(Uri.fromFile(tempInputFile)) || isImageFile(tempInputFile)))
+            if (isMainImg) {
+                val trimOp = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Trim>()?.lastOrNull()
+                val d = trimOp?.let { it.endMs - it.startMs } ?: 5000L
+                originalMainVideoDurationMs = d
+                d
+            } else {
                 try {
-                    r.setDataSource(tempInputFile.absolutePath)
-                    val duration = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
-                    originalMainVideoDurationMs = duration
-                    duration
-                } finally {
-                    r.release()
-                }
-            } catch (e: Exception) { 0L }
+                    val r = android.media.MediaMetadataRetriever()
+                    try {
+                        if (setRetrieverDataSourceSafely(r, tempInputFile, sourceUri)) {
+                            val duration = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                            originalMainVideoDurationMs = duration
+                            duration
+                        } else {
+                            0L
+                        }
+                    } finally {
+                        r.release()
+                    }
+                } catch (e: Exception) { 0L }
+            }
         }
 
         val trimOp = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Trim>()?.lastOrNull()
@@ -6828,6 +6940,46 @@ class VideoEditingActivity : AppCompatActivity() {
 
     private fun getTotalSequenceDuration(): Long {
         return getSequenceItems().sumOf { it.trimmedDurationMs }
+    }
+
+    private var pendingInsertIndex: Int? = null
+
+    private fun getExactPlayheadPosition(): Long {
+        val totalDuration = getTotalSequenceDuration()
+        if (totalDuration <= 0L) return 0L
+        return if (::player.isInitialized && player.isPlaying) {
+            getGlobalPosition().coerceIn(0L, totalDuration)
+        } else {
+            (timelineHorizontalScroll.scrollX / pixelsPerMs).toLong().coerceIn(0L, totalDuration)
+        }
+    }
+
+    private fun calculatePlayheadInsertionIndex(): Int? {
+        val sequenceItems = getSequenceItems()
+        if (sequenceItems.isEmpty()) return 0
+        val totalDuration = getTotalSequenceDuration()
+        val playheadMs = getExactPlayheadPosition()
+
+        val toleranceMs = 120L // Snap window for boundaries
+
+        if (playheadMs <= toleranceMs) {
+            return 0 // Beginning (before Clip 0)
+        }
+
+        if (playheadMs >= totalDuration - toleranceMs) {
+            return sequenceItems.size // End (after last clip)
+        }
+
+        var accumMs = 0L
+        for (i in 0 until sequenceItems.size - 1) {
+            accumMs += sequenceItems[i].trimmedDurationMs
+            if (Math.abs(playheadMs - accumMs) <= toleranceMs) {
+                return i + 1 // Exactly on boundary between clip i and clip i+1 -> index of Clip B
+            }
+        }
+
+        // Playhead is strictly inside a clip
+        return null
     }
 
     private var lastAppliedFilterName: String? = null
@@ -7193,6 +7345,10 @@ class VideoEditingActivity : AppCompatActivity() {
                     transitionPreviewOverlayView?.visibility = View.GONE
                 }
             }
+
+            if (videoEditingToolbar?.visibility == View.VISIBLE && selectedVideoIndex != null) {
+                updateSplitButtonState()
+            }
         }
     }
 
@@ -7241,6 +7397,9 @@ class VideoEditingActivity : AppCompatActivity() {
             updateDraggableOverlayFromKeyframes(globalPos)
         }
         syncBgAudio(globalPos, player.isPlaying)
+        if (videoEditingToolbar?.visibility == View.VISIBLE && selectedVideoIndex != null) {
+            updateSplitButtonState()
+        }
     }
 
     private fun syncBgAudio(globalPos: Long, isPlaying: Boolean) {
@@ -7478,6 +7637,23 @@ class VideoEditingActivity : AppCompatActivity() {
         }
     }
 
+    private fun isImageFile(file: File): Boolean {
+        if (!file.exists() || file.length() == 0L) return false
+        val lower = file.name.lowercase()
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
+            lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".bmp") ||
+            lower.endsWith(".heic") || lower.endsWith(".heif")) {
+            return true
+        }
+        return try {
+            val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeFile(file.absolutePath, options)
+            options.outWidth > 0 && options.outHeight > 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun isImageUri(uri: Uri): Boolean {
         val mimeType = try { contentResolver.getType(uri) } catch (e: Exception) { null }
         if (mimeType != null && mimeType.startsWith("image/")) {
@@ -7485,9 +7661,67 @@ class VideoEditingActivity : AppCompatActivity() {
         }
         val path = uri.path ?: uri.toString()
         val lower = path.lowercase()
-        return lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
-               lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".bmp") ||
-               lower.endsWith(".heic") || lower.endsWith(".heif")
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
+            lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".bmp") ||
+            lower.endsWith(".heic") || lower.endsWith(".heif")) {
+            return true
+        }
+        try {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (nameIdx != -1) {
+                        val displayName = cursor.getString(nameIdx)?.lowercase() ?: ""
+                        if (displayName.endsWith(".jpg") || displayName.endsWith(".jpeg") ||
+                            displayName.endsWith(".png") || displayName.endsWith(".webp") ||
+                            displayName.endsWith(".gif") || displayName.endsWith(".bmp") ||
+                            displayName.endsWith(".heic") || displayName.endsWith(".heif")) {
+                            return true
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        if (uri.scheme == "file") {
+            uri.path?.let { p ->
+                val f = File(p)
+                if (f.exists() && isImageFile(f)) return true
+            }
+        }
+        return false
+    }
+
+    private fun setRetrieverDataSourceSafely(r: android.media.MediaMetadataRetriever, file: File, uri: Uri? = null): Boolean {
+        if (!file.exists() || file.length() == 0L) return false
+
+        // 1. Try with FileDescriptor via FileInputStream (avoids DAC permission 0x80000000 in native mediaserver process)
+        try {
+            java.io.FileInputStream(file).use { fis ->
+                r.setDataSource(fis.fd)
+                return true
+            }
+        } catch (e1: Exception) {
+            Log.w(TAG, "setDataSource(fd) failed: ${e1.message}, trying file path")
+        }
+
+        // 2. Try with file.absolutePath
+        try {
+            r.setDataSource(file.absolutePath)
+            return true
+        } catch (e2: Exception) {
+            Log.w(TAG, "setDataSource(path) failed: ${e2.message}, trying context URI")
+        }
+
+        // 3. Try with context and URI
+        val targetUri = uri ?: Uri.fromFile(file)
+        try {
+            r.setDataSource(this@VideoEditingActivity, targetUri)
+            return true
+        } catch (e3: Exception) {
+            Log.w(TAG, "setDataSource(context, uri) failed: ${e3.message}")
+        }
+        return false
     }
 
     private fun initializeVideoData() {
@@ -7593,42 +7827,123 @@ class VideoEditingActivity : AppCompatActivity() {
                     if (videoFilePath != null) {
                         tempInputFile = File(videoFilePath)
                         videoFileName = tempInputFile.name
-                        var dur = 0L
 
-                        try {
-                            val r = android.media.MediaMetadataRetriever()
-                            r.setDataSource(tempInputFile.absolutePath)
-                            dur = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L
-                            originalMainVideoDurationMs = dur
-
-                            val width = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toInt() ?: 1280
-                            val height = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toInt() ?: 720
-                            val rotation = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt() ?: 0
-
-                            if (rotation == 90 || rotation == 270) {
-                                primaryVideoAspectRatio = height.toFloat() / width.toFloat()
-                            } else {
-                                primaryVideoAspectRatio = width.toFloat() / height.toFloat()
+                        val isActuallyImage = isImageFile(tempInputFile)
+                        if (isActuallyImage) {
+                            originalMainVideoDurationMs = 5000L
+                            try {
+                                val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                android.graphics.BitmapFactory.decodeFile(tempInputFile.absolutePath, options)
+                                if (options.outWidth > 0 && options.outHeight > 0) {
+                                    var imgW = options.outWidth
+                                    var imgH = options.outHeight
+                                    try {
+                                        val exif = android.media.ExifInterface(tempInputFile.absolutePath)
+                                        val orientation = exif.getAttributeInt(
+                                            android.media.ExifInterface.TAG_ORIENTATION,
+                                            android.media.ExifInterface.ORIENTATION_NORMAL
+                                        )
+                                        if (orientation == android.media.ExifInterface.ORIENTATION_ROTATE_90 ||
+                                            orientation == android.media.ExifInterface.ORIENTATION_ROTATE_270 ||
+                                            orientation == android.media.ExifInterface.ORIENTATION_TRANSPOSE ||
+                                            orientation == android.media.ExifInterface.ORIENTATION_TRANSVERSE) {
+                                            val temp = imgW
+                                            imgW = imgH
+                                            imgH = temp
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Exif orientation read failed: ${e.message}")
+                                    }
+                                    primaryVideoAspectRatio = imgW.toFloat() / imgH.toFloat()
+                                } else {
+                                    primaryVideoAspectRatio = 16f / 9f
+                                }
+                            } catch (e: Exception) {
+                                primaryVideoAspectRatio = 16f / 9f
                             }
 
-                            r.release()
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error getting original duration: ${e.message}")
-                            primaryVideoAspectRatio = 16f / 9f
-                        }
-
-                        if (dur <= 0L) {
-                            originalMainVideoDurationMs = 5000L
-                            val hasTrim = viewModel.project.value?.operations?.any { it is com.boostlyte.vydra.models.EditOperation.Trim } == true
-                            if (!hasTrim) {
+                            val existingTrim = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Trim>()?.lastOrNull()
+                            if (existingTrim != null) {
+                                originalMainVideoDurationMs = maxOf(5000L, existingTrim.endMs)
+                            } else {
                                 viewModel.updateMainVideoTrim(0L, 5000L)
                             }
-                        }
 
-                        // Now load it into ExoPlayer
-                        val mediaItem = com.google.android.exoplayer2.MediaItem.fromUri(Uri.fromFile(tempInputFile))
-                        player.setMediaItem(mediaItem)
-                        player.prepare()
+                            withContext(Dispatchers.Main) {
+                                triggerCanvasLayoutUpdate()
+                                viewModel.project.value?.let { renderTracks(it) }
+                                isVideoLoaded = true
+                                isImportLoading = false
+                                loadingScreen.visibility = View.GONE
+                                photoSequencePreviewImageView?.visibility = View.VISIBLE
+                                photoSequencePreviewImageView?.setImageURI(null)
+                                val previewBmp = com.boostlyte.vydra.utils.ImagePreviewCache.decodeDownsampledBitmap(this@VideoEditingActivity, Uri.fromFile(tempInputFile), 1280, 720)
+                                if (previewBmp != null) {
+                                    photoSequencePreviewImageView?.setImageBitmap(previewBmp)
+                                    com.boostlyte.vydra.utils.ImagePreviewCache.putPreviewBitmap(targetUri, previewBmp)
+                                } else {
+                                    photoSequencePreviewImageView?.setImageURI(Uri.fromFile(tempInputFile))
+                                }
+                                playerView.visibility = View.INVISIBLE
+
+                                val totalDuration = getTotalSequenceDuration()
+                                customVideoSeeker.setVideoDuration(totalDuration)
+                                timeRulerView.setVideoDuration(totalDuration)
+                                updateDurationDisplay(0, totalDuration.toInt())
+
+                                if (!isInitialFitDone && totalDuration > 0L) {
+                                    timelineHorizontalScroll.post {
+                                        val scrollWidth = timelineHorizontalScroll.width.toFloat()
+                                        if (scrollWidth > 0) {
+                                            val safeDuration = totalDuration
+                                            val newPixelsPerMs = (scrollWidth - 32.dpToPx()) / safeDuration
+                                            val density = resources.displayMetrics.density
+                                            pixelsPerMs = newPixelsPerMs.coerceIn(0.001f * density, 2.0f * density)
+                                            viewModel.project.value?.let { renderTracks(it) }
+                                            isInitialFitDone = true
+                                        }
+                                    }
+                                }
+                                updateUIInteractionState()
+                            }
+                        } else {
+                            var dur = 0L
+
+                            try {
+                                val r = android.media.MediaMetadataRetriever()
+                                if (setRetrieverDataSourceSafely(r, tempInputFile, targetUri)) {
+                                    dur = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                                    originalMainVideoDurationMs = dur
+
+                                    val width = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 1280
+                                    val height = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 720
+                                    val rotation = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+
+                                    if (rotation == 90 || rotation == 270) {
+                                        primaryVideoAspectRatio = height.toFloat() / width.toFloat()
+                                    } else {
+                                        primaryVideoAspectRatio = width.toFloat() / height.toFloat()
+                                    }
+                                }
+                                r.release()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error getting original duration: ${e.message}")
+                                primaryVideoAspectRatio = 16f / 9f
+                            }
+
+                            if (dur <= 0L) {
+                                originalMainVideoDurationMs = 5000L
+                                val hasTrim = viewModel.project.value?.operations?.any { it is com.boostlyte.vydra.models.EditOperation.Trim } == true
+                                if (!hasTrim) {
+                                    viewModel.updateMainVideoTrim(0L, 5000L)
+                                }
+                            }
+
+                            // Now load it into ExoPlayer
+                            val mediaItem = com.google.android.exoplayer2.MediaItem.fromUri(Uri.fromFile(tempInputFile))
+                            player.setMediaItem(mediaItem)
+                            player.prepare()
+                        }
                     } else {
                         showError("Could not process the selected video file.")
                         isImportLoading = false
@@ -7664,7 +7979,14 @@ class VideoEditingActivity : AppCompatActivity() {
                 // For content URIs, always copy to cache to avoid Scoped Storage issues
                 filePath = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     try {
-                        val tempFile = File(cacheDir, "imported_video_${System.currentTimeMillis()}.mp4")
+                        val isImg = isImageUri(uri)
+                        val ext = if (isImg) {
+                            if (uri.path?.endsWith(".png", true) == true) ".png" else ".jpg"
+                        } else {
+                            ".mp4"
+                        }
+                        val prefix = if (isImg) "imported_image_" else "imported_video_"
+                        val tempFile = File(cacheDir, "${prefix}${System.currentTimeMillis()}$ext")
                         val inputStream = contentResolver.openInputStream(uri)
                         if (inputStream == null) {
                             Log.e("PathError", "openInputStream returned null for URI: $uri")

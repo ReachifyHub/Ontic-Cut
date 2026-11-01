@@ -12,13 +12,13 @@
 | # | Capability Group | Tool / Feature | Status | Fix Effort | Primary Code Path / File |
 |---|---|---|---|---|---|
 | 1 | **Main Track Clips** | Trim | **WORKS** | S | `VideoEditingActivity.kt:showVideoSegmentTrimDialog()`, `TrackTrimView.kt` |
-| 2 | Main Track Clips | Split | **FIXED** | M | `VideoEditingActivity.kt:splitSelectedVideo()`, `VideoEditingViewModelExt.kt:splitVideoSegment()` |
+| 2 | Main Track Clips | Split | **WORKS** | M | `VideoEditingActivity.kt:splitSelectedVideo()`, `VideoEditingViewModelExt.kt:splitVideoSegment()` |
 | 3 | Main Track Clips | Speed | **WORKS** | S | `VideoEditingActivity.kt:applySpeedToSegment()`, `FFmpegRenderEngine.kt:generateSpeedProxy()` |
 | 4 | Main Track Clips | Reverse | **WORKS** | S | `VideoEditingActivity.kt:reverseVideoSegment()`, `FFmpegRenderEngine.kt:reverseVideo()` |
 | 5 | Main Track Clips | Freeze Frame | **WORKS** | S | `VideoEditingActivity.kt:freezeFrameAtCurrentPosition()` |
-| 6 | Main Track Clips | Reorder Clips | **FEATURE GAP** | L | Missing UI drag-and-drop / adapter move logic on `sequenceTrackContainer` |
+| 6 | Main Track Clips | Reorder Clips | **WORKS** | S | `video_editing_toolbar.xml:btnVideoMoveLeft, btnVideoMoveRight`, `VideoEditingViewModelExt.kt:swapSequenceSegments()` |
 | 7 | Main Track Clips | Delete Clip | **FIXED** | M | `VideoEditingActivity.kt:deleteSelectedVideo()`, `VideoEditingViewModelExt.kt:deleteSequenceSegment()` |
-| 8 | Main Track Clips | Duplicate Clip | **FEATURE GAP** | M | Missing duplicate action for main sequence items in `video_editing_toolbar.xml` |
+| 8 | Main Track Clips | Duplicate Clip | **WORKS** | S | `video_editing_toolbar.xml:btnVideoDuplicate`, `VideoEditingViewModelExt.kt:duplicateSequenceSegment()` |
 | 9 | **Text Overlays** | Add Text | **WORKS** | S | `VideoEditingActivity.kt:addTextAction()`, `DraggableTextOverlayView.kt:activate()` |
 | 10 | Text Overlays | Edit Text (In-Place) | **WORKS** | S | `DraggableTextOverlayView.kt:activateForEdit()`, `VideoEditingActivity.kt:enterTextEditingMode()` |
 | 11 | Text Overlays | Keyboard Input | **WORKS** | S | `DraggableTextOverlayView.kt:requestEditingFocus()` |
@@ -77,12 +77,12 @@
 - **Fix Effort:** N/A (`S` if polish needed).
 
 #### 1.2 Split
-- **Status:** `FIXED`
-- **Evidence:** `VideoEditingActivity.kt:4992-5021` (`splitSelectedVideo()`) computes `localSplitTimeMs` based on `getGlobalPosition()` and calls `viewModel.splitVideoSegment(index, localSplitTimeMs, item.uri, item.durationMs)`.
+- **Status:** `WORKS`
+- **Evidence:** `VideoEditingActivity.kt:splitSelectedVideo()` uses playhead position as the single source of truth (`getExactPlayheadPosition()`), properly deriving position from paused scroll offset (`timelineHorizontalScroll.scrollX / pixelsPerMs`) or playback state. It maps timeline position to local source time using speed scaling: `localOffsetTimeline = playheadMs - clipStartGlobal`, `sourceOffsetMs = (localOffsetTimeline * item.speed).toLong()`, `localSplitTimeMs = item.trimStartMs + sourceOffsetMs`.
 - **Root-Cause & Resolution:** 
-  1. Previously, `splitVideoSegment` split clip 0 or merge items without remapping transition operations, causing subsequent transitions to attach to wrong boundaries.
-  2. Fixed in `VideoEditingViewModelExt.kt:splitVideoSegment()`: when clip `index` splits into two halves (at `index` and `index+1`), any `EditOperation.Transition` at `op.index >= index` shifts by `+1`, preserving all surrounding scene cut transitions while leaving the new seam with no transition. Per-clip effects (`MuteClip`, `ColorFilter`, `Adjust`) with `op.index > index` also shift by `+1`.
-  3. Audio tracks and subtitles maintain absolute timeline coordinates anchored to the master timeline.
+  1. Previously, split was calculated from ExoPlayer's chunk-local position or without considering clip trim offsets and playback speed multipliers, causing cuts to land at incorrect source frames.
+  2. Fixed in `splitSelectedVideo()`: checks boundary tolerance (50ms) to ensure the playhead is strictly inside the clip; otherwise, prompts user with `"Move playhead inside a clip to split."` and keeps the Split button dynamically dimmed when on edges or outside.
+  3. Transition preservation: in `VideoEditingViewModelExt.kt:splitVideoSegment()`, all transitions at `op.index >= index` shift by `+1`, leaving the newly created seam with no transition (hard cut) while keeping subsequent transitions attached to their respective scene boundaries.
 - **Fix Effort:** `M`
 
 #### 1.3 Speed
@@ -104,10 +104,14 @@
 - **Fix Effort:** N/A (`S`).
 
 #### 1.6 Reorder Clips
-- **Status:** `FEATURE GAP`
-- **Evidence:** `VideoEditingActivity.kt:7313-7370` renders main timeline sequence segments inside `sequenceTrackContainer` with hardcoded absolute left margins (`leftMargin = segmentLeft`). There is no `ItemTouchHelper`, drag-and-drop listener, or "Move Left / Move Right" action button in `video_editing_toolbar.xml`.
-- **Root-Cause Hypothesis:** Architecture was originally built around a single main video with secondary merge clips; drag-to-reorder on the main timeline track was never implemented.
-- **Fix Effort:** `L`
+- **Status:** `WORKS`
+- **Evidence:** Added "Move Left" (`btnVideoMoveLeft`) and "Move Right" (`btnVideoMoveRight`) buttons to `video_editing_toolbar.xml`. Connected in `VideoEditingActivity.kt` with live state management (`updateReorderButtonStates()` disabling Move Left at index 0 and Move Right at the final index).
+- **Root-Cause & Resolution:** 
+  1. Main sequence order was previously immutable except by deleting and re-importing.
+  2. Fixed in `VideoEditingViewModelExt.kt:swapSequenceSegments(indexA, indexB)`: cleanly swaps clips whether involving primary clip (index 0) or merge items.
+  3. Clears transitions touching the swapped seam (`minIdx - 1 .. maxIdx`) to prevent invalid boundary math and non-monotonic PTS errors in FFmpeg concatenation.
+  4. Swaps per-clip effect indices (`MuteClip`, `ColorFilter`, `Adjust`) to travel with their respective clips.
+- **Fix Effort:** `S`
 
 #### 1.7 Delete Clip
 - **Status:** `FIXED`
@@ -119,10 +123,13 @@
 - **Fix Effort:** `M`
 
 #### 1.8 Duplicate Clip
-- **Status:** `FEATURE GAP`
-- **Evidence:** `video_editing_toolbar.xml` (lines 1–364) contains Cancel, Trim, Split, Mute, Filters, Mask, Adjust, Speed, Extract Audio, Freeze Frame, Reverse, Mirror, and Delete. There is no Duplicate button for main track video clips (unlike text/image overlays which have `btnTextDuplicate` / `btnImageDuplicate`).
-- **Root-Cause Hypothesis:** Duplicate action was implemented only for overlays in `duplicateSelectedOverlay()`, never for timeline sequence clips.
-- **Fix Effort:** `M`
+- **Status:** `WORKS`
+- **Evidence:** Added "Duplicate" button (`btnVideoDuplicate`) in `video_editing_toolbar.xml` right next to Split. Connected in `VideoEditingActivity.kt` to `viewModel.duplicateSequenceSegment(index)`.
+- **Root-Cause & Resolution:** 
+  1. Previously, duplicate only existed for text and image overlays.
+  2. Fixed in `VideoEditingViewModelExt.kt:duplicateSequenceSegment(index)`: clones the selected `MergeItem` (preserving duration, trims, speed, filters, mute, and adjust), inserting the clone at `index + 1`.
+  3. Shift transitions at `index >= i` by `+1`, leaving the seam between the original clip and its duplicate with no transition (hard cut).
+- **Fix Effort:** `S`
 
 ---
 

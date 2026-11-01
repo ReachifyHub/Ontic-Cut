@@ -507,6 +507,226 @@ fun VideoEditingViewModel.deleteSequenceSegment(index: Int) {
     })
 }
 
+fun VideoEditingViewModel.duplicateSequenceSegment(
+    index: Int,
+    currentPrimaryItem: EditOperation.MergeItem? = null
+) {
+    executeCommand(com.boostlyte.vydra.commands.MutateProjectCommand("Duplicate Clip") { project ->
+        val ops = project.operations.toMutableList()
+        val mergeIdx = ops.indexOfFirst { it is EditOperation.Merge }
+        val currentMergeItems = if (mergeIdx != -1) {
+            (ops[mergeIdx] as EditOperation.Merge).items.toMutableList()
+        } else {
+            mutableListOf()
+        }
+
+        val cloneItem: EditOperation.MergeItem
+        if (index == 0) {
+            val primary = currentPrimaryItem ?: EditOperation.MergeItem(
+                uri = project.sourceUri,
+                durationMs = 5000L,
+                trimStartMs = ops.filterIsInstance<EditOperation.Trim>().lastOrNull()?.startMs ?: 0L,
+                trimEndMs = ops.filterIsInstance<EditOperation.Trim>().lastOrNull()?.endMs ?: 5000L,
+                speed = ops.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()?.speed ?: 1.0f,
+                proxyUri = ops.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()?.proxyUri ?: ops.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()?.proxyUri,
+                isReversed = ops.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()?.isReversed ?: false,
+                isMirrored = ops.filterIsInstance<EditOperation.MirrorMain>().lastOrNull()?.isMirrored ?: false,
+                maskConfig = ops.filterIsInstance<EditOperation.MaskMain>().lastOrNull()?.maskConfig ?: EditOperation.MaskConfig()
+            )
+            cloneItem = primary.copy()
+            currentMergeItems.add(0, cloneItem)
+        } else {
+            val mergeTargetIdx = index - 1
+            if (mergeTargetIdx in 0 until currentMergeItems.size) {
+                cloneItem = currentMergeItems[mergeTargetIdx].copy()
+                currentMergeItems.add(mergeTargetIdx + 1, cloneItem)
+            } else {
+                return@MutateProjectCommand project
+            }
+        }
+
+        val newMergeOp = EditOperation.Merge(currentMergeItems)
+        val updatedMergeIdx = ops.indexOfFirst { it is EditOperation.Merge }
+        if (updatedMergeIdx != -1) {
+            ops[updatedMergeIdx] = newMergeOp
+        } else {
+            ops.add(newMergeOp)
+        }
+
+        // Remap operations:
+        // 1. Transition:
+        //    Any transition at `op.index >= index` shifts to `op.index + 1`.
+        //    The new gap at `index` has NO transition (hard cut).
+        // 2. Per-clip effects (MuteClip, ColorFilter, Adjust):
+        //    Existing effects with `op.index > index` shift to `op.index + 1`.
+        //    Existing effects with `op.index == index` are copied for `index + 1` so the duplicate inherits them.
+        val finalOps = mutableListOf<EditOperation>()
+        for (op in ops) {
+            when (op) {
+                is EditOperation.Transition -> {
+                    if (op.index >= index) {
+                        finalOps.add(op.copy(index = op.index + 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                is EditOperation.MuteClip -> {
+                    if (op.index > index) {
+                        finalOps.add(op.copy(index = op.index + 1))
+                    } else if (op.index == index) {
+                        finalOps.add(op)
+                        finalOps.add(op.copy(index = index + 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                is EditOperation.ColorFilter -> {
+                    if (op.index > index) {
+                        finalOps.add(op.copy(index = op.index + 1))
+                    } else if (op.index == index) {
+                        finalOps.add(op)
+                        finalOps.add(op.copy(index = index + 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                is EditOperation.Adjust -> {
+                    if (op.index > index) {
+                        finalOps.add(op.copy(index = op.index + 1))
+                    } else if (op.index == index) {
+                        finalOps.add(op)
+                        finalOps.add(op.copy(index = index + 1))
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                else -> finalOps.add(op)
+            }
+        }
+
+        project.copy(operations = finalOps)
+    })
+}
+
+fun VideoEditingViewModel.swapSequenceSegments(
+    indexA: Int,
+    indexB: Int,
+    currentPrimaryItem: EditOperation.MergeItem? = null
+) {
+    if (indexA == indexB) return
+    val minIdx = minOf(indexA, indexB)
+    val maxIdx = maxOf(indexA, indexB)
+    if (minIdx < 0) return
+
+    executeCommand(com.boostlyte.vydra.commands.MutateProjectCommand("Reorder Clip") { project ->
+        val ops = project.operations.toMutableList()
+        var newSourceUri = project.sourceUri
+
+        val mergeIdx = ops.indexOfFirst { it is EditOperation.Merge }
+        val currentMergeItems = if (mergeIdx != -1) {
+            (ops[mergeIdx] as EditOperation.Merge).items.toMutableList()
+        } else {
+            mutableListOf()
+        }
+
+        if (minIdx == 0) {
+            // Swapping Primary (index 0) with Merge item 0 (index 1)
+            if (currentMergeItems.isEmpty()) return@MutateProjectCommand project
+
+            val oldPrimary = currentPrimaryItem ?: EditOperation.MergeItem(
+                uri = project.sourceUri,
+                durationMs = 5000L,
+                trimStartMs = ops.filterIsInstance<EditOperation.Trim>().lastOrNull()?.startMs ?: 0L,
+                trimEndMs = ops.filterIsInstance<EditOperation.Trim>().lastOrNull()?.endMs ?: 5000L,
+                speed = ops.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()?.speed ?: 1.0f,
+                proxyUri = ops.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()?.proxyUri ?: ops.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()?.proxyUri,
+                isReversed = ops.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()?.isReversed ?: false,
+                isMirrored = ops.filterIsInstance<EditOperation.MirrorMain>().lastOrNull()?.isMirrored ?: false,
+                maskConfig = ops.filterIsInstance<EditOperation.MaskMain>().lastOrNull()?.maskConfig ?: EditOperation.MaskConfig()
+            )
+            val newPrimary = currentMergeItems.removeAt(0)
+            newSourceUri = newPrimary.uri
+
+            ops.removeAll { it is EditOperation.Trim || it is EditOperation.SpeedMain || it is EditOperation.ReverseMain || it is EditOperation.MirrorMain || it is EditOperation.MaskMain }
+
+            ops.add(0, EditOperation.Trim(newPrimary.trimStartMs, newPrimary.trimEndMs))
+            if (newPrimary.speed != 1.0f) {
+                ops.add(EditOperation.SpeedMain(newPrimary.speed, newPrimary.proxyUri))
+            }
+            if (newPrimary.isReversed) {
+                ops.add(EditOperation.ReverseMain(true, newPrimary.proxyUri))
+            }
+            if (newPrimary.isMirrored) {
+                ops.add(EditOperation.MirrorMain(true))
+            }
+            if (newPrimary.maskConfig.shape != EditOperation.MaskShape.NONE) {
+                ops.add(EditOperation.MaskMain(newPrimary.maskConfig))
+            }
+
+            currentMergeItems.add(0, oldPrimary)
+            val newMergeOp = EditOperation.Merge(currentMergeItems)
+            val mIdx = ops.indexOfFirst { it is EditOperation.Merge }
+            if (mIdx != -1) {
+                ops[mIdx] = newMergeOp
+            } else {
+                ops.add(newMergeOp)
+            }
+        } else {
+            // Swapping within Merge items (minIdx - 1 and maxIdx - 1)
+            val targetA = minIdx - 1
+            val targetB = maxIdx - 1
+            if (targetA in 0 until currentMergeItems.size && targetB in 0 until currentMergeItems.size) {
+                val temp = currentMergeItems[targetA]
+                currentMergeItems[targetA] = currentMergeItems[targetB]
+                currentMergeItems[targetB] = temp
+                val newMergeOp = EditOperation.Merge(currentMergeItems)
+                ops[mergeIdx] = newMergeOp
+            } else {
+                return@MutateProjectCommand project
+            }
+        }
+
+        // Remap operations:
+        // 1. Transitions touching the swapped clips (boundaries minIdx-1, minIdx, maxIdx)
+        //    are cleared because clip adjacency has changed completely.
+        // 2. Per-clip effects (MuteClip, ColorFilter, Adjust) swap their indices between minIdx and maxIdx.
+        val finalOps = mutableListOf<EditOperation>()
+        for (op in ops) {
+            when (op) {
+                is EditOperation.Transition -> {
+                    if (op.index in (minIdx - 1)..maxIdx) {
+                        // Clear transition touching swapped boundary
+                    } else {
+                        finalOps.add(op)
+                    }
+                }
+                is EditOperation.MuteClip -> {
+                    if (op.index == minIdx) finalOps.add(op.copy(index = maxIdx))
+                    else if (op.index == maxIdx) finalOps.add(op.copy(index = minIdx))
+                    else finalOps.add(op)
+                }
+                is EditOperation.ColorFilter -> {
+                    if (op.index == minIdx) finalOps.add(op.copy(index = maxIdx))
+                    else if (op.index == maxIdx) finalOps.add(op.copy(index = minIdx))
+                    else finalOps.add(op)
+                }
+                is EditOperation.Adjust -> {
+                    if (op.index == minIdx) finalOps.add(op.copy(index = maxIdx))
+                    else if (op.index == maxIdx) finalOps.add(op.copy(index = minIdx))
+                    else finalOps.add(op)
+                }
+                else -> finalOps.add(op)
+            }
+        }
+
+        project.copy(
+            sourceUri = newSourceUri,
+            sourceName = newSourceUri.lastPathSegment ?: project.sourceName,
+            operations = finalOps
+        )
+    })
+}
+
 fun VideoEditingViewModel.setAdjust(
     index: Int, brightness: Int = 0, contrast: Int = 0, warmth: Int = 0, shadow: Int = 0,
     highlights: Int = 0, saturation: Int = 0, exposure: Int = 0, sharpen: Int = 0, vignette: Int = 0
