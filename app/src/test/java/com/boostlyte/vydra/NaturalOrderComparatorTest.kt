@@ -113,4 +113,43 @@ class NaturalOrderComparatorTest {
             fileNames
         )
     }
+
+    @Test
+    fun testNaturalOrderComparator_userPatterns() {
+        // Pattern 1: scene_001, scene_002, scene_010, scene_100
+        val p1 = listOf("scene_010.jpg", "scene_002.jpg", "scene_100.jpg", "scene_001.jpg")
+        assertEquals(
+            listOf("scene_001.jpg", "scene_002.jpg", "scene_010.jpg", "scene_100.jpg"),
+            p1.sortedWith(NaturalOrderComparator)
+        )
+
+        // Pattern 2: scene_01, scene_02, scene_10
+        val p2 = listOf("scene_10.png", "scene_01.png", "scene_02.png")
+        assertEquals(
+            listOf("scene_01.png", "scene_02.png", "scene_10.png"),
+            p2.sortedWith(NaturalOrderComparator)
+        )
+
+        // Pattern 3: 001, 002, 010, 100 (numeric-only with 3 digits)
+        val p3 = listOf("010.jpg", "002.jpg", "100.jpg", "001.jpg")
+        assertEquals(
+            listOf("001.jpg", "002.jpg", "010.jpg", "100.jpg"),
+            p3.sortedWith(NaturalOrderComparator)
+        )
+
+        // Pattern 4: 01, 02, 10 (numeric-only with 2 digits)
+        val p4 = listOf("10.jpg", "01.jpg", "02.jpg")
+        assertEquals(
+            listOf("01.jpg", "02.jpg", "10.jpg"),
+            p4.sortedWith(NaturalOrderComparator)
+        )
+
+        // Pattern 5: unpadded single digits mixed with double digits: 1, 2, 9, 10, 20
+        val p5 = listOf("10.png", "2.png", "1.png", "20.png", "9.png")
+        assertEquals(
+            listOf("1.png", "2.png", "9.png", "10.png", "20.png"),
+            p5.sortedWith(NaturalOrderComparator)
+        )
+    }
 }
+

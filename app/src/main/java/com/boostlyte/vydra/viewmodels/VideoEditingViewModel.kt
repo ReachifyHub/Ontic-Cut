@@ -200,7 +200,7 @@ class VideoEditingViewModel : ViewModel() {
     private fun buildDrawtextExpr(op: EditOperation.AddText, fontFilePath: String?): String {
         val escapedText = op.text
             .replace("\\", "\\\\")
-            .replace("'", "\\\\'")
+            .replace("'", "\\'")
             .replace(":", "\\:")
 
         val fontToUse = op.fontPath ?: fontFilePath
@@ -243,8 +243,9 @@ class VideoEditingViewModel : ViewModel() {
         } else ""
         val alignPart = if (op.textAlign.isNotEmpty()) ":text_align=${op.textAlign}" else ""
         val lineSpacingPart = if (op.lineSpacing != 0f) ":line_spacing=${op.lineSpacing.toInt()}" else ""
+        val fontColor = formatColorForFFmpeg(op.color)
         
-        return "drawtext=${fontPart}text='$escapedText':fontcolor='${formatColorForFFmpeg(op.color)}':fontsize=${op.fontSize}:$positionPart$enablePart$alphaPart$shadowPart$alignPart$lineSpacingPart"
+        return "drawtext=expansion=none:${fontPart}text='$escapedText':fontcolor=$fontColor:fontsize=${op.fontSize}:$positionPart$enablePart$alphaPart$shadowPart$alignPart$lineSpacingPart"
     }
 
     private fun buildFFmpegMaskAlphaExpr(
@@ -356,9 +357,9 @@ class VideoEditingViewModel : ViewModel() {
         val startSec = maxOf(0L, startTimeMs ?: 0L) / 1000.0
         return if (endTimeMs != null) {
             val endSec = maxOf(0L, endTimeMs) / 1000.0
-            ":enable='between(t\\,$startSec\\,$endSec)'"
+            ":enable='between(t,$startSec,$endSec)'"
         } else {
-            ":enable='gte(t\\,$startSec)'"
+            ":enable='gte(t,$startSec)'"
         }
     }
 
@@ -582,7 +583,7 @@ class VideoEditingViewModel : ViewModel() {
                         val totalBlockHeight = lines.size * lineSpacing
                         val enablePart = buildEnableExpr(cue.startTimeMs, cue.endTimeMs)
                         
-                        val fontToUse = op.fontPath ?: fontFilePath
+                        val fontToUse = if (!op.fontPath.isNullOrBlank() && java.io.File(op.fontPath).exists()) op.fontPath else fontFilePath
                         val fontPart = if (!fontToUse.isNullOrBlank()) {
                             val escapedFont = fontToUse
                                 .replace("\\", "\\\\")
@@ -596,7 +597,7 @@ class VideoEditingViewModel : ViewModel() {
                         for ((lineIdx, lineText) in lines.withIndex()) {
                             val escapedLine = lineText
                                 .replace("\\", "\\\\")
-                                .replace("'", "\\\\'")
+                                .replace("'", "\\'")
                                 .replace(":", "\\:")
 
                             val lineOffset = lineIdx * lineSpacing
@@ -618,8 +619,14 @@ class VideoEditingViewModel : ViewModel() {
                                 }
                             }
 
-                            val boxPart = ":box=1:boxcolor='0x00000080':boxborderw=$boxBorderW"
-                            val filterExpr = "drawtext=${fontPart}text='$escapedLine':fontcolor='white':fontsize=${scaledFontSize}:${posPart}${boxPart}$enablePart"
+                            val boxColor = if (op.backgroundColor != "none" && op.backgroundColor.isNotBlank()) {
+                                formatColorForFFmpeg(op.backgroundColor)
+                            } else {
+                                "black@0.5"
+                            }
+                            val boxPart = ":box=1:boxcolor=$boxColor:boxborderw=$boxBorderW"
+                            val fontColor = formatColorForFFmpeg(op.color)
+                            val filterExpr = "drawtext=expansion=none:${fontPart}text='$escapedLine':fontcolor=$fontColor:fontsize=${scaledFontSize}:${posPart}${boxPart}$enablePart"
                             
                             val nextLabel = "[v$stageIndex]"
                             stages.add("$currentLabel$filterExpr$nextLabel")
@@ -770,6 +777,24 @@ class VideoEditingViewModel : ViewModel() {
         // ── Unified Input Indexing ────────────────────────────────────────────
         val cmd = StringBuilder("-y") // Always overwrite output — prevents silent failure on retry
         var inputIndex = 0
+
+        val effectiveFontPath = if (!fontFilePath.isNullOrBlank() && java.io.File(fontFilePath).exists()) {
+            fontFilePath
+        } else if (context != null) {
+            try {
+                val f = java.io.File(context.cacheDir, "Roboto-Regular.ttf")
+                if (!f.exists() || f.length() == 0L) {
+                    context.assets.open("fonts/Roboto-Regular.ttf").use { input ->
+                        f.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+                f.absolutePath
+            } catch (e: Exception) {
+                fontFilePath
+            }
+        } else {
+            fontFilePath
+        }
 
         /** Resolve a URI to a real filesystem path FFmpeg can read.
          *  content:// URIs are copied to cacheDir; file:// or plain paths are used directly. */
@@ -1111,9 +1136,9 @@ class VideoEditingViewModel : ViewModel() {
                     val vOut = "[ccat${concatLabelCounter}v]"
                     val aOut = "[ccat${concatLabelCounter}a]"
                     val inputs = clipIndices.joinToString("") { "[norm$it][anorm$it]" }
-                    // concat then normalize timestamps for proper xfade offsets
+                    // concat then ensure consistent format/fps
                     filterParts.add("${inputs}concat=n=${clipIndices.size}:v=1:a=1${vOut}${aOut}")
-                    filterParts.add("${vOut}settb=1/30,setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm${concatLabelCounter}v]")
+                    filterParts.add("${vOut}format=yuv420p,fps=30[norm${concatLabelCounter}v]")
                     filterParts.add("${aOut}asetpts=PTS-STARTPTS[anorm${concatLabelCounter}a]")
                     val totalDur = clipIndices.sumOf { durationsArray[it] }
                     concatLabelCounter++
@@ -1142,7 +1167,7 @@ class VideoEditingViewModel : ViewModel() {
                             val vOut = "[ccat${concatLabelCounter}v]"
                             val aOut = "[ccat${concatLabelCounter}a]"
                             filterParts.add("${currentStream.vLabel}${currentStream.aLabel}${leftStream.vLabel}${leftStream.aLabel}concat=n=2:v=1:a=1${vOut}${aOut}")
-                            filterParts.add("${vOut}settb=1/30,setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm${concatLabelCounter}v]")
+                            filterParts.add("${vOut}format=yuv420p,fps=30[norm${concatLabelCounter}v]")
                             filterParts.add("${aOut}asetpts=PTS-STARTPTS[anorm${concatLabelCounter}a]")
                             concatLabelCounter++
                             StreamInfo("[norm${concatLabelCounter - 1}v]", "[anorm${concatLabelCounter - 1}a]", currentStream.durationSec + leftStream.durationSec)
@@ -1150,11 +1175,12 @@ class VideoEditingViewModel : ViewModel() {
                     }
 
                     val rawTransDuration = transOp.durationMs / 1000.0
-                    val transDuration = rawTransDuration.coerceAtMost(baseStream.durationSec).coerceAtMost(durationsArray[gapIdx + 1])
+                    val maxSafeDuration = minOf(baseStream.durationSec - 0.05, durationsArray[gapIdx + 1] - 0.05).coerceAtLeast(0.1)
+                    val transDuration = rawTransDuration.coerceIn(0.1, maxSafeDuration)
                     val offset = (baseStream.durationSec - transDuration).coerceAtLeast(0.0)
 
-                    val rawXfvOut = "[xfv${transitionLabelCounter}_raw]"
-                    val rawXfaOut = "[xfa${transitionLabelCounter}_raw]"
+                    val rawXfvOut = "[raw_xfv${transitionLabelCounter}]"
+                    val rawXfaOut = "[raw_xfa${transitionLabelCounter}]"
                     val normXfvOut = "[norm_xfv${transitionLabelCounter}]"
                     val normXfaOut = "[norm_xfa${transitionLabelCounter}]"
                     val nextVLabel = "[norm${gapIdx + 1}]"
@@ -1176,9 +1202,12 @@ class VideoEditingViewModel : ViewModel() {
                         else -> if (validXfadeTransitions.contains(rawType)) rawType else "fade"
                     }
 
-                    filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedTransType}:duration=${transDuration}:offset=${offset}${rawXfvOut}")
-                    filterParts.add("${baseStream.aLabel}${nextALabel}acrossfade=d=${transDuration}:c1=tri:c2=tri${rawXfaOut}")
-                    filterParts.add("${rawXfvOut}settb=1/30,setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p${normXfvOut}")
+                    val formattedDuration = String.format(java.util.Locale.US, "%.3f", transDuration)
+                    val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
+
+                    filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedTransType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
+                    filterParts.add("${baseStream.aLabel}${nextALabel}acrossfade=d=${formattedDuration}:c1=tri:c2=tri${rawXfaOut}")
+                    filterParts.add("${rawXfvOut}settb=1/30,setpts=N,fps=30,format=yuv420p${normXfvOut}")
                     filterParts.add("${rawXfaOut}asetpts=PTS-STARTPTS,aresample=async=1000${normXfaOut}")
 
                     val newDuration = offset + durationsArray[gapIdx + 1]
@@ -1247,7 +1276,7 @@ class VideoEditingViewModel : ViewModel() {
 
             val (sourceVideoStages, tempVideoLabel) = buildVideoFilterStages(
                 operations = videoOps,
-                fontFilePath = fontFilePath,
+                fontFilePath = effectiveFontPath,
                 inputLabel = currentVideoLabel,
                 imageInputIndices = imageInputIndices,
                 density = density,
@@ -1474,7 +1503,7 @@ class VideoEditingViewModel : ViewModel() {
         // ── Video filter stages (crop, text, image overlays) ──
         val (videoStages, finalVideoLabel) = buildVideoFilterStages(
             operations = videoOps,
-            fontFilePath = fontFilePath,
+            fontFilePath = effectiveFontPath,
             inputLabel = currentInputVideoLabel,
             imageInputIndices = imageInputIndices,
             density = density,

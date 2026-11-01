@@ -635,11 +635,20 @@ class MainActivity : AppCompatActivity() {
         Log.d("Navigation", "Navigating to editing screen with ${uris.size} media URI(s)")
         val firstUri = uris.first()
         val intent = Intent(this, VideoEditingActivity::class.java).apply {
+            data = firstUri
             putExtra("VIDEO_URI", firstUri)
             if (uris.size > 1) {
                 putParcelableArrayListExtra("EXTRA_MEDIA_URIS", ArrayList(uris.drop(1)))
             }
-            data = firstUri
+            try {
+                val clipData = android.content.ClipData.newUri(contentResolver, "media", firstUri)
+                for (u in uris.drop(1)) {
+                    clipData.addItem(android.content.ClipData.Item(u))
+                }
+                this.clipData = clipData
+            } catch (e: Exception) {
+                Log.w("Navigation", "Could not set clipData: ${e.message}")
+            }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(intent)

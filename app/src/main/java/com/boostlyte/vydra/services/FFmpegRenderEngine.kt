@@ -712,7 +712,7 @@ class FFmpegRenderEngine(private val context: Context) {
     ): String {
         val escapedText = text
             .replace("\\", "\\\\")
-            .replace("'", "\\\\'")
+            .replace("'", "\\'")
             .replace(":", "\\:")
 
         val fontPart = if (!fontFilePath.isNullOrBlank()) {
@@ -726,7 +726,7 @@ class FFmpegRenderEngine(private val context: Context) {
             ""
         }
 
-        return "drawtext=${fontPart}text='$escapedText':fontcolor=white:fontsize=$fontSize:$positionParam"
+        return "drawtext=expansion=none:${fontPart}text='$escapedText':fontcolor=white:fontsize=$fontSize:$positionParam"
     }
 
     private fun buildCropFilter(aspectRatio: String): String? = when (aspectRatio) {

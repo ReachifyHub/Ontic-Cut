@@ -82,4 +82,35 @@ class ExportAndSpeedTest {
             resolveErrorCode("LC-101", "Conversion failed")
         )
     }
+
+    @Test
+    fun testSubtitleDrawtextFilterFormat() {
+        val rawText = "It's 100% working!"
+        val escapedText = rawText
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace(":", "\\:")
+        
+        fun buildEnableExpr(startTimeMs: Long?, endTimeMs: Long?): String {
+            if (startTimeMs == null && endTimeMs == null) return ""
+            val startSec = maxOf(0L, startTimeMs ?: 0L) / 1000.0
+            return if (endTimeMs != null) {
+                val endSec = maxOf(0L, endTimeMs) / 1000.0
+                ":enable='between(t,$startSec,$endSec)'"
+            } else {
+                ":enable='gte(t,$startSec)'"
+            }
+        }
+
+        val enable = buildEnableExpr(1000L, 3500L)
+        val filterExpr = "drawtext=expansion=none:text='$escapedText':fontcolor=0xFFFFFFFF:fontsize=24:box=1:boxcolor=black@0.5:boxborderw=8$enable"
+
+        assertTrue("Must include expansion=none to prevent % crash", filterExpr.contains("expansion=none:"))
+        assertTrue("Apostrophe must be single-backslash escaped", filterExpr.contains("It\\'s"))
+        assertFalse("Must NOT contain triple-backslash", filterExpr.contains("\\\\\\'"))
+        assertTrue("Enable expr must use between(t,1.0,3.5)", filterExpr.contains(":enable='between(t,1.0,3.5)'"))
+        assertFalse("Must NOT contain backslash before comma in between expr", filterExpr.contains("\\,"))
+        assertTrue("Must have boxcolor without outer quotes", filterExpr.contains("boxcolor=black@0.5"))
+    }
 }
+

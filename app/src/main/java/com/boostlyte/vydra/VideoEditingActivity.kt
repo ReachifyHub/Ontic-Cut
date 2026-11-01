@@ -181,7 +181,10 @@ class VideoEditingActivity : AppCompatActivity() {
     private var primaryVideoAspectRatio: Float = 0f
     
     private var bgPreviewImageView: ImageView? = null
-    private var lastActiveClipIndexForBlur: Int = 0
+    private var lastActiveClipIndexForBlur: Int = -1
+    private var lastAppliedCanvasW = -1
+    private var lastAppliedCanvasH = -1
+    private var lastAppliedBaseRatio = -1f
     private var currentBlurJob: Job? = null
     
     private val activeExtractionUris = mutableSetOf<Uri>()
@@ -975,7 +978,7 @@ class VideoEditingActivity : AppCompatActivity() {
             val newH = bottom - top
             val oldW = oldRight - oldLeft
             val oldH = oldBottom - oldTop
-            if (newW > 0 && newH > 0 && (newW != oldW || newH != oldH)) {
+            if (newW > 0 && newH > 0 && (Math.abs(newW - oldW) > 2 || Math.abs(newH - oldH) > 2)) {
                 triggerCanvasLayoutUpdate()
             }
         }
@@ -2707,11 +2710,15 @@ class VideoEditingActivity : AppCompatActivity() {
                 // 1. Size canvasContainer to the cropped aspect ratio box only if changed
                 val canvasLp = canvasContainer.layoutParams as? FrameLayout.LayoutParams
                 if (canvasLp != null) {
-                    if (canvasLp.width != targetW || canvasLp.height != targetH || canvasLp.gravity != Gravity.CENTER) {
+                    val wDiff = Math.abs(canvasLp.width - targetW)
+                    val hDiff = Math.abs(canvasLp.height - targetH)
+                    if (wDiff > 1 || hDiff > 1 || canvasLp.gravity != Gravity.CENTER) {
                         canvasLp.width = targetW
                         canvasLp.height = targetH
                         canvasLp.gravity = Gravity.CENTER
                         canvasContainer.layoutParams = canvasLp
+                        lastAppliedCanvasW = targetW
+                        lastAppliedCanvasH = targetH
                     }
                 }
 
@@ -2814,22 +2821,27 @@ class VideoEditingActivity : AppCompatActivity() {
                     } else 16f / 9f
                 }
                 val containerRatio = containerWidth.toFloat() / containerHeight.toFloat()
-                var finalWidth = containerWidth
-                var finalHeight = containerHeight
-
-                if (baseVideoRatio > containerRatio) {
-                    finalHeight = (containerWidth / baseVideoRatio).toInt()
+                val (finalWidth, finalHeight) = if (baseVideoRatio > containerRatio) {
+                    val h = (containerWidth / baseVideoRatio).toInt().coerceAtMost(containerHeight)
+                    Pair(containerWidth, h)
                 } else {
-                    finalWidth = (containerHeight * baseVideoRatio).toInt()
+                    val w = (containerHeight * baseVideoRatio).toInt().coerceAtMost(containerWidth)
+                    Pair(w, containerHeight)
                 }
 
                 val canvasLp = canvasContainer.layoutParams as? FrameLayout.LayoutParams
                 if (canvasLp != null) {
-                    if (canvasLp.width != finalWidth || canvasLp.height != finalHeight || canvasLp.gravity != Gravity.CENTER) {
+                    val wDiff = Math.abs(canvasLp.width - finalWidth)
+                    val hDiff = Math.abs(canvasLp.height - finalHeight)
+                    val rDiff = Math.abs(baseVideoRatio - lastAppliedBaseRatio)
+                    if (wDiff > 1 || hDiff > 1 || rDiff > 0.01f || canvasLp.gravity != Gravity.CENTER) {
                         canvasLp.width = finalWidth
                         canvasLp.height = finalHeight
                         canvasLp.gravity = Gravity.CENTER
                         canvasContainer.layoutParams = canvasLp
+                        lastAppliedCanvasW = finalWidth
+                        lastAppliedCanvasH = finalHeight
+                        lastAppliedBaseRatio = baseVideoRatio
                     }
                 }
 
@@ -5806,12 +5818,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                     if (isImageUri(uri)) {
                         val ext = if (uri.path?.endsWith(".png", true) == true) ".png" else ".jpg"
-                        val itemUri = if (selectedVideoUris.size > 5) {
-                            uri
-                        } else {
-                            val cachedFile = copyContentUriToTempFile(uri, "merge_image", ext)
-                            if (cachedFile != null) Uri.fromFile(cachedFile) else uri
-                        }
+                        val cachedFile = copyContentUriToTempFile(uri, "merge_image", ext)
+                        val itemUri = if (cachedFile != null) Uri.fromFile(cachedFile) else uri
                         com.boostlyte.vydra.models.EditOperation.MergeItem(
                             uri = itemUri,
                             durationMs = 5000L,
@@ -5834,12 +5842,8 @@ class VideoEditingActivity : AppCompatActivity() {
                         }
                         val isImg = isImageUri(uri) || duration <= 0L
                         val itemDur = if (isImg) 5000L else duration
-                        val itemUri = if (selectedVideoUris.size > 5) {
-                            uri
-                        } else {
-                            val tempFile = copyContentUriToTempFile(uri, "merge_video", ".mp4")
-                            if (tempFile != null) Uri.fromFile(tempFile) else uri
-                        }
+                        val tempFile = if (isImg) copyContentUriToTempFile(uri, "merge_image", ".jpg") else copyContentUriToTempFile(uri, "merge_video", ".mp4")
+                        val itemUri = if (tempFile != null) Uri.fromFile(tempFile) else uri
                         com.boostlyte.vydra.models.EditOperation.MergeItem(
                             uri = itemUri,
                             durationMs = itemDur,
@@ -7324,13 +7328,13 @@ class VideoEditingActivity : AppCompatActivity() {
                                             transitionFramesCache[i] = Pair(bmpA, bmpB)
                                             transitionFramesLoading.remove(i)
                                             if (activeTransitionIndex == i) {
+                                                transitionPreviewOverlayView?.visibility = View.VISIBLE
                                                 transitionPreviewOverlayView?.updateTransition(transOp.type, prog, bmpA, bmpB)
                                             }
                                         }
                                     }
                                 }
-                                transitionPreviewOverlayView?.visibility = View.VISIBLE
-                                transitionPreviewOverlayView?.updateTransition(transOp.type, prog, null, null)
+                                transitionPreviewOverlayView?.visibility = View.GONE
                             }
                             activeTransitionIndex = i
                             break
@@ -8874,6 +8878,7 @@ class VideoEditingActivity : AppCompatActivity() {
         } else {
             keyframeContainer?.visibility = View.GONE
         }
+        preloadTransitionFrames()
 
         if (activeExtractionCount == 0 && isImportLoading) {
             isImportLoading = false
@@ -9823,7 +9828,7 @@ class VideoEditingActivity : AppCompatActivity() {
             } else {
                 extension
             }
-            val tempFile = File(cacheDir, "${prefix}_${System.currentTimeMillis()}$ext")
+            val tempFile = File(cacheDir, "${prefix}_${System.nanoTime()}_${(0..9999).random()}$ext")
             val inputStream = if (contentUri.scheme == "file") {
                 // file:// URIs (from fallback directory scanner) must be opened directly;
                 // ContentResolver cannot open them on Android 7+.
