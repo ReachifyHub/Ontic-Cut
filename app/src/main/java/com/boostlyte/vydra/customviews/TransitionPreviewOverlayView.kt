@@ -24,141 +24,239 @@ class TransitionPreviewOverlayView @JvmOverloads constructor(
             invalidate()
         }
 
+    private var bitmapA: Bitmap? = null
+    private var bitmapB: Bitmap? = null
     private var snapshotBitmap: Bitmap? = null
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val path = Path()
     private val srcRect = Rect()
     private val dstRect = RectF()
 
+    fun updateTransition(type: String, prog: Float, fromBitmap: Bitmap?, toBitmap: Bitmap?) {
+        this.transitionType = type.lowercase()
+        this.progress = prog.coerceIn(0f, 1f)
+        this.bitmapA = fromBitmap
+        this.bitmapB = toBitmap
+        this.snapshotBitmap = null
+        invalidate()
+    }
+
     fun updateTransition(type: String, prog: Float, bitmap: Bitmap?) {
         this.transitionType = type.lowercase()
         this.progress = prog.coerceIn(0f, 1f)
-        if (this.snapshotBitmap != bitmap) {
-            this.snapshotBitmap = bitmap
-        }
+        this.bitmapA = bitmap
+        this.bitmapB = null
+        this.snapshotBitmap = bitmap
         invalidate()
     }
 
     fun clearSnapshot() {
+        this.bitmapA = null
+        this.bitmapB = null
         this.snapshotBitmap = null
         this.transitionType = "none"
         this.progress = 0f
         invalidate()
     }
 
+    private fun drawFitBitmap(canvas: Canvas, bmp: Bitmap?, dst: RectF, alpha: Int = 255) {
+        if (bmp == null || bmp.isRecycled) return
+        try {
+            paint.reset()
+            paint.isAntiAlias = true
+            paint.isFilterBitmap = true
+            paint.alpha = alpha.coerceIn(0, 255)
+            srcRect.set(0, 0, bmp.width, bmp.height)
+            canvas.drawBitmap(bmp, srcRect, dst, paint)
+        } catch (_: Exception) {}
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        val bmp = snapshotBitmap
-        if (bmp == null || bmp.isRecycled || transitionType == "none" || progress <= 0f || progress >= 1f) {
+        val bmpA = if (bitmapA != null && !bitmapA!!.isRecycled) bitmapA else (if (snapshotBitmap != null && !snapshotBitmap!!.isRecycled) snapshotBitmap else null)
+        val bmpB = if (bitmapB != null && !bitmapB!!.isRecycled) bitmapB else null
+
+        if ((bmpA == null && bmpB == null) || transitionType == "none") {
             return
         }
 
         val w = width.toFloat()
         val h = height.toFloat()
-        if (w <= 0 || h <= 0) return
+        if (w <= 0f || h <= 0f) return
 
-        srcRect.set(0, 0, bmp.width, bmp.height)
         dstRect.set(0f, 0f, w, h)
 
-        paint.reset()
-        paint.isAntiAlias = true
-        paint.isFilterBitmap = true
+        if (progress <= 0f) {
+            drawFitBitmap(canvas, bmpA, dstRect, 255)
+            return
+        }
+        if (progress >= 1f) {
+            drawFitBitmap(canvas, bmpB ?: bmpA, dstRect, 255)
+            return
+        }
 
         when (transitionType) {
             "fade", "dissolve" -> {
-                paint.alpha = ((1f - progress) * 255).toInt()
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                drawFitBitmap(canvas, bmpB, dstRect, (progress * 255).toInt())
             }
             "fadeblack" -> {
-                val alpha = if (progress < 0.5f) progress * 2f else (1f - progress) * 2f
-                paint.color = Color.BLACK
-                paint.alpha = (alpha * 255).toInt()
-                canvas.drawRect(dstRect, paint)
+                if (progress < 0.5f) {
+                    drawFitBitmap(canvas, bmpA, dstRect, 255)
+                    val alpha = (progress * 2f * 255).toInt().coerceIn(0, 255)
+                    paint.reset()
+                    paint.color = Color.BLACK
+                    paint.alpha = alpha
+                    canvas.drawRect(dstRect, paint)
+                } else {
+                    drawFitBitmap(canvas, bmpB ?: bmpA, dstRect, 255)
+                    val alpha = ((1f - progress) * 2f * 255).toInt().coerceIn(0, 255)
+                    paint.reset()
+                    paint.color = Color.BLACK
+                    paint.alpha = alpha
+                    canvas.drawRect(dstRect, paint)
+                }
             }
             "fadewhite" -> {
-                val alpha = if (progress < 0.5f) progress * 2f else (1f - progress) * 2f
-                paint.color = Color.WHITE
-                paint.alpha = (alpha * 255).toInt()
-                canvas.drawRect(dstRect, paint)
+                if (progress < 0.5f) {
+                    drawFitBitmap(canvas, bmpA, dstRect, 255)
+                    val alpha = (progress * 2f * 255).toInt().coerceIn(0, 255)
+                    paint.reset()
+                    paint.color = Color.WHITE
+                    paint.alpha = alpha
+                    canvas.drawRect(dstRect, paint)
+                } else {
+                    drawFitBitmap(canvas, bmpB ?: bmpA, dstRect, 255)
+                    val alpha = ((1f - progress) * 2f * 255).toInt().coerceIn(0, 255)
+                    paint.reset()
+                    paint.color = Color.WHITE
+                    paint.alpha = alpha
+                    canvas.drawRect(dstRect, paint)
+                }
             }
             "wipeleft" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
                 canvas.save()
-                canvas.clipRect(0f, 0f, w * (1f - progress), h)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                canvas.clipRect(w * (1f - progress), 0f, w, h)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "wiperight" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
                 canvas.save()
-                canvas.clipRect(w * progress, 0f, w, h)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                canvas.clipRect(0f, 0f, w * progress, h)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "wipeup" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
                 canvas.save()
-                canvas.clipRect(0f, 0f, w, h * (1f - progress))
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                canvas.clipRect(0f, h * (1f - progress), w, h)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "wipedown" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
                 canvas.save()
-                canvas.clipRect(0f, h * progress, w, h)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                canvas.clipRect(0f, 0f, w, h * progress)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
-            "slideleft", "coverleft" -> {
+            "slideleft" -> {
                 canvas.save()
                 canvas.translate(-w * progress, 0f)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                canvas.restore()
+
+                canvas.save()
+                canvas.translate(w * (1f - progress), 0f)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
-            "slideright", "coverright" -> {
+            "slideright" -> {
                 canvas.save()
                 canvas.translate(w * progress, 0f)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                canvas.restore()
+
+                canvas.save()
+                canvas.translate(-w * (1f - progress), 0f)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "slideup" -> {
                 canvas.save()
                 canvas.translate(0f, -h * progress)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                canvas.restore()
+
+                canvas.save()
+                canvas.translate(0f, h * (1f - progress))
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "slidedown" -> {
                 canvas.save()
                 canvas.translate(0f, h * progress)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                canvas.restore()
+
+                canvas.save()
+                canvas.translate(0f, -h * (1f - progress))
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
+                canvas.restore()
+            }
+            "coverleft" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                canvas.save()
+                canvas.translate(w * (1f - progress), 0f)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
+                canvas.restore()
+            }
+            "coverright" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                canvas.save()
+                canvas.translate(-w * (1f - progress), 0f)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "circlecrop" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
                 canvas.save()
                 val maxRadius = Math.hypot((w / 2).toDouble(), (h / 2).toDouble()).toFloat()
-                val radius = maxRadius * (1f - progress)
+                val radius = maxRadius * progress
                 path.reset()
                 path.addCircle(w / 2f, h / 2f, radius, Path.Direction.CW)
                 canvas.clipPath(path)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "rectcrop" -> {
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
                 canvas.save()
-                val halfW = (w / 2f) * (1f - progress)
-                val halfH = (h / 2f) * (1f - progress)
+                val halfW = (w / 2f) * progress
+                val halfH = (h / 2f) * progress
                 canvas.clipRect(w / 2f - halfW, h / 2f - halfH, w / 2f + halfW, h / 2f + halfH)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpB, dstRect, 255)
                 canvas.restore()
             }
             "zoomin" -> {
                 canvas.save()
-                val scale = 1f + progress * 0.4f
-                paint.alpha = ((1f - progress) * 255).toInt()
-                canvas.scale(scale, scale, w / 2f, h / 2f)
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                val scaleA = 1f + progress * 0.2f
+                canvas.scale(scaleA, scaleA, w / 2f, h / 2f)
+                drawFitBitmap(canvas, bmpA, dstRect, ((1f - progress) * 255).toInt())
+                canvas.restore()
+
+                canvas.save()
+                val scaleB = 0.8f + progress * 0.2f
+                canvas.scale(scaleB, scaleB, w / 2f, h / 2f)
+                drawFitBitmap(canvas, bmpB, dstRect, (progress * 255).toInt())
                 canvas.restore()
             }
             else -> {
-                paint.alpha = ((1f - progress) * 255).toInt()
-                canvas.drawBitmap(bmp, srcRect, dstRect, paint)
+                drawFitBitmap(canvas, bmpA, dstRect, 255)
+                drawFitBitmap(canvas, bmpB, dstRect, (progress * 255).toInt())
             }
         }
     }

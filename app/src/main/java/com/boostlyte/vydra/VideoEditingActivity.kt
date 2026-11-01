@@ -156,7 +156,10 @@ class VideoEditingActivity : AppCompatActivity() {
     private var textOverlayView: com.boostlyte.vydra.customviews.TextOverlayView? = null
     private var transitionPreviewOverlayView: com.boostlyte.vydra.customviews.TransitionPreviewOverlayView? = null
     private var activeTransitionIndex: Int = -1
-    private var cachedTransitionBitmap: android.graphics.Bitmap? = null
+    private val transitionFramesCache = mutableMapOf<Int, Pair<Bitmap?, Bitmap?>>()
+    private val transitionFramesLoading = mutableSetOf<Int>()
+    private val currentDuckingFactors = mutableMapOf<String, Float>()
+    private var lastDuckingUpdateTimeMs: Long = 0L
 
     // ViewModel and Services
     private lateinit var viewModel: VideoEditingViewModel
@@ -2530,6 +2533,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     updateCanvasBackgroundPreview()
                     updateCanvasRatioButtonState()
                     renderTracks(project)
+                    preloadTransitionFrames()
                     updateLayerReorderButtons()
                 }
             }
@@ -7138,32 +7142,44 @@ class VideoEditingActivity : AppCompatActivity() {
             if (transitionOps.isNotEmpty() && sequenceItems.size > 1) {
                 var accumBoundaryMs = 0L
                 for (i in 0 until sequenceItems.size - 1) {
-                    accumBoundaryMs += sequenceItems[i].trimmedDurationMs
+                    val clipA = sequenceItems[i]
+                    val clipB = sequenceItems[i + 1]
+                    accumBoundaryMs += clipA.trimmedDurationMs
                     val transOp = transitionOps.find { it.index == i }
-                    if (transOp != null && transOp.type.lowercase() != "none") {
-                        val windowMs = 1000L
+                    if (transOp != null && !transOp.type.equals("none", ignoreCase = true) && transOp.durationMs > 0L) {
+                        val maxDuration = minOf(clipA.trimmedDurationMs, clipB.trimmedDurationMs)
+                        val windowMs = transOp.durationMs.coerceIn(100L, maxDuration.coerceAtLeast(100L))
                         val halfWindow = windowMs / 2
                         val transStart = accumBoundaryMs - halfWindow
-                        val transEnd = accumBoundaryMs + halfWindow
+                        val transEnd = accumBoundaryMs + (windowMs - halfWindow)
 
                         if (currentGlobalPos in transStart..transEnd) {
                             transitionActiveThisFrame = true
-                            val prog = (currentGlobalPos - transStart).toFloat() / windowMs.toFloat()
+                            val prog = ((currentGlobalPos - transStart).toFloat() / windowMs.toFloat()).coerceIn(0f, 1f)
 
-                            if (activeTransitionIndex != i || cachedTransitionBitmap == null || cachedTransitionBitmap?.isRecycled == true) {
-                                activeTransitionIndex = i
-                                val textureView = findTextureView(playerView)
-                                if (textureView != null && textureView.width > 0 && textureView.height > 0) {
-                                    try {
-                                        cachedTransitionBitmap = textureView.getBitmap(textureView.width / 2, textureView.height / 2)
-                                    } catch (e: Exception) {
-                                        cachedTransitionBitmap = null
+                            val cached = transitionFramesCache[i]
+                            if (cached != null) {
+                                transitionPreviewOverlayView?.visibility = View.VISIBLE
+                                transitionPreviewOverlayView?.updateTransition(transOp.type, prog, cached.first, cached.second)
+                            } else {
+                                if (!transitionFramesLoading.contains(i)) {
+                                    transitionFramesLoading.add(i)
+                                    lifecycleScope.launch(Dispatchers.IO) {
+                                        val bmpA = extractClipFrame(clipA, isEnd = true)
+                                        val bmpB = extractClipFrame(clipB, isEnd = false)
+                                        withContext(Dispatchers.Main) {
+                                            transitionFramesCache[i] = Pair(bmpA, bmpB)
+                                            transitionFramesLoading.remove(i)
+                                            if (activeTransitionIndex == i) {
+                                                transitionPreviewOverlayView?.updateTransition(transOp.type, prog, bmpA, bmpB)
+                                            }
+                                        }
                                     }
                                 }
+                                transitionPreviewOverlayView?.visibility = View.VISIBLE
+                                transitionPreviewOverlayView?.updateTransition(transOp.type, prog, null, null)
                             }
-
-                            transitionPreviewOverlayView?.visibility = View.VISIBLE
-                            transitionPreviewOverlayView?.updateTransition(transOp.type, prog, cachedTransitionBitmap)
+                            activeTransitionIndex = i
                             break
                         }
                     }
@@ -7173,8 +7189,6 @@ class VideoEditingActivity : AppCompatActivity() {
             if (!transitionActiveThisFrame) {
                 if (activeTransitionIndex != -1) {
                     activeTransitionIndex = -1
-                    cachedTransitionBitmap?.recycle()
-                    cachedTransitionBitmap = null
                     transitionPreviewOverlayView?.clearSnapshot()
                     transitionPreviewOverlayView?.visibility = View.GONE
                 }
@@ -7234,6 +7248,7 @@ class VideoEditingActivity : AppCompatActivity() {
         val totalSeqDuration = getTotalSequenceDuration()
         val audioOps = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio>()
         val isMasterMuted = if (::player.isInitialized) player.volume == 0f else false
+        val isMainVideoMuted = project.operations.any { it is com.boostlyte.vydra.models.EditOperation.MuteAudio }
 
         // Clean up removed audio players
         val activeOpIds = audioOps.map { it.id }.toSet()
@@ -7243,8 +7258,14 @@ class VideoEditingActivity : AppCompatActivity() {
             if (entry.key !in activeOpIds) {
                 entry.value.release()
                 iter.remove()
+                currentDuckingFactors.remove(entry.key)
             }
         }
+
+        val now = System.currentTimeMillis()
+        val dt = if (lastDuckingUpdateTimeMs > 0L) (now - lastDuckingUpdateTimeMs).coerceIn(1L, 200L) else 50L
+        lastDuckingUpdateTimeMs = now
+        val maxDuckingStep = dt.toFloat() / 100f // 100ms smooth attack/release ramp
 
         for (op in audioOps) {
             val bgPlayer = bgAudioPlayerMap.getOrPut(op.id) {
@@ -7260,15 +7281,52 @@ class VideoEditingActivity : AppCompatActivity() {
                 currentAudioVolumeOverride ?: audioEditingToolbar?.findViewById<com.google.android.material.slider.Slider>(R.id.audioVolumeSlider)?.value
             } else null
             val rawVol = tempOverride ?: op.volume
-            val effectiveVol = if (isMasterMuted) 0f else rawVol.coerceIn(0f, 1f)
-            if (bgPlayer.volume != effectiveVol) {
-                bgPlayer.volume = effectiveVol
-            }
 
             val aStart = op.startTimeMs ?: 0L
             val aEnd = op.endTimeMs ?: totalSeqDuration
+            val offsetInOp = (globalPos - aStart).coerceAtLeast(0L)
+            val remainingInOp = (aEnd - globalPos).coerceAtLeast(0L)
+
+            // Audio Fade In / Fade Out preview calculation
+            val fadeInMult = if (op.fadeInDurationMs > 0L) {
+                (offsetInOp.toFloat() / op.fadeInDurationMs.toFloat()).coerceIn(0f, 1f)
+            } else {
+                1.0f
+            }
+            val fadeOutMult = if (op.fadeOutDurationMs > 0L) {
+                (remainingInOp.toFloat() / op.fadeOutDurationMs.toFloat()).coerceIn(0f, 1f)
+            } else {
+                1.0f
+            }
+            val fadeFactor = (fadeInMult * fadeOutMult).coerceIn(0f, 1f)
+
+            // Audio Ducking preview calculation:
+            // Check if main video player or other non-ducked audio track is active and playing
+            val isMainAudioPlaying = isPlaying && (
+                (::player.isInitialized && player.isPlaying && player.volume > 0f && !isMainVideoMuted) ||
+                audioOps.any { other ->
+                    other.id != op.id && !other.ducking &&
+                    (bgAudioPlayerMap[other.id]?.isPlaying == true) &&
+                    (bgAudioPlayerMap[other.id]?.volume ?: 0f) > 0f
+                }
+            )
+            val targetDucking = if (op.ducking && isMainAudioPlaying) 0.2f else 1.0f
+            val currentDucking = currentDuckingFactors.getOrPut(op.id) { 1.0f }
+            val smoothedDucking = if (currentDucking < targetDucking) {
+                (currentDucking + maxDuckingStep).coerceAtMost(targetDucking)
+            } else if (currentDucking > targetDucking) {
+                (currentDucking - maxDuckingStep).coerceAtLeast(targetDucking)
+            } else {
+                targetDucking
+            }
+            currentDuckingFactors[op.id] = smoothedDucking
+
+            val effectiveVol = if (isMasterMuted) 0f else (rawVol * fadeFactor * smoothedDucking).coerceIn(0f, 1f)
+            if (kotlin.math.abs(bgPlayer.volume - effectiveVol) > 0.005f) {
+                bgPlayer.volume = effectiveVol
+            }
+
             if (globalPos in aStart..aEnd) {
-                val offsetInOp = globalPos - aStart
                 val targetAudioMs = op.internalStartMs + offsetInOp
                 val maxAudioMs = if (op.internalEndMs > 0) op.internalEndMs else (if (op.originalDurationMs > 0) op.originalDurationMs else Long.MAX_VALUE)
                 if (targetAudioMs < maxAudioMs) {
@@ -7304,6 +7362,108 @@ class VideoEditingActivity : AppCompatActivity() {
     private fun releaseAllBgAudio() {
         bgAudioPlayerMap.values.forEach { it.release() }
         bgAudioPlayerMap.clear()
+        currentDuckingFactors.clear()
+    }
+
+    private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int = 720, reqHeight: Int = 1280): Bitmap? {
+        return try {
+            val resolver = applicationContext.contentResolver
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            val streamForBounds = resolver.openInputStream(uri)
+                ?: if (uri.scheme == "file") java.io.FileInputStream(uri.path ?: "") else null
+            streamForBounds?.use { BitmapFactory.decodeStream(it, null, options) }
+
+            var inSampleSize = 1
+            if (options.outHeight > reqHeight || options.outWidth > reqWidth) {
+                val halfHeight = options.outHeight / 2
+                val halfWidth = options.outWidth / 2
+                while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
+                    inSampleSize *= 2
+                }
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize
+                inPreferredConfig = Bitmap.Config.RGB_565
+            }
+            val streamForDecode = resolver.openInputStream(uri)
+                ?: if (uri.scheme == "file") java.io.FileInputStream(uri.path ?: "") else null
+            streamForDecode?.use { BitmapFactory.decodeStream(it, null, decodeOptions) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decode sampled bitmap from uri $uri: ${e.message}")
+            null
+        }
+    }
+
+    private fun extractVideoFrame(uri: Uri, timeMs: Long, reqWidth: Int = 720, reqHeight: Int = 1280): Bitmap? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            if (uri.scheme == "content") {
+                retriever.setDataSource(applicationContext, uri)
+            } else {
+                val path = uri.path ?: uri.toString()
+                retriever.setDataSource(path)
+            }
+            val timeUs = timeMs * 1000L
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                retriever.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, reqWidth, reqHeight)
+                    ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } else {
+                retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to extract video frame at $timeMs ms from $uri: ${e.message}")
+            null
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun extractClipFrame(item: com.boostlyte.vydra.models.EditOperation.MergeItem, isEnd: Boolean): Bitmap? {
+        val isImg = item.isImage || isImageUri(item.uri)
+        return if (isImg) {
+            decodeSampledBitmapFromUri(item.uri)
+        } else {
+            val targetMs = if (isEnd) {
+                (item.trimEndMs.coerceAtLeast(60L) - 40L).coerceAtLeast(item.trimStartMs)
+            } else {
+                item.trimStartMs.coerceAtLeast(0L)
+            }
+            val targetUri = item.proxyUri ?: item.uri
+            extractVideoFrame(targetUri, targetMs)
+        }
+    }
+
+    private fun invalidateTransitionCache() {
+        transitionFramesCache.clear()
+        transitionFramesLoading.clear()
+    }
+
+    private fun preloadTransitionFrames() {
+        val project = viewModel.project.value ?: return
+        val transitionOps = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>()
+        if (transitionOps.isEmpty()) return
+        val sequenceItems = getSequenceItems()
+        if (sequenceItems.size < 2) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            for (transOp in transitionOps) {
+                val i = transOp.index
+                if (i in 0 until sequenceItems.size - 1 && !transitionFramesCache.containsKey(i)) {
+                    val clipA = sequenceItems[i]
+                    val clipB = sequenceItems[i + 1]
+                    val bmpA = extractClipFrame(clipA, isEnd = true)
+                    val bmpB = extractClipFrame(clipB, isEnd = false)
+                    withContext(Dispatchers.Main) {
+                        transitionFramesCache[i] = Pair(bmpA, bmpB)
+                    }
+                }
+            }
+        }
     }
 
     // Update your existing Runnable to include the text display update
@@ -8718,6 +8878,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     viewModel.addTransitionOperation(idx, transType, durationMs)
                 }
             }
+            invalidateTransitionCache()
+            preloadTransitionFrames()
         }
 
         val sliderDuration = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderTransitionDuration)
