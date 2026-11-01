@@ -33,6 +33,7 @@ class LegalActivity : AppCompatActivity() {
         setContentView(R.layout.activity_legal)
 
         val btnBack = findViewById<ImageButton>(R.id.btnLegalBack)
+        val btnOpenWeb = findViewById<ImageButton>(R.id.btnLegalOpenWeb)
         val tvTitle = findViewById<TextView>(R.id.tvLegalTitle)
         val tvContent = findViewById<TextView>(R.id.tvLegalContent)
         val cardHighlights = findViewById<View>(R.id.cardLegalHighlights)
@@ -42,6 +43,15 @@ class LegalActivity : AppCompatActivity() {
         }
 
         val docType = intent.getStringExtra(EXTRA_DOC_TYPE) ?: DOC_PRIVACY_POLICY
+
+        btnOpenWeb.setOnClickListener {
+            val targetUrl = if (docType == DOC_TERMS_OF_USE) {
+                com.boostlyte.vydra.utils.AppUrls.TERMS_OF_SERVICE_URL
+            } else {
+                com.boostlyte.vydra.utils.AppUrls.PRIVACY_POLICY_URL
+            }
+            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, targetUrl)
+        }
 
         if (docType == DOC_TERMS_OF_USE) {
             tvTitle.text = getString(R.string.str_terms_of_use)

@@ -2,14 +2,30 @@ package com.boostlyte.vydra.utils
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
+import androidx.browser.customtabs.CustomTabsIntent
 import java.net.URLEncoder
 
 /**
- * Central URLs configuration for external community, support, and manual credit purchase links.
+ * Central URLs configuration for external community, support, legal, updates, and credit purchase links.
  */
 object AppUrls {
+
+    /** Official Privacy Policy URL */
+    const val PRIVACY_POLICY_URL = "https://vydra-editor.netlify.app/privacy"
+
+    /** Official Terms of Service URL */
+    const val TERMS_OF_SERVICE_URL = "https://vydra-editor.netlify.app/terms"
+
+    /** Official Bug reporting URL */
+    const val BUG_REPORT_URL = "https://vydra-editor.netlify.app/bug-report"
+
+    /** In-app update manifest endpoint */
+    const val UPDATE_MANIFEST_URL = "https://vydra-editor.netlify.app/update.json"
 
     /** Official Vydra WhatsApp Community group link */
     const val WHATSAPP_COMMUNITY_URL = "https://chat.whatsapp.com/L5LJK0HMcbLI9zS3CX2S38"
@@ -17,11 +33,30 @@ object AppUrls {
     /** Direct WhatsApp purchase link for manual credit top-up */
     const val WHATSAPP_PURCHASE_URL = "https://wa.me/2348157683854"
 
-    /** Bug reporting URL */
-    const val BUG_REPORT_URL = "https://github.com/ReachifyHub/Ontic-Cut/issues"
+    /**
+     * Checks if the device has an active internet connection.
+     */
+    fun isNetworkAvailable(context: Context): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val network = cm.activeNetwork ?: return false
+                val capabilities = cm.getNetworkCapabilities(network) ?: return false
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } else {
+                @Suppress("DEPRECATION")
+                val networkInfo = cm.activeNetworkInfo
+                @Suppress("DEPRECATION")
+                networkInfo != null && networkInfo.isConnected
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     /**
-     * Opens a generic web URL safely with error handling.
+     * Opens a web URL safely using Chrome Custom Tabs with fallback to system browser.
+     * Validates network connectivity and handles errors gracefully with user-friendly toasts.
      */
     fun openSafeUrl(context: Context, url: String) {
         if (url.isBlank() || url.contains("REPLACE_ME")) {
@@ -29,13 +64,40 @@ object AppUrls {
             return
         }
 
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(intent)
+        // Verify internet connection
+        if (!isNetworkAvailable(context)) {
+            Toast.makeText(
+                context,
+                "No internet connection. Please check your network and try again.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val uri = try {
+            Uri.parse(url)
         } catch (e: Exception) {
-            Toast.makeText(context, "Unable to open link", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Invalid link format", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            // Attempt Chrome Custom Tabs first
+            val customTabsIntent = CustomTabsIntent.Builder()
+                .setShowTitle(true)
+                .build()
+            customTabsIntent.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            customTabsIntent.launchUrl(context, uri)
+        } catch (e: Exception) {
+            // Fallback to standard ACTION_VIEW browser intent
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (fallbackEx: Exception) {
+                Toast.makeText(context, "Unable to open link in browser", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 

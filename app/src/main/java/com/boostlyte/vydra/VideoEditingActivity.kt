@@ -4735,7 +4735,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
 
                 val mp4File = File(cacheDir, "freeze_vid_${System.nanoTime()}.mp4")
-                val cmd = "-y -loop 1 -i \"${pngFile.absolutePath}\" -c:v h264_mediacodec -t 3 -pix_fmt yuv420p -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" \"${mp4File.absolutePath}\""
+                val cmd = "-y -framerate 30 -loop 1 -t 3 -i \"${pngFile.absolutePath}\" -c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p -vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" \"${mp4File.absolutePath}\""
                 val renderResult = ffmpegEngine.executeCommand(cmd)
 
                 try {
@@ -6256,7 +6256,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
 
                     Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
-                    val totalDurationSecs = getTotalSequenceDuration() / 1000.0
+                    val calculatedDur = viewModel.getCalculatedExportDurationSec(this@VideoEditingActivity)
+                    val totalDurationSecs = if (calculatedDur > 0.0) calculatedDur else (getTotalSequenceDuration() / 1000.0)
                     Triple(ffmpegCommand, generatedConcat, totalDurationSecs)
                 }
 
@@ -8300,14 +8301,16 @@ class VideoEditingActivity : AppCompatActivity() {
         chunkDurationsMs = newChunkDurations
         val finalSource = com.google.android.exoplayer2.source.ConcatenatingMediaSource(*chunkedSources.toTypedArray())
 
-        val globalPos = getGlobalPosition()
-        val wasPlaying = player.isPlaying
-        
-        player.setMediaSource(finalSource)
-        player.prepare()
-        
-        seekToGlobalPosition(globalPos, force = true)
-        if (wasPlaying) player.play()
+        if (::player.isInitialized) {
+            val globalPos = getGlobalPosition()
+            val wasPlaying = player.isPlaying
+            
+            player.setMediaSource(finalSource)
+            player.prepare()
+            
+            seekToGlobalPosition(globalPos, force = true)
+            if (wasPlaying) player.play()
+        }
 
 
         val timelineWidth = (totalSequenceDuration * pixelsPerMs).toInt()

@@ -291,12 +291,12 @@ class MainActivity : AppCompatActivity() {
             com.boostlyte.vydra.transcription.SupabaseAuthManager.restoreSessionOnAppStart(this@MainActivity)
         }
 
-        // Set dynamic About version tag
+        // Set dynamic About version tag with BETA badge
         try {
             val pInfo = packageManager.getPackageInfo(packageName, 0)
-            binding.tvAboutVersion.text = "v${pInfo.versionName}"
+            binding.tvAboutVersion.text = "${pInfo.versionName} • BETA"
         } catch (e: Exception) {
-            binding.tvAboutVersion.text = "v0.1.0"
+            binding.tvAboutVersion.text = "v1.0.0-beta1 • BETA"
         }
 
         // About screen buttons
@@ -307,10 +307,10 @@ class MainActivity : AppCompatActivity() {
             com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.BUG_REPORT_URL)
         }
         binding.btnAboutPrivacyPolicy.setBounceClickListener {
-            LegalActivity.start(this, LegalActivity.DOC_PRIVACY_POLICY)
+            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.PRIVACY_POLICY_URL)
         }
         binding.btnAboutTermsOfUse.setBounceClickListener {
-            LegalActivity.start(this, LegalActivity.DOC_TERMS_OF_USE)
+            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.TERMS_OF_SERVICE_URL)
         }
         binding.btnAboutOpenSourceLicenses.setBounceClickListener {
             com.mikepenz.aboutlibraries.LibsBuilder()
@@ -320,10 +320,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Onboarding / Welcome Dialog
-        val isFirstLaunch = prefs.getBoolean("first_launch_v1", true)
+        val isFirstLaunch = prefs.getBoolean("first_launch_v1_0_0", true)
         if (isFirstLaunch) {
             showOnboardingDialog(prefs)
         }
+
+        // In-app updates: check once daily on launch
+        com.boostlyte.vydra.utils.UpdateChecker.checkOnceDaily(this)
 
         // Handle shared/intent videos
         handleIntent(intent)
@@ -450,27 +453,27 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateEncoderUI() {
         val prefs = getSharedPreferences("vydra_prefs", MODE_PRIVATE)
-        val defaultEncoder = prefs.getString("default_encoder", "hardware") ?: "hardware"
-        if (defaultEncoder == "software") {
-            binding.tvCurrentDefaultEncoder.text = getString(R.string.str_encoder_software)
-        } else {
+        val defaultEncoder = prefs.getString("default_encoder", "software") ?: "software"
+        if (defaultEncoder == "hardware") {
             binding.tvCurrentDefaultEncoder.text = getString(R.string.str_encoder_hardware)
+        } else {
+            binding.tvCurrentDefaultEncoder.text = getString(R.string.str_encoder_software)
         }
     }
 
     private fun showEncoderDialog() {
         val prefs = getSharedPreferences("vydra_prefs", MODE_PRIVATE)
-        val currentEncoder = prefs.getString("default_encoder", "hardware") ?: "hardware"
+        val currentEncoder = prefs.getString("default_encoder", "software") ?: "software"
         val options = arrayOf(
-            getString(R.string.str_encoder_hardware),
-            getString(R.string.str_encoder_software)
+            getString(R.string.str_encoder_software),
+            getString(R.string.str_encoder_hardware)
         )
-        val selectedIndex = if (currentEncoder == "software") 1 else 0
+        val selectedIndex = if (currentEncoder == "hardware") 1 else 0
 
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.str_default_encoder)
             .setSingleChoiceItems(options, selectedIndex) { dialog, which ->
-                val chosenEncoder = if (which == 1) "software" else "hardware"
+                val chosenEncoder = if (which == 1) "hardware" else "software"
                 prefs.edit().putString("default_encoder", chosenEncoder).apply()
                 updateEncoderUI()
                 dialog.dismiss()
@@ -700,13 +703,13 @@ class MainActivity : AppCompatActivity() {
         val tvVersion = view.findViewById<TextView>(R.id.tvOnboardingVersion)
         try {
             val pInfo = packageManager.getPackageInfo(packageName, 0)
-            tvVersion.text = "Version ${pInfo.versionName}"
+            tvVersion.text = "Version ${pInfo.versionName} • BETA"
         } catch (e: Exception) {
-            tvVersion.text = "Version 0.1.0"
+            tvVersion.text = "Version 1.0.0-beta1 • BETA"
         }
 
         view.findViewById<View>(R.id.btnOnboardingGetStarted)?.setBounceClickListener {
-            prefs.edit().putBoolean("first_launch_v1", false).apply()
+            prefs.edit().putBoolean("first_launch_v1_0_0", false).apply()
             dialog.dismiss()
         }
 
@@ -715,11 +718,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         view.findViewById<View>(R.id.tvOnboardingPrivacyPolicy)?.setOnClickListener {
-            LegalActivity.start(this, LegalActivity.DOC_PRIVACY_POLICY)
+            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.PRIVACY_POLICY_URL)
         }
 
         view.findViewById<View>(R.id.tvOnboardingTermsOfUse)?.setOnClickListener {
-            LegalActivity.start(this, LegalActivity.DOC_TERMS_OF_USE)
+            com.boostlyte.vydra.utils.AppUrls.openSafeUrl(this, com.boostlyte.vydra.utils.AppUrls.TERMS_OF_SERVICE_URL)
         }
 
         dialog.show()
@@ -731,7 +734,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkForUpdates() {
-        showToast("You are running the latest version of Vydra (v0.1.0)")
+        com.boostlyte.vydra.utils.UpdateChecker.checkForUpdates(this, isManual = true)
     }
 
     private fun setupProjectsList() {

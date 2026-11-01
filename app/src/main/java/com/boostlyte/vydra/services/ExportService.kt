@@ -94,12 +94,20 @@ class ExportService : Service() {
 
         serviceScope.launch {
             try {
+                var lastReportedProgress = -1
+                var lastNotificationTime = 0L
+
                 val result = ffmpegEngine.exportFinal(
                     ffmpegCommand = command,
                     totalDurationSecs = durationSecs,
                     onProgress = { progress ->
-                        updateNotification(progress, "Exporting...")
-                        broadcastProgress(progress)
+                        val now = System.currentTimeMillis()
+                        if (progress != lastReportedProgress && (now - lastNotificationTime >= 250L || progress >= 100)) {
+                            lastReportedProgress = progress
+                            lastNotificationTime = now
+                            updateNotification(progress, "Exporting...")
+                            broadcastProgress(progress)
+                        }
                     }
                 )
 
@@ -108,6 +116,9 @@ class ExportService : Service() {
 
                 when (result) {
                     is FFmpegRenderEngine.RenderResult.Success -> {
+                        updateNotification(100, "Saving video...")
+                        broadcastProgress(100)
+
                         if (!tempFile.exists() || tempFile.length() == 0L) {
                             Log.e(TAG, "Rendered output file is missing or 0 bytes: $tempOutputPath")
                             showCompletionNotification("Export Failed", "Rendered file is missing or empty", null)

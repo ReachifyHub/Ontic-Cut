@@ -818,7 +818,7 @@ class VideoEditingViewModel : ViewModel() {
                 if (mergeOp == null) {
                     outputDuration = duration
                 }
-                cmd.append(" -loop 1 -t $duration -i \"$sourceFilePath\"")
+                cmd.append(" -framerate 30 -loop 1 -t $duration -i \"$sourceFilePath\"")
             } else if (trimOp != null) {
                 val startSecs = trimOp.startMs / 1000.0
                 val duration = (trimOp.endMs - trimOp.startMs) / 1000.0
@@ -852,7 +852,7 @@ class VideoEditingViewModel : ViewModel() {
                                   videoPath.endsWith(".webp", ignoreCase = true)
                     
                     if (isImage) {
-                        cmd.append(" -loop 1 -t $duration -i \"$videoPath\"")
+                        cmd.append(" -framerate 30 -loop 1 -t $duration -i \"$videoPath\"")
                     } else {
                         cmd.append(" -ss $startSecs -t $duration -i \"$videoPath\"")
                     }
@@ -903,7 +903,7 @@ class VideoEditingViewModel : ViewModel() {
         if (bgOp != null && bgOp.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgOp.imageUri != null) {
             val bgPath = resolveUriToPath(bgOp.imageUri)
             if (bgPath != null) {
-                cmd.append(" -loop 1 -i \"$bgPath\"")
+                cmd.append(" -framerate 30 -loop 1 -i \"$bgPath\"")
                 bgImageIndex = inputIndex
                 inputIndex++
             }
@@ -1216,7 +1216,33 @@ class VideoEditingViewModel : ViewModel() {
             var currentVideoLabel = currentVLabel
             var currentAudioLabel = currentALabel
 
-            outputDuration = accumulatedDuration
+            var maxAudioEndSec = 0.0
+            for (audioOp in audioOps) {
+                val startSec = (audioOp.startTimeMs ?: 0L) / 1000.0
+                val durSec = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
+                    (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+                } else if (audioOp.internalEndMs > 0L) {
+                    (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
+                } else if (audioOp.originalDurationMs > 0L) {
+                    audioOp.originalDurationMs / 1000.0
+                } else {
+                    0.0
+                }
+                if (startSec + durSec > maxAudioEndSec) {
+                    maxAudioEndSec = startSec + durSec
+                }
+            }
+
+            val finalOutputDuration = if (maxAudioEndSec > accumulatedDuration && maxAudioEndSec > 0.0) {
+                val padSec = maxAudioEndSec - accumulatedDuration
+                filterParts.add("${currentVideoLabel}tpad=stop_mode=clone:stop_duration=$padSec[pad_v]")
+                currentVideoLabel = "[pad_v]"
+                maxAudioEndSec
+            } else {
+                accumulatedDuration
+            }
+
+            outputDuration = finalOutputDuration
 
 
             val (sourceVideoStages, tempVideoLabel) = buildVideoFilterStages(
@@ -1371,8 +1397,8 @@ class VideoEditingViewModel : ViewModel() {
                     else -> "1M"
                 }
                 val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
-                    ?.getString("default_encoder", "hardware") ?: "hardware"
-                val videoCodec = if (defaultEncoder == "software") "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p" else "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate"
+                    ?.getString("default_encoder", "software") ?: "software"
+                val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
                 cmd.append(" $videoCodec")
                 
                 if (!audioMuted) {
@@ -1650,8 +1676,8 @@ class VideoEditingViewModel : ViewModel() {
                 else -> "1M"
             }
             val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
-                ?.getString("default_encoder", "hardware") ?: "hardware"
-            val videoCodec = if (defaultEncoder == "software") "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p" else "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate"
+                ?.getString("default_encoder", "software") ?: "software"
+            val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
             // If there are no video filters, we still need to apply the scale and fps output params
             if (!hasVideoFilters) {
                 cmd.append(" $videoCodec -vf scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2:color=black -r ${_exportFps.value}")
@@ -1722,7 +1748,7 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         // Fast preview settings
-        cmd.append(" -c:v h264_mediacodec -pix_fmt yuv420p -b:v 1500k -c:a aac")
+        cmd.append(" -c:v libx264 -preset ultrafast -threads 0 -pix_fmt yuv420p -b:v 1500k -c:a aac")
         if (outputDuration != null) {
             cmd.append(" -t $outputDuration")
         }
@@ -1735,15 +1761,79 @@ class VideoEditingViewModel : ViewModel() {
 
     private fun copyContentUriToTempFile(context: Context, uri: Uri): String? {
         return try {
-            val tempFile = File.createTempFile("temp_video", ".mp4", context.cacheDir)
+            val mimeType = try { context.contentResolver.getType(uri) } catch (_: Exception) { null }
+            val pathLower = (uri.path ?: "").lowercase()
+            val ext = when {
+                mimeType?.startsWith("image/png") == true || pathLower.endsWith(".png") -> ".png"
+                mimeType?.startsWith("image/webp") == true || pathLower.endsWith(".webp") -> ".webp"
+                mimeType?.startsWith("image/") == true || pathLower.endsWith(".jpg") || pathLower.endsWith(".jpeg") -> ".jpg"
+                mimeType?.startsWith("audio/mp4") == true || mimeType?.startsWith("audio/x-m4a") == true || pathLower.endsWith(".m4a") -> ".m4a"
+                mimeType?.startsWith("audio/mpeg") == true || pathLower.endsWith(".mp3") -> ".mp3"
+                mimeType?.startsWith("audio/wav") == true || pathLower.endsWith(".wav") -> ".wav"
+                mimeType?.startsWith("audio/") == true || pathLower.endsWith(".aac") -> ".aac"
+                else -> ".mp4"
+            }
+            val prefix = if (ext in listOf(".jpg", ".png", ".webp")) "temp_img" else if (ext in listOf(".mp3", ".m4a", ".wav", ".aac")) "temp_audio" else "temp_video"
+            val tempFile = File.createTempFile(prefix, ext, context.cacheDir)
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(tempFile).use { input.copyTo(it) }
             }
-            tempFile.absolutePath
+            if (tempFile.length() > 0L) {
+                tempFile.absolutePath
+            } else {
+                tempFile.delete()
+                null
+            }
         } catch (e: Exception) {
             Log.e("VideoEditingViewModel", "Failed to copy content URI: ${e.message}")
             null
         }
+    }
+
+    /**
+     * Accurately calculates the total expected export duration in seconds, taking into account
+     * clip durations, transition overlaps (xfade), and audio track bounds.
+     */
+    fun getCalculatedExportDurationSec(context: Context? = null): Double {
+        val currentProject = _project.value ?: return 0.0
+        val mergeOp = currentProject.operations.filterIsInstance<EditOperation.Merge>().firstOrNull()
+        val trimOp = currentProject.operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
+        val audioOps = currentProject.operations.filterIsInstance<EditOperation.AddBackgroundAudio>()
+
+        val baseVideoDur = if (mergeOp != null) {
+            val clipDurations = mutableListOf<Double>()
+            val c0Dur = if (trimOp != null) (trimOp.endMs - trimOp.startMs) / 1000.0 else 5.0
+            clipDurations.add(c0Dur)
+            for (item in mergeOp.items) {
+                clipDurations.add(item.trimmedDurationMs / 1000.0)
+            }
+            val transitions = currentProject.operations.filterIsInstance<EditOperation.Transition>()
+            val math = TransitionTimelineCalculator.calculate(clipDurations, transitions)
+            math.totalDurationSec
+        } else if (trimOp != null) {
+            (trimOp.endMs - trimOp.startMs) / 1000.0
+        } else {
+            0.0
+        }
+
+        var maxAudioEndSec = 0.0
+        for (audioOp in audioOps) {
+            val startSec = (audioOp.startTimeMs ?: 0L) / 1000.0
+            val durSec = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
+                (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+            } else if (audioOp.internalEndMs > 0L) {
+                (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
+            } else if (audioOp.originalDurationMs > 0L) {
+                audioOp.originalDurationMs / 1000.0
+            } else {
+                0.0
+            }
+            if (startSec + durSec > maxAudioEndSec) {
+                maxAudioEndSec = startSec + durSec
+            }
+        }
+
+        return maxOf(baseVideoDur, maxAudioEndSec)
     }
 
     /**
