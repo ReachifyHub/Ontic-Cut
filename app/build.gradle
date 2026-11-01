@@ -25,7 +25,7 @@ android {
         applicationId "com.boostlyte.vydra"
         minSdk 26
         targetSdk 34
-        versionCode project.hasProperty('versionCode') ? project.property('versionCode').toInteger() : 5
+        versionCode project.hasProperty('versionCode') ? project.property('versionCode').toInteger() : 1
         versionName "v1.0.0-beta1"
 
         ndk {
