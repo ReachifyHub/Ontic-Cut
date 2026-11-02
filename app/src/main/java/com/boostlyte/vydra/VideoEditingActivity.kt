@@ -6275,42 +6275,51 @@ class VideoEditingActivity : AppCompatActivity() {
                         }
                     }
 
-                    var ffmpegCommand = viewModel.buildConsolidatedFFmpegCommand(
+                    val chunkPlan = viewModel.buildChunkExportPlan(
                         sourceFilePath = sourceFilePath,
                         outputFilePath = tempOutputPath,
                         fontFilePath = fontFilePath,
                         context = this@VideoEditingActivity
                     )
 
-                    if (ffmpegCommand == null) {
+                    if (chunkPlan == null) {
                         return@withContext null
                     }
 
-                    Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
-
-                    var generatedConcat: File? = null
-                    if (ffmpegCommand.contains("(CONCAT_LIST:")) {
-                        val concatListStart = ffmpegCommand.indexOf("(CONCAT_LIST:") + "(CONCAT_LIST:".length
-                        val concatListEnd = ffmpegCommand.lastIndexOf(")")
-                        if (concatListStart > 13 && concatListEnd > concatListStart) {
-                            val concatList = ffmpegCommand.substring(concatListStart, concatListEnd)
-                            val processedConcatList = processConcatList(concatList)
-
-                            val file = File(cacheDir, "concat_${System.currentTimeMillis()}.txt")
-                            file.writeText(processedConcatList)
-                            generatedConcat = file
-
-                            ffmpegCommand = ffmpegCommand
-                                .replace("{CONCAT_FILE_PATH}", file.absolutePath)
-                                .substring(0, ffmpegCommand.indexOf("(CONCAT_LIST:"))
-                                .trim()
+                    if (chunkPlan.isChunked) {
+                        val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.bin")
+                        java.io.ObjectOutputStream(java.io.FileOutputStream(planFile)).use {
+                            it.writeObject(chunkPlan)
                         }
-                    }
+                        Triple(null, planFile, chunkPlan.totalDurationSecs)
+                    } else {
+                        var ffmpegCommand = chunkPlan.singlePassCommand ?: return@withContext null
+                        Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
 
-                    Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
-                    val calculatedDur = viewModel.getCalculatedExportDurationSec(this@VideoEditingActivity)
-                    val totalDurationSecs = if (calculatedDur > 0.0) calculatedDur else (getTotalSequenceDuration() / 1000.0)
-                    Triple(ffmpegCommand, generatedConcat, totalDurationSecs)
+                        var generatedConcat: File? = null
+                        if (ffmpegCommand.contains("(CONCAT_LIST:")) {
+                            val concatListStart = ffmpegCommand.indexOf("(CONCAT_LIST:") + "(CONCAT_LIST:".length
+                            val concatListEnd = ffmpegCommand.lastIndexOf(")")
+                            if (concatListStart > 13 && concatListEnd > concatListStart) {
+                                val concatList = ffmpegCommand.substring(concatListStart, concatListEnd)
+                                val processedConcatList = processConcatList(concatList)
+
+                                val file = File(cacheDir, "concat_${System.currentTimeMillis()}.txt")
+                                file.writeText(processedConcatList)
+                                generatedConcat = file
+
+                                ffmpegCommand = ffmpegCommand
+                                    .replace("{CONCAT_FILE_PATH}", file.absolutePath)
+                                    .substring(0, ffmpegCommand.indexOf("(CONCAT_LIST:"))
+                                    .trim()
+                            }
+                        }
+
+                        Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
+                        val calculatedDur = viewModel.getCalculatedExportDurationSec(this@VideoEditingActivity)
+                        val totalDurationSecs = if (calculatedDur > 0.0) calculatedDur else (getTotalSequenceDuration() / 1000.0)
+                        Triple(ffmpegCommand, generatedConcat, totalDurationSecs)
+                    }
                 }
 
                 if (prepResult == null) {
@@ -6319,16 +6328,21 @@ class VideoEditingActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                val (ffmpegCommand, generatedConcat, totalDurationSecs) = prepResult
-                concatFile = generatedConcat
+                val (ffmpegCommand, generatedFile, totalDurationSecs) = prepResult
+                val isChunkedPlan = (ffmpegCommand == null)
 
                 exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = getString(R.string.str_please_don_t_close_the_app)
 
                 // Start ExportService
                 val intent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
-                    putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_COMMAND, ffmpegCommand)
+                    if (isChunkedPlan) {
+                        putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_CHUNK_PLAN_FILE, generatedFile?.absolutePath)
+                    } else {
+                        concatFile = generatedFile
+                        putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_COMMAND, ffmpegCommand)
+                        putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_CONCAT_FILE_PATH, concatFile?.absolutePath)
+                    }
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_TEMP_OUTPUT_PATH, tempOutputPath)
-                    putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_CONCAT_FILE_PATH, concatFile?.absolutePath)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_TOTAL_DURATION_SECS, totalDurationSecs)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_IS_AUDIO_ONLY, isAudioOnly)
                 }

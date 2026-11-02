@@ -52,6 +52,7 @@ class ExportService : Service() {
         const val EXTRA_CONCAT_FILE_PATH = "extra_concat_file_path"
         const val EXTRA_TOTAL_DURATION_SECS = "extra_total_duration_secs"
         const val EXTRA_IS_AUDIO_ONLY = "extra_is_audio_only"
+        const val EXTRA_CHUNK_PLAN_FILE = "extra_chunk_plan_file"
     }
 
     override fun onCreate() {
@@ -84,11 +85,32 @@ class ExportService : Service() {
             return START_NOT_STICKY
         }
 
-        val command = intent.getStringExtra(EXTRA_COMMAND) ?: return START_NOT_STICKY
         val tempOutputPath = intent.getStringExtra(EXTRA_TEMP_OUTPUT_PATH) ?: return START_NOT_STICKY
+        val isAudioOnly = intent.getBooleanExtra(EXTRA_IS_AUDIO_ONLY, false)
+
+        val chunkPlanFilePath = intent.getStringExtra(EXTRA_CHUNK_PLAN_FILE)
+        if (chunkPlanFilePath != null) {
+            val planFile = File(chunkPlanFilePath)
+            if (planFile.exists()) {
+                val chunkPlan = try {
+                    java.io.ObjectInputStream(java.io.FileInputStream(planFile)).use {
+                        it.readObject() as? ChunkExportPlan
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error deserializing chunk plan: ${e.message}", e)
+                    null
+                }
+
+                if (chunkPlan != null && chunkPlan.isChunked) {
+                    handleChunkedExport(chunkPlan, tempOutputPath, isAudioOnly, planFile)
+                    return START_NOT_STICKY
+                }
+            }
+        }
+
+        val command = intent.getStringExtra(EXTRA_COMMAND) ?: return START_NOT_STICKY
         val concatFilePath = intent.getStringExtra(EXTRA_CONCAT_FILE_PATH)
         val durationSecs = intent.getDoubleExtra(EXTRA_TOTAL_DURATION_SECS, 0.0)
-        val isAudioOnly = intent.getBooleanExtra(EXTRA_IS_AUDIO_ONLY, false)
 
         val scriptRegex = Regex("""-filter_complex_script\s+["']?([^"'\s]+)["']?""")
         val scriptFilePath = scriptRegex.find(command)?.groupValues?.getOrNull(1)
@@ -449,6 +471,233 @@ class ExportService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error saving video in legacy mode (API <= 28): ${e.message}", e)
             null
+        }
+    }
+
+    private fun handleChunkedExport(
+        plan: ChunkExportPlan,
+        tempOutputPath: String,
+        isAudioOnly: Boolean,
+        planFile: File?
+    ) {
+        val totalChunkDurations = plan.chunkDurationsSecs.sum()
+        val finalPassDuration = plan.totalDurationSecs
+        val totalWeight = totalChunkDurations + finalPassDuration
+        val numChunks = plan.chunkCommands.size
+
+        val projectStats = "mode=chunked numChunks=$numChunks totalDurationSecs=${plan.totalDurationSecs} isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath"
+        com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
+
+        startForeground(NOTIFICATION_ID, buildNotification(0, "Exporting part 1/$numChunks..."))
+
+        serviceScope.launch {
+            val tempFile = File(tempOutputPath)
+            var accumulatedWeight = 0.0
+
+            try {
+                // Execute each chunk pass sequentially
+                for ((idx, chunkCmd) in plan.chunkCommands.withIndex()) {
+                    val chunkIdx = idx + 1
+                    val chunkDur = plan.chunkDurationsSecs.getOrNull(idx) ?: (totalChunkDurations / numChunks)
+                    val spanStart = if (totalWeight > 0.0) (accumulatedWeight / totalWeight) * 100.0 else (idx.toDouble() / (numChunks + 1)) * 100.0
+                    val spanEnd = if (totalWeight > 0.0) ((accumulatedWeight + chunkDur) / totalWeight) * 100.0 else ((idx + 1).toDouble() / (numChunks + 1)) * 100.0
+
+                    var lastReportedProgress = -1
+                    var lastNotificationTime = 0L
+
+                    Log.d(TAG, "Starting Chunk $chunkIdx/$numChunks (duration: ${chunkCmd.durationSecs}s)")
+                    updateNotification(spanStart.toInt(), "Exporting part $chunkIdx/$numChunks...")
+
+                    val result = ffmpegEngine.exportFinal(
+                        ffmpegCommand = chunkCmd.command,
+                        totalDurationSecs = chunkCmd.durationSecs,
+                        onProgress = { p ->
+                            try {
+                                val overallProgress = (spanStart + (p / 100.0) * (spanEnd - spanStart)).toInt().coerceIn(0, 99)
+                                val now = System.currentTimeMillis()
+                                if (overallProgress != lastReportedProgress && (now - lastNotificationTime >= 250L || p >= 100)) {
+                                    lastReportedProgress = overallProgress
+                                    lastNotificationTime = now
+                                    updateNotification(overallProgress, "Exporting part $chunkIdx/$numChunks...")
+                                    broadcastProgress(overallProgress)
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error updating chunk progress: ${e.message}")
+                            }
+                        }
+                    )
+
+                    // Release FFmpegKit sessions fully before starting next chunk
+                    try {
+                        com.antonkarpenko.ffmpegkit.FFmpegKitConfig.clearSessions()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error clearing sessions: ${e.message}")
+                    }
+
+                    when (result) {
+                        is FFmpegRenderEngine.RenderResult.Success -> {
+                            val chunkOutputFile = File(chunkCmd.outputPath)
+                            if (!chunkOutputFile.exists() || chunkOutputFile.length() == 0L) {
+                                val errorMsg = "Chunk $chunkIdx/$numChunks output file missing or empty"
+                                Log.e(TAG, errorMsg)
+                                cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                                com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, errorMsg, -1, chunkCmd.scriptFilePath)
+                                showCompletionNotification("Export Failed", errorMsg, null)
+                                broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                                return@launch
+                            }
+                            Log.d(TAG, "Chunk $chunkIdx/$numChunks completed successfully (${chunkOutputFile.length()} bytes)")
+                        }
+                        is FFmpegRenderEngine.RenderResult.Failure -> {
+                            val stageName = "Chunk $chunkIdx/$numChunks"
+                            val returnCode = result.session?.returnCode?.value
+                            Log.e(TAG, "$stageName failed: ${result.error}")
+                            cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                            com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "$stageName failed: ${result.error}", returnCode, chunkCmd.scriptFilePath)
+                            showCompletionNotification("Export Failed", "Error during $stageName", null)
+                            broadcastFailure("$stageName failed: ${result.error}", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                            return@launch
+                        }
+                        is FFmpegRenderEngine.RenderResult.Cancelled -> {
+                            Log.d(TAG, "Export was cancelled during chunk $chunkIdx/$numChunks")
+                            cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                            com.boostlyte.vydra.utils.AppLogger.logExportCancelled(this@ExportService)
+                            val manager = getSystemService(NotificationManager::class.java)
+                            manager?.cancel(NOTIFICATION_ID)
+                            broadcastCancelled()
+                            return@launch
+                        }
+                    }
+
+                    accumulatedWeight += chunkDur
+                }
+
+                // All chunks succeeded! Now execute final pass.
+                val finalPassCmd = plan.finalPassCommand
+                if (finalPassCmd == null) {
+                    val errorMsg = "Missing final pass command in chunk plan"
+                    cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                    broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                    return@launch
+                }
+
+                val finalSpanStart = if (totalWeight > 0.0) (totalChunkDurations / totalWeight) * 100.0 else (numChunks.toDouble() / (numChunks + 1)) * 100.0
+                val finalSpanEnd = 100.0
+                var lastReportedProgress = -1
+                var lastNotificationTime = 0L
+
+                Log.d(TAG, "Starting final pass assembly (total duration: ${plan.totalDurationSecs}s)")
+                updateNotification(finalSpanStart.toInt(), "Assembling final video...")
+
+                val finalResult = ffmpegEngine.exportFinal(
+                    ffmpegCommand = finalPassCmd,
+                    totalDurationSecs = plan.totalDurationSecs,
+                    onProgress = { p ->
+                        try {
+                            val overallProgress = (finalSpanStart + (p / 100.0) * (finalSpanEnd - finalSpanStart)).toInt().coerceIn(0, 99)
+                            val now = System.currentTimeMillis()
+                            if (overallProgress != lastReportedProgress && (now - lastNotificationTime >= 250L || p >= 100)) {
+                                lastReportedProgress = overallProgress
+                                lastNotificationTime = now
+                                updateNotification(overallProgress, "Assembling final video...")
+                                broadcastProgress(overallProgress)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error updating final pass progress: ${e.message}")
+                        }
+                    }
+                )
+
+                try {
+                    com.antonkarpenko.ffmpegkit.FFmpegKitConfig.clearSessions()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error clearing sessions after final pass: ${e.message}")
+                }
+
+                when (finalResult) {
+                    is FFmpegRenderEngine.RenderResult.Success -> {
+                        updateNotification(100, "Saving video...")
+                        broadcastProgress(100)
+
+                        if (!tempFile.exists() || tempFile.length() == 0L) {
+                            Log.e(TAG, "Rendered output file is missing or 0 bytes: $tempOutputPath")
+                            com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "Rendered file is missing or empty", -1, null)
+                            showCompletionNotification("Export Failed", "Rendered file is missing or empty", null)
+                            broadcastFailure("Rendered output file is empty or missing", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                        } else {
+                            val savedUri = try {
+                                saveVideoToGallery(tempFile, isAudioOnly)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Exception saving to gallery", e)
+                                null
+                            }
+                            if (savedUri != null) {
+                                com.boostlyte.vydra.utils.AppLogger.logExportEnded(this@ExportService, 0, tempOutputPath)
+                                showCompletionNotification("Export Complete", "Video saved to gallery", savedUri)
+                                broadcastSuccess(savedUri.toString())
+                                Log.d(TAG, "Chunked export successful: $savedUri")
+                            } else {
+                                com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "Failed to save video to gallery", -1, null)
+                                showCompletionNotification("Export Failed", "Failed to save video to gallery", null)
+                                broadcastFailure("Failed to save video to gallery", ErrorCode.GALLERY_SAVE_FAILED.code)
+                            }
+                        }
+                    }
+                    is FFmpegRenderEngine.RenderResult.Failure -> {
+                        val returnCode = finalResult.session?.returnCode?.value
+                        com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "Final pass failed: ${finalResult.error}", returnCode, null)
+                        showCompletionNotification("Export Failed", "Error during final assembly", null)
+                        broadcastFailure("Final pass failed: ${finalResult.error}", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                        Log.e(TAG, "Final pass failed: ${finalResult.error}")
+                    }
+                    is FFmpegRenderEngine.RenderResult.Cancelled -> {
+                        Log.d(TAG, "Export was cancelled during final pass")
+                        com.boostlyte.vydra.utils.AppLogger.logExportCancelled(this@ExportService)
+                        val manager = getSystemService(NotificationManager::class.java)
+                        manager?.cancel(NOTIFICATION_ID)
+                        broadcastCancelled()
+                    }
+                }
+
+                // Guaranteed cleanup of chunk temp files and plan file
+                cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                try {
+                    if (tempFile.exists()) tempFile.delete()
+                    cacheDir.listFiles { f -> f.name.startsWith("filter_script_") && f.name.endsWith(".txt") }?.forEach { it.delete() }
+                } catch (_: Exception) {}
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Chunked export exception", e)
+                cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, e.message ?: "Unknown error", -1, null)
+                showCompletionNotification("Export Failed", e.message ?: "Unknown error", null)
+                broadcastFailure(e.message ?: "Unknown error", ErrorCode.UNEXPECTED_CRASH.code)
+            } finally {
+                try {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error stopping service: ${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun cleanupChunkTempFiles(chunkPaths: List<String>, planFile: File?) {
+        try {
+            for (path in chunkPaths) {
+                val f = File(path)
+                if (f.exists()) {
+                    f.delete()
+                    Log.d(TAG, "Deleted temp chunk file: $path")
+                }
+            }
+            if (planFile?.exists() == true) {
+                planFile.delete()
+                Log.d(TAG, "Deleted chunk plan file: ${planFile.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error cleaning up chunk files: ${e.message}")
         }
     }
 

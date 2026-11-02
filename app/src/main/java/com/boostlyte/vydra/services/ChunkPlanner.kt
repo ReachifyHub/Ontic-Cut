@@ -38,6 +38,24 @@ data class ClampedTimeWindow(
     val localEndMs: Long
 ) : Serializable
 
+data class ChunkCommand(
+    val chunkIndex: Int,
+    val command: String,
+    val outputPath: String,
+    val durationSecs: Double,
+    val scriptFilePath: String? = null
+) : Serializable
+
+data class ChunkExportPlan(
+    val isChunked: Boolean,
+    val singlePassCommand: String? = null,
+    val chunkCommands: List<ChunkCommand> = emptyList(),
+    val finalPassCommand: String? = null,
+    val chunkTempPaths: List<String> = emptyList(),
+    val totalDurationSecs: Double = 0.0,
+    val chunkDurationsSecs: List<Double> = emptyList()
+) : Serializable
+
 /**
  * Pure Chunk Planner for large sequence exports (> 24 inputs).
  * Prevents kernel OOM kills on 60+ image projects by planning sub-sequence chunks

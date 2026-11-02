@@ -18,6 +18,11 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import com.boostlyte.vydra.services.ChunkPlanner
+import com.boostlyte.vydra.services.ChunkSpec
+import com.boostlyte.vydra.services.ChunkPlan
+import com.boostlyte.vydra.services.ChunkCommand
+import com.boostlyte.vydra.services.ChunkExportPlan
 
 // ExportQuality enum removed in favor of individual parameters
 
@@ -197,13 +202,13 @@ class VideoEditingViewModel : ViewModel() {
     }
 
     /** Build a drawtext filter expression for a text operation. */
-    private fun buildDrawtextExpr(op: EditOperation.AddText, fontFilePath: String?): String {
+    private fun buildDrawtextExpr(op: EditOperation.AddText, fontFilePath: String?, timeOffsetMs: Long = 0L): String {
         val fontToUse = op.fontPath ?: fontFilePath
 
         // Use WYSIWYG fractional coordinates if available, else fall back to explicit coordinates
         val (posX, posY) = if (op.positionKeyframes.isNotEmpty()) {
-            val xExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = false, defaultValue = op.relativeX ?: 0.5f, startTimeMs = op.startTimeMs ?: 0L)
-            val yExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = true, defaultValue = op.relativeY ?: 0.5f, startTimeMs = op.startTimeMs ?: 0L)
+            val xExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = false, defaultValue = op.relativeX ?: 0.5f, startTimeMs = op.startTimeMs ?: 0L, timeOffsetMs = timeOffsetMs)
+            val yExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = true, defaultValue = op.relativeY ?: 0.5f, startTimeMs = op.startTimeMs ?: 0L, timeOffsetMs = timeOffsetMs)
             Pair("'(w*($xExpr))-(tw/2)'", "'(h*($yExpr))-(th/2)'")
         } else if (op.hasCustomPosition()) {
             Pair("'(w*${op.relativeX})-(tw/2)'", "'(h*${op.relativeY})-(th/2)'")
@@ -222,7 +227,7 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         val alphaExpr = if (op.opacityKeyframes.isNotEmpty()) {
-            buildFFmpegInterpolationExpr(op.opacityKeyframes, useValueY = false, defaultValue = op.opacity, startTimeMs = op.startTimeMs ?: 0L)
+            buildFFmpegInterpolationExpr(op.opacityKeyframes, useValueY = false, defaultValue = op.opacity, startTimeMs = op.startTimeMs ?: 0L, timeOffsetMs = timeOffsetMs)
         } else if (op.opacity < 1.0f) {
             "${op.opacity}"
         } else null
@@ -428,13 +433,14 @@ class VideoEditingViewModel : ViewModel() {
      * @return Pair of (list of filter stages, final stream label) — e.g. (["[0:v]crop=...[v0]", "[v0]drawtext=...[v1]"], "[v1]")
      *         If no video filters needed, returns (emptyList, "[0:v]")
      */
-    private fun buildVideoFilterStages(
+    fun buildVideoFilterStages(
         operations: List<EditOperation>,
         fontFilePath: String?,
         inputLabel: String = "[0:v]",
         imageInputIndices: List<Pair<Int, EditOperation.AddImageOverlay>> = emptyList(),
         density: Float = 1.0f,
-        sourceVideoHeight: Int = 1080
+        sourceVideoHeight: Int = 1080,
+        timeOffsetMs: Long = 0L
     ): Pair<List<String>, String> {
         val stages = mutableListOf<String>()
         var currentLabel = inputLabel
@@ -452,7 +458,7 @@ class VideoEditingViewModel : ViewModel() {
         for (op in overlayOps) {
             when (op) {
                 is EditOperation.AddText -> {
-                    val filterExpr = buildDrawtextExpr(op, fontFilePath)
+                    val filterExpr = buildDrawtextExpr(op, fontFilePath, timeOffsetMs)
                     val nextLabel = "[v$stageIndex]"
                     stages.add("$currentLabel$filterExpr$nextLabel")
                     currentLabel = nextLabel
@@ -475,11 +481,11 @@ class VideoEditingViewModel : ViewModel() {
                                                        path.endsWith(".3gp", ignoreCase = true))
 
                         if (isVideo) {
-                            val startSec = (op.startTimeMs ?: 0L) / 1000.0
+                            val startSec = ((op.startTimeMs ?: 0L) - timeOffsetMs) / 1000.0
                             val ptsLabel = "[pts_$stageIndex]"
                             val mirrorStr = if (op.isMirrored) ",hflip" else ""
                             val speedExpr = if (op.speedKeyframes.isNotEmpty()) {
-                                buildFFmpegInterpolationExpr(op.speedKeyframes, useValueY = false, defaultValue = 1.0f, startTimeMs = 0L, timeVar = "T")
+                                buildFFmpegInterpolationExpr(op.speedKeyframes, useValueY = false, defaultValue = 1.0f, startTimeMs = 0L, timeVar = "T", timeOffsetMs = timeOffsetMs)
                             } else {
                                 "1.0"
                             }
@@ -511,7 +517,7 @@ class VideoEditingViewModel : ViewModel() {
                         val overlayStartMs = op.startTimeMs ?: 0L
                         if (op.opacityKeyframes.isNotEmpty()) {
                             val opacityLabel = "[opacity_$stageIndex]"
-                            val alphaExpr = buildFFmpegInterpolationExpr(op.opacityKeyframes, useValueY = false, defaultValue = op.opacity, startTimeMs = overlayStartMs, timeVar = "T")
+                            val alphaExpr = buildFFmpegInterpolationExpr(op.opacityKeyframes, useValueY = false, defaultValue = op.opacity, startTimeMs = overlayStartMs, timeVar = "T", timeOffsetMs = timeOffsetMs)
                             stages.add("${currentOverlayLabel}format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*($alphaExpr)'${opacityLabel}")
                             currentOverlayLabel = opacityLabel
                         } else if (op.opacity < 1.0f) {
@@ -523,15 +529,15 @@ class VideoEditingViewModel : ViewModel() {
                         if (op.maskConfig.shape != EditOperation.MaskShape.NONE) {
                             val maskLabel = "[mask_$stageIndex]"
                             val mc = op.maskConfig
-                            val cx = if (mc.positionKeyframes.isNotEmpty()) "(W*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, false, mc.relativeX, overlayStartMs, "T") + "))" else "W*${mc.relativeX}"
-                            val cy = if (mc.positionKeyframes.isNotEmpty()) "(H*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, true, mc.relativeY, overlayStartMs, "T") + "))" else "H*${mc.relativeY}"
-                            val sizeExpr = if (mc.sizeKeyframes.isNotEmpty()) buildFFmpegInterpolationExpr(mc.sizeKeyframes, false, ((mc.relativeWidth + mc.relativeHeight) / 2f * 200f), overlayStartMs, "T") else null
+                            val cx = if (mc.positionKeyframes.isNotEmpty()) "(W*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, false, mc.relativeX, overlayStartMs, "T", timeOffsetMs = timeOffsetMs) + "))" else "W*${mc.relativeX}"
+                            val cy = if (mc.positionKeyframes.isNotEmpty()) "(H*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, true, mc.relativeY, overlayStartMs, "T", timeOffsetMs = timeOffsetMs) + "))" else "H*${mc.relativeY}"
+                            val sizeExpr = if (mc.sizeKeyframes.isNotEmpty()) buildFFmpegInterpolationExpr(mc.sizeKeyframes, false, ((mc.relativeWidth + mc.relativeHeight) / 2f * 200f), overlayStartMs, "T", timeOffsetMs = timeOffsetMs) else null
                             val mw = if (sizeExpr != null) "(W*(($sizeExpr)/200))" else "W*${mc.relativeWidth}"
                             val mh = if (sizeExpr != null) "(H*(($sizeExpr)/200))" else "H*${mc.relativeHeight}"
                             val cosA: String
                             val sinA: String
                             if (mc.rotationKeyframes.isNotEmpty()) {
-                                val rotExpr = buildFFmpegInterpolationExpr(mc.rotationKeyframes, false, mc.rotationAngle, overlayStartMs, "T")
+                                val rotExpr = buildFFmpegInterpolationExpr(mc.rotationKeyframes, false, mc.rotationAngle, overlayStartMs, "T", timeOffsetMs = timeOffsetMs)
                                 val rad = "(($rotExpr)*PI/180)"
                                 cosA = "cos($rad)"
                                 sinA = "sin($rad)"
@@ -550,18 +556,18 @@ class VideoEditingViewModel : ViewModel() {
                         // Rotate image/video overlay (c=none preserves transparent background, ow/oh prevent cropping)
                         stages.add("${currentOverlayLabel}rotate=$radians:c=none:ow='rotw($radians)':oh='roth($radians)'${rotatedImgLabel}")
                         // Overlay image/video on the reference video
-                        val enablePart = buildEnableExpr(op.startTimeMs, op.endTimeMs)
+                        val enablePart = buildEnableExpr(op.startTimeMs?.let { (it - timeOffsetMs).coerceAtLeast(0L) }, op.endTimeMs?.let { (it - timeOffsetMs).coerceAtLeast(0L) })
                         val hasMaskKfs = op.maskConfig.positionKeyframes.isNotEmpty() || op.maskConfig.sizeKeyframes.isNotEmpty() || op.maskConfig.rotationKeyframes.isNotEmpty() || op.maskConfig.featherKeyframes.isNotEmpty()
                         val shortestPart = if (((isGif || isVideo) && op.isLooping) || (!isGif && !isVideo && (op.opacityKeyframes.isNotEmpty() || hasMaskKfs))) ":shortest=1" else ""
                         
                         val overlayX = if (op.positionKeyframes.isNotEmpty()) {
-                            val xExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = false, defaultValue = op.relativeX, startTimeMs = op.startTimeMs ?: 0L)
+                            val xExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = false, defaultValue = op.relativeX, startTimeMs = op.startTimeMs ?: 0L, timeOffsetMs = timeOffsetMs)
                             "x='(W*($xExpr))-(w/2)'"
                         } else {
                             "x='(W*${op.relativeX})-(w/2)'"
                         }
                         val overlayY = if (op.positionKeyframes.isNotEmpty()) {
-                            val yExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = true, defaultValue = op.relativeY, startTimeMs = op.startTimeMs ?: 0L)
+                            val yExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = true, defaultValue = op.relativeY, startTimeMs = op.startTimeMs ?: 0L, timeOffsetMs = timeOffsetMs)
                             "y='(H*($yExpr))-(h/2)'"
                         } else {
                             "y='(H*${op.relativeY})-(h/2)'"
@@ -613,6 +619,9 @@ class VideoEditingViewModel : ViewModel() {
                                 }
                             }
 
+                            val cueStartLocal = (cue.startTimeMs - timeOffsetMs).coerceAtLeast(0L)
+                            val cueEndLocal = (cue.endTimeMs - timeOffsetMs).coerceAtLeast(0L)
+
                             val filterExpr = com.boostlyte.vydra.utils.FFmpegFilterUtils.buildValidatedDrawtextFilter(
                                 text = lineText,
                                 fontFilePath = fontToUse,
@@ -620,8 +629,8 @@ class VideoEditingViewModel : ViewModel() {
                                 fontColor = fontColor,
                                 x = posX,
                                 y = posY,
-                                startTimeMs = cue.startTimeMs,
-                                endTimeMs = cue.endTimeMs,
+                                startTimeMs = cueStartLocal,
+                                endTimeMs = cueEndLocal,
                                 boxColor = boxColor,
                                 boxBorderW = boxBorderW
                             )
@@ -796,12 +805,7 @@ class VideoEditingViewModel : ViewModel() {
 
         /** Resolve a URI to a real filesystem path FFmpeg can read.
          *  content:// URIs are copied to cacheDir; file:// or plain paths are used directly. */
-        fun resolveUriToPath(uri: android.net.Uri): String? {
-            if (uri.scheme == "content" && context != null) {
-                return copyContentUriToTempFile(context, uri)
-            }
-            return uri.path ?: uri.toString()
-        }
+        fun resolveUriToPath(uri: android.net.Uri): String? = resolveUriToPath(context, uri)
 
         // 1. Source Video Input (Index 0)
         var outputDuration: Double? = null
@@ -1755,6 +1759,786 @@ class VideoEditingViewModel : ViewModel() {
         val finalCommand = cmd.toString()
         Log.d(TAG, "Built command: $finalCommand")
         return finalCommand
+    }
+
+    /**
+     * Resolve a URI to a real filesystem path FFmpeg can read.
+     * content:// URIs are copied to cacheDir; file:// or plain paths are used directly.
+     */
+    fun resolveUriToPath(context: Context?, uri: android.net.Uri): String? {
+        if (uri.scheme == "content" && context != null) {
+            return copyContentUriToTempFile(context, uri)
+        }
+        return uri.path ?: uri.toString()
+    }
+
+    /**
+     * Build a chunk pass command for an individual sub-sequence chunk (video-only).
+     */
+    fun buildChunkPassCommand(
+        chunkSpec: ChunkSpec,
+        sourceFilePath: String,
+        chunkOutputPath: String,
+        fontFilePath: String?,
+        context: Context?,
+        totalDurationMs: Long,
+        density: Float,
+        targetWidth: Int,
+        targetHeight: Int,
+        operations: List<EditOperation>
+    ): ChunkCommand {
+        val cmd = StringBuilder("-y")
+        var inputIndex = 0
+
+        // 1. Inputs for this chunk's clips
+        for ((localIdx, clip) in chunkSpec.clips.withIndex()) {
+            if (clip.globalIndex == 0) {
+                val isMainImage = sourceFilePath.endsWith(".png", ignoreCase = true) ||
+                                  sourceFilePath.endsWith(".jpg", ignoreCase = true) ||
+                                  sourceFilePath.endsWith(".jpeg", ignoreCase = true) ||
+                                  sourceFilePath.endsWith(".webp", ignoreCase = true)
+                val trimOp = operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
+                val duration = if (clip.item.trimmedDurationMs > 0L) {
+                    clip.item.trimmedDurationMs / 1000.0
+                } else if (trimOp != null) {
+                    (trimOp.endMs - trimOp.startMs) / 1000.0
+                } else {
+                    5.0
+                }
+                if (clip.item.proxyUri != null) {
+                    val proxyPath = resolveUriToPath(context, clip.item.proxyUri) ?: clip.item.proxyUri.path ?: clip.item.proxyUri.toString()
+                    cmd.append(" -t $duration -i \"$proxyPath\"")
+                } else if (isMainImage) {
+                    cmd.append(" -framerate 30 -loop 1 -t $duration -i \"$sourceFilePath\"")
+                } else if (trimOp != null) {
+                    val startSecs = trimOp.startMs / 1000.0
+                    cmd.append(" -ss $startSecs -t $duration -i \"$sourceFilePath\"")
+                } else {
+                    cmd.append(" -i \"$sourceFilePath\"")
+                }
+            } else {
+                val item = clip.item
+                if (item.proxyUri != null) {
+                    val proxyPath = resolveUriToPath(context, item.proxyUri) ?: item.proxyUri.path ?: item.proxyUri.toString()
+                    val duration = item.trimmedDurationMs / 1000.0
+                    cmd.append(" -t $duration -i \"$proxyPath\"")
+                } else {
+                    val videoPath = resolveUriToPath(context, item.uri) ?: item.uri.toString()
+                    val startSecs = item.trimStartMs / 1000.0
+                    val itemDurSec = if (item.trimmedDurationMs > 0L) {
+                        item.trimmedDurationMs / 1000.0
+                    } else if (item.trimEndMs > item.trimStartMs) {
+                        (item.trimEndMs - item.trimStartMs) / 1000.0
+                    } else if (item.durationMs > 0L) {
+                        item.durationMs / 1000.0
+                    } else {
+                        5.0
+                    }
+                    val isImage = item.isImage ||
+                                  videoPath.endsWith(".png", ignoreCase = true) ||
+                                  videoPath.endsWith(".jpg", ignoreCase = true) ||
+                                  videoPath.endsWith(".jpeg", ignoreCase = true) ||
+                                  videoPath.endsWith(".webp", ignoreCase = true)
+                    if (isImage) {
+                        cmd.append(" -framerate 30 -loop 1 -t $itemDurSec -i \"$videoPath\"")
+                    } else {
+                        cmd.append(" -ss $startSecs -t $itemDurSec -i \"$videoPath\"")
+                    }
+                }
+            }
+            inputIndex++
+        }
+
+        // 2. Image Overlay Inputs intersecting chunk window
+        val chunkStart = chunkSpec.globalStartMs
+        val chunkDur = chunkSpec.durationMs
+        val imageOps = operations.filterIsInstance<EditOperation.AddImageOverlay>()
+        val visibleImageIndices = mutableListOf<Pair<Int, EditOperation.AddImageOverlay>>()
+        val clampedImageOps = mutableListOf<EditOperation.AddImageOverlay>()
+
+        for (imageOp in imageOps) {
+            val start = imageOp.startTimeMs ?: 0L
+            val end = imageOp.endTimeMs ?: totalDurationMs
+            val clamped = ChunkPlanner.clampToChunkWindow(start, end, chunkStart, chunkDur)
+            if (clamped.isVisibleInChunk) {
+                val imagePath = resolveUriToPath(context, imageOp.imageUri) ?: continue
+                val isGif = imagePath.endsWith(".gif", ignoreCase = true)
+                val isVideo = imagePath.endsWith(".mp4", ignoreCase = true) ||
+                              imagePath.endsWith(".mkv", ignoreCase = true) ||
+                              imagePath.endsWith(".mov", ignoreCase = true) ||
+                              imagePath.endsWith(".3gp", ignoreCase = true)
+                if ((isGif || isVideo) && imageOp.isLooping) {
+                    cmd.append(" -stream_loop -1 -i \"$imagePath\"")
+                } else {
+                    cmd.append(" -i \"$imagePath\"")
+                }
+                val clampedOp = imageOp.copy(startTimeMs = clamped.localStartMs, endTimeMs = clamped.localEndMs)
+                visibleImageIndices.add(Pair(inputIndex, clampedOp))
+                clampedImageOps.add(clampedOp)
+                inputIndex++
+            }
+        }
+
+        // 3. Canvas background image input if needed
+        val bgOp = operations.filterIsInstance<EditOperation.CanvasBackground>().lastOrNull()
+        var bgImageIndex = -1
+        if (bgOp != null && bgOp.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgOp.imageUri != null) {
+            val bgPath = resolveUriToPath(context, bgOp.imageUri)
+            if (bgPath != null) {
+                cmd.append(" -framerate 30 -loop 1 -i \"$bgPath\"")
+                bgImageIndex = inputIndex
+                inputIndex++
+            }
+        }
+
+        // 4. Filter complex for chunk clips
+        val filterParts = mutableListOf<String>()
+        val inputCount = chunkSpec.clips.size
+        val durationsArray = DoubleArray(inputCount)
+
+        for ((localIdx, clip) in chunkSpec.clips.withIndex()) {
+            val d = if (clip.item.trimmedDurationMs > 0L) {
+                clip.item.trimmedDurationMs / 1000.0
+            } else if (clip.item.trimEndMs > clip.item.trimStartMs) {
+                (clip.item.trimEndMs - clip.item.trimStartMs) / 1000.0
+            } else if (clip.item.durationMs > 0L) {
+                clip.item.durationMs / 1000.0
+            } else {
+                5.0
+            }
+            durationsArray[localIdx] = d
+
+            val colorFilterOp = operations.filterIsInstance<EditOperation.ColorFilter>().find { it.index == clip.globalIndex }
+            val lutFilterExpr = colorFilterOp?.let { getFFmpegFilterForName(it.filterName) }
+            val adjustOp = operations.filterIsInstance<EditOperation.Adjust>().find { it.index == clip.globalIndex }
+            val adjustFilterExpr = adjustOp?.let { getFFmpegFilterForAdjust(it) }
+
+            val isMirrored = clip.item.isMirrored
+            val maskConfig = clip.item.maskConfig
+
+            var preFilters = "setpts=PTS-STARTPTS"
+            if (lutFilterExpr != null) preFilters += ",$lutFilterExpr"
+            if (adjustFilterExpr != null) preFilters += ",$adjustFilterExpr"
+            if (isMirrored) preFilters += ",hflip"
+
+            if (maskConfig.shape != EditOperation.MaskShape.NONE) {
+                val mc = maskConfig
+                val cx = if (mc.positionKeyframes.isNotEmpty()) "(W*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, false, mc.relativeX, 0L, "T") + "))" else "W*${mc.relativeX}"
+                val cy = if (mc.positionKeyframes.isNotEmpty()) "(H*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, true, mc.relativeY, 0L, "T") + "))" else "H*${mc.relativeY}"
+                val sizeExpr = if (mc.sizeKeyframes.isNotEmpty()) buildFFmpegInterpolationExpr(mc.sizeKeyframes, false, ((mc.relativeWidth + mc.relativeHeight) / 2f * 200f), 0L, "T") else null
+                val mw = if (sizeExpr != null) "(W*(($sizeExpr)/200))" else "W*${mc.relativeWidth}"
+                val mh = if (sizeExpr != null) "(H*(($sizeExpr)/200))" else "H*${mc.relativeHeight}"
+                val cosA: String
+                val sinA: String
+                if (mc.rotationKeyframes.isNotEmpty()) {
+                    val rotExpr = buildFFmpegInterpolationExpr(mc.rotationKeyframes, false, mc.rotationAngle, 0L, "T")
+                    val rad = "(($rotExpr)*PI/180)"
+                    cosA = "cos($rad)"
+                    sinA = "sin($rad)"
+                } else {
+                    val rad = Math.toRadians(mc.rotationAngle.toDouble())
+                    cosA = Math.cos(rad).toString()
+                    sinA = Math.sin(rad).toString()
+                }
+                val finalAlphaExpr = buildFFmpegMaskAlphaExpr(mc, cx, cy, mw, mh, cosA, sinA, 0L, "T")
+                preFilters += ",format=rgba,geq=r='r(X,Y)*($finalAlphaExpr/255)':g='g(X,Y)*($finalAlphaExpr/255)':b='b(X,Y)*($finalAlphaExpr/255)':a='255*($finalAlphaExpr/255)'"
+            }
+            filterParts.add("[$localIdx:v]$preFilters[pre$localIdx]")
+
+            val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == clip.globalIndex }
+            val clipMotionType = motionOp?.motionType ?: clip.item.motionEffect
+            val safeD = d.coerceAtLeast(0.1)
+
+            val motionW = (((targetWidth * 1.15).toInt()) / 2) * 2
+            val motionH = (((targetHeight * 1.15).toInt()) / 2) * 2
+            val coverScale = "scale=w=$motionW:h=$motionH:force_original_aspect_ratio=increase"
+            val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
+
+            val motionFilter = when (clipMotionType) {
+                "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/(30*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
+                "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/(30*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
+                "pan_left" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(1-(t/$safeD))':y='(in_h-out_h)/2'"
+                "pan_right" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)/2'"
+                "pan_up" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$safeD))'"
+                "pan_down" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$safeD)'"
+                "drift_up_right" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)*(1-(t/$safeD))'"
+                else -> null
+            }
+
+            if (motionFilter != null) {
+                filterParts.add("[pre$localIdx]$motionFilter[raw_stage$localIdx]")
+            } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.BLUR) {
+                val blur = bgOp.blurRadius
+                val bgScale = "format=yuv420p,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight:(in_w-$targetWidth)/2:(in_h-$targetHeight)/2,boxblur=$blur"
+                val fgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease"
+                filterParts.add("[pre$localIdx]split=2[bg_orig$localIdx][fg_orig$localIdx]")
+                filterParts.add("[bg_orig$localIdx]$bgScale[bg$localIdx]")
+                filterParts.add("[fg_orig$localIdx]$fgScale[fg$localIdx]")
+                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2[raw_stage$localIdx]")
+            } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgImageIndex != -1) {
+                val bgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight:(in_w-$targetWidth)/2:(in_h-$targetHeight)/2"
+                val fgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease"
+                filterParts.add("[$bgImageIndex:v]$bgScale[bg$localIdx]")
+                filterParts.add("[pre$localIdx]$fgScale[fg$localIdx]")
+                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$localIdx]")
+            } else {
+                val color = bgOp?.colorHex ?: "black"
+                val padColor = if (color.startsWith("#")) formatColorForFFmpeg(color) else "black"
+                filterParts.add("color=c=$padColor:s=${targetWidth}x${targetHeight}:r=${_exportFps.value}[bg$localIdx]")
+                filterParts.add("[pre$localIdx]scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease[fg$localIdx]")
+                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$localIdx]")
+            }
+
+            filterParts.add("[raw_stage$localIdx]scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$localIdx]")
+        }
+
+        // Chain internal transitions for this chunk
+        data class LocalStreamInfo(val vLabel: String, val durationSec: Double)
+        val pendingClips = mutableListOf(0)
+        var currentStream: LocalStreamInfo? = null
+        var transitionCounter = 0
+        var concatCounter = 0
+
+        fun flushLocalPending(clips: List<Int>): LocalStreamInfo {
+            return if (clips.size == 1) {
+                val i = clips[0]
+                LocalStreamInfo("[norm$i]", durationsArray[i])
+            } else {
+                val vOut = "[ccat${concatCounter}v]"
+                val inputs = clips.joinToString("") { "[norm$it]" }
+                filterParts.add("${inputs}concat=n=${clips.size}:v=1:a=0${vOut}")
+                filterParts.add("${vOut}settb=1/30,setpts=N,fps=30,format=yuv420p[norm${concatCounter}v]")
+                val totalDur = clips.sumOf { durationsArray[it] }
+                concatCounter++
+                LocalStreamInfo("[norm${concatCounter - 1}v]", totalDur)
+            }
+        }
+
+        for (gapIdx in 0 until inputCount - 1) {
+            val transOp = chunkSpec.internalTransitions.find { it.index == gapIdx }
+            if (transOp == null || transOp.type == "none") {
+                pendingClips.add(gapIdx + 1)
+            } else {
+                val baseStream = if (pendingClips.isEmpty()) {
+                    currentStream ?: throw IllegalStateException("Empty stream state in chunk pass")
+                } else {
+                    val leftStream = flushLocalPending(pendingClips)
+                    pendingClips.clear()
+                    if (currentStream == null) {
+                        leftStream
+                    } else {
+                        val vOut = "[ccat${concatCounter}v]"
+                        filterParts.add("${currentStream.vLabel}${leftStream.vLabel}concat=n=2:v=1:a=0${vOut}")
+                        filterParts.add("${vOut}settb=1/30,setpts=N,fps=30,format=yuv420p[norm${concatCounter}v]")
+                        concatCounter++
+                        LocalStreamInfo("[norm${concatCounter - 1}v]", currentStream.durationSec + leftStream.durationSec)
+                    }
+                }
+
+                val rawTransDuration = transOp.durationMs / 1000.0
+                val maxSafeDuration = minOf(baseStream.durationSec - 0.05, durationsArray[gapIdx + 1] - 0.05).coerceAtLeast(0.1)
+                val transDuration = rawTransDuration.coerceIn(0.1, maxSafeDuration)
+                val offset = (baseStream.durationSec - transDuration).coerceAtLeast(0.0)
+
+                val rawXfvOut = "[raw_xfv${transitionCounter}]"
+                val normXfvOut = "[norm_xfv${transitionCounter}]"
+                val nextVLabel = "[norm${gapIdx + 1}]"
+
+                val validXfadeTransitions = setOf(
+                    "fade", "fadeblack", "fadewhite", "rectcrop", "circlecrop", "circleclose", "circleopen",
+                    "horzclose", "horzopen", "vertclose", "vertopen", "diagbl", "diagbr", "diagtl", "diagtr",
+                    "hlslice", "hrslice", "vuslice", "vdslice", "dissolve", "pixelize", "slidedown", "slideleft",
+                    "slideright", "slideup", "wipedown", "wipeleft", "wiperight", "wipeup", "zoomin", "squeezeh",
+                    "squeezev", "coverleft", "coverright", "coverup", "coverdown", "revealleft", "revealright",
+                    "revealup", "revealdown"
+                )
+                val rawType = transOp.type.lowercase()
+                val sanitizedType = when (rawType) {
+                    "smoothleft" -> "coverleft"
+                    "smoothright" -> "coverright"
+                    "distance" -> "zoomin"
+                    else -> if (validXfadeTransitions.contains(rawType)) rawType else "fade"
+                }
+
+                val formattedDuration = String.format(java.util.Locale.US, "%.3f", transDuration)
+                val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
+
+                filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
+                filterParts.add("${rawXfvOut}settb=1/30,setpts=N,fps=30,format=yuv420p${normXfvOut}")
+
+                val newDuration = offset + durationsArray[gapIdx + 1]
+                currentStream = LocalStreamInfo(normXfvOut, newDuration)
+                transitionCounter++
+            }
+        }
+
+        val remainingStream = if (pendingClips.isNotEmpty()) flushLocalPending(pendingClips) else null
+        val finalStream: LocalStreamInfo = when {
+            currentStream == null && remainingStream != null -> remainingStream
+            currentStream != null && remainingStream == null -> currentStream!!
+            currentStream != null && remainingStream != null -> {
+                val vOut = "[ccat${concatCounter}v]"
+                filterParts.add("${currentStream.vLabel}${remainingStream.vLabel}concat=n=2:v=1:a=0${vOut}")
+                filterParts.add("${vOut}settb=1/30,setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm${concatCounter}v]")
+                concatCounter++
+                LocalStreamInfo("[norm${concatCounter - 1}v]", currentStream.durationSec + remainingStream.durationSec)
+            }
+            else -> LocalStreamInfo("[norm0]", durationsArray[0])
+        }
+
+        var currentVideoLabel = finalStream.vLabel
+
+        // 5. Clamped overlays and subtitles for this chunk
+        val clampedTextOps = mutableListOf<EditOperation.AddText>()
+        for (textOp in operations.filterIsInstance<EditOperation.AddText>()) {
+            val start = textOp.startTimeMs ?: 0L
+            val end = textOp.endTimeMs ?: totalDurationMs
+            val clamped = ChunkPlanner.clampToChunkWindow(start, end, chunkStart, chunkDur)
+            if (clamped.isVisibleInChunk) {
+                clampedTextOps.add(textOp.copy(startTimeMs = clamped.localStartMs, endTimeMs = clamped.localEndMs))
+            }
+        }
+
+        val clampedSubtitleOps = mutableListOf<EditOperation.AddSubtitles>()
+        for (subOp in operations.filterIsInstance<EditOperation.AddSubtitles>()) {
+            val clampedCues = mutableListOf<com.boostlyte.vydra.models.SubtitleCue>()
+            for (cue in subOp.cues) {
+                val clamped = ChunkPlanner.clampToChunkWindow(cue.startTimeMs, cue.endTimeMs, chunkStart, chunkDur)
+                if (clamped.isVisibleInChunk) {
+                    clampedCues.add(cue.copy(startTimeMs = clamped.localStartMs, endTimeMs = clamped.localEndMs))
+                }
+            }
+            if (clampedCues.isNotEmpty()) {
+                clampedSubtitleOps.add(subOp.copy(cues = clampedCues))
+            }
+        }
+
+        val overlayOpsToApply = clampedTextOps + clampedImageOps + clampedSubtitleOps
+        if (overlayOpsToApply.isNotEmpty()) {
+            val (overlayStages, tempLabel) = buildVideoFilterStages(
+                operations = overlayOpsToApply,
+                fontFilePath = fontFilePath,
+                inputLabel = currentVideoLabel,
+                imageInputIndices = visibleImageIndices,
+                density = density,
+                sourceVideoHeight = targetHeight,
+                timeOffsetMs = chunkStart
+            )
+            filterParts.addAll(overlayStages)
+            currentVideoLabel = tempLabel
+        }
+
+        val finalVideoLabel = "[chunk_out]"
+        filterParts.add("${currentVideoLabel}scale=$targetWidth:$targetHeight,fps=${_exportFps.value},format=yuv420p$finalVideoLabel")
+
+        val filterComplexStr = filterParts.joinToString(";\n")
+        var scriptFile: File? = null
+        if (context != null && filterComplexStr.length > 2000) {
+            scriptFile = File(context.cacheDir, "filter_script_chunk_${chunkSpec.chunkIndex}_${System.currentTimeMillis()}.txt")
+            scriptFile.writeText(filterComplexStr)
+            com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
+            cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
+        } else {
+            cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
+        }
+
+        val bitrate = when (_exportResolution.value) {
+            2160 -> "30M"
+            1440 -> "16M"
+            1080 -> "8M"
+            720 -> "5M"
+            480 -> "2M"
+            else -> "1M"
+        }
+        val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
+            ?.getString("default_encoder", "software") ?: "software"
+        val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
+
+        cmd.append(" -map \"$finalVideoLabel\" -an $videoCodec")
+        val formattedDur = String.format(java.util.Locale.US, "%.3f", chunkSpec.durationMs / 1000.0).trimEnd('0').trimEnd('.')
+        cmd.append(" -t $formattedDur \"$chunkOutputPath\"")
+
+        val commandStr = cmd.toString()
+        Log.d(TAG, "Built chunk ${chunkSpec.chunkIndex} command: $commandStr")
+        return ChunkCommand(
+            chunkIndex = chunkSpec.chunkIndex,
+            command = commandStr,
+            outputPath = chunkOutputPath,
+            durationSecs = chunkSpec.durationMs / 1000.0,
+            scriptFilePath = scriptFile?.absolutePath
+        )
+    }
+
+    /**
+     * Build the final pass command that chains chunk videos and mixes full audio track.
+     */
+    fun buildFinalPassCommand(
+        chunkPlan: ChunkPlan,
+        chunkTempPaths: List<String>,
+        outputFilePath: String,
+        context: Context?,
+        targetWidth: Int,
+        targetHeight: Int,
+        operations: List<EditOperation>
+    ): ChunkCommand {
+        val cmd = StringBuilder("-y")
+        var inputIndex = 0
+
+        // 1. Chunk temp video inputs
+        for (tempPath in chunkTempPaths) {
+            cmd.append(" -i \"$tempPath\"")
+            inputIndex++
+        }
+
+        // 2. Audio inputs
+        val audioOps = operations.filterIsInstance<EditOperation.AddBackgroundAudio>()
+        val audioInputIndices = mutableListOf<Pair<Int, EditOperation.AddBackgroundAudio>>()
+        for (audioOp in audioOps) {
+            val audioPath = resolveUriToPath(context, audioOp.audioUri) ?: continue
+            cmd.append(" -i \"$audioPath\"")
+            audioInputIndices.add(Pair(inputIndex, audioOp))
+            inputIndex++
+        }
+
+        val filterParts = mutableListOf<String>()
+        val numChunks = chunkTempPaths.size
+
+        // Chain chunk videos using boundary transitions
+        var currentV = "[0:v]"
+        var currentStreamDurationSec = chunkPlan.chunks[0].durationMs / 1000.0
+
+        for (bIdx in 0 until numChunks - 1) {
+            val nextChunkInput = "[${bIdx + 1}:v]"
+            val nextChunkDurationSec = chunkPlan.chunks[bIdx + 1].durationMs / 1000.0
+            val boundaryTrans = chunkPlan.boundaryTransitions.find { it.boundaryIndex == bIdx }?.transition
+
+            if (boundaryTrans != null && boundaryTrans.type != "none") {
+                val rawTransDuration = boundaryTrans.durationMs / 1000.0
+                val maxSafeDuration = minOf(currentStreamDurationSec - 0.05, nextChunkDurationSec - 0.05).coerceAtLeast(0.1)
+                val transDuration = rawTransDuration.coerceIn(0.1, maxSafeDuration)
+                val offset = (currentStreamDurationSec - transDuration).coerceAtLeast(0.0)
+
+                val rawXfvOut = "[raw_xfv$bIdx]"
+                val normXfvOut = "[norm_xfv$bIdx]"
+
+                val validXfadeTransitions = setOf(
+                    "fade", "fadeblack", "fadewhite", "rectcrop", "circlecrop", "circleclose", "circleopen",
+                    "horzclose", "horzopen", "vertclose", "vertopen", "diagbl", "diagbr", "diagtl", "diagtr",
+                    "hlslice", "hrslice", "vuslice", "vdslice", "dissolve", "pixelize", "slidedown", "slideleft",
+                    "slideright", "slideup", "wipedown", "wipeleft", "wiperight", "wipeup", "zoomin", "squeezeh",
+                    "squeezev", "coverleft", "coverright", "coverup", "coverdown", "revealleft", "revealright",
+                    "revealup", "revealdown"
+                )
+                val rawType = boundaryTrans.type.lowercase()
+                val sanitizedType = when (rawType) {
+                    "smoothleft" -> "coverleft"
+                    "smoothright" -> "coverright"
+                    "distance" -> "zoomin"
+                    else -> if (validXfadeTransitions.contains(rawType)) rawType else "fade"
+                }
+
+                val formattedDuration = String.format(java.util.Locale.US, "%.3f", transDuration)
+                val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
+
+                filterParts.add("${currentV}${nextChunkInput}xfade=transition=${sanitizedType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
+                filterParts.add("${rawXfvOut}settb=1/30,setpts=N,fps=30,format=yuv420p${normXfvOut}")
+
+                currentV = normXfvOut
+                currentStreamDurationSec = offset + nextChunkDurationSec
+            } else {
+                val rawCcatOut = "[raw_ccat$bIdx]"
+                val normCcatOut = "[norm_ccat$bIdx]"
+
+                filterParts.add("${currentV}${nextChunkInput}concat=n=2:v=1:a=0${rawCcatOut}")
+                filterParts.add("${rawCcatOut}settb=1/30,setpts=N,fps=30,format=yuv420p${normCcatOut}")
+
+                currentV = normCcatOut
+                currentStreamDurationSec += nextChunkDurationSec
+            }
+        }
+
+        var currentAudioLabel: String? = null
+        if (audioInputIndices.isNotEmpty()) {
+            val mixInputLabels = mutableListOf<String>()
+            for ((idx, pair) in audioInputIndices.withIndex()) {
+                val (inputIdx, audioOp) = pair
+                val trackLabel = "[a_bg_$idx]"
+                val filters = mutableListOf<String>()
+
+                val internalStartSec = audioOp.internalStartMs / 1000.0
+                var internalEndSec = if (audioOp.internalEndMs > 0L) audioOp.internalEndMs / 1000.0 else Double.MAX_VALUE
+
+                if (audioOp.startTimeMs != null && audioOp.endTimeMs != null) {
+                    val timelineDurationSec = (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+                    val maxEndSec = internalStartSec + timelineDurationSec
+                    if (maxEndSec < internalEndSec) internalEndSec = maxEndSec
+                }
+
+                if (internalStartSec > 0.0 || internalEndSec != Double.MAX_VALUE) {
+                    if (internalEndSec != Double.MAX_VALUE) {
+                        filters.add("atrim=start=$internalStartSec:end=$internalEndSec,asetpts=PTS-STARTPTS")
+                    } else {
+                        filters.add("atrim=start=$internalStartSec,asetpts=PTS-STARTPTS")
+                    }
+                }
+                if (audioOp.fadeInDurationMs > 0L) {
+                    val fadeSec = audioOp.fadeInDurationMs / 1000.0
+                    filters.add("afade=t=in:st=0:d=$fadeSec")
+                }
+                if (audioOp.fadeOutDurationMs > 0L) {
+                    val fadeSec = audioOp.fadeOutDurationMs / 1000.0
+                    val clipDur = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
+                        (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+                    } else if (audioOp.internalEndMs > 0L) {
+                        (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
+                    } else {
+                        (audioOp.originalDurationMs - audioOp.internalStartMs) / 1000.0
+                    }
+                    val fadeOutStart = maxOf(0.0, clipDur - fadeSec)
+                    filters.add("afade=t=out:st=$fadeOutStart:d=$fadeSec")
+                }
+                var delayMs = audioOp.startTimeMs ?: 0L
+                if (delayMs < 0) delayMs = 0L
+                if (delayMs > 0) {
+                    filters.add("aformat=channel_layouts=stereo,adelay=$delayMs|$delayMs")
+                }
+                val safeVol = audioOp.volume.coerceIn(0f, 2f)
+                filters.add("volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}")
+
+                if (filters.isNotEmpty()) {
+                    filterParts.add("[$inputIdx:a]${filters.joinToString(",")}$trackLabel")
+                    mixInputLabels.add(trackLabel)
+                } else {
+                    mixInputLabels.add("[$inputIdx:a]")
+                }
+            }
+
+            if (mixInputLabels.size == 1) {
+                val singleLabel = mixInputLabels[0]
+                filterParts.add("${singleLabel}aformat=sample_rates=44100:channel_layouts=stereo[outa]")
+                currentAudioLabel = "[outa]"
+            } else {
+                val allBg = mixInputLabels.joinToString("")
+                filterParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
+                currentAudioLabel = "[outa]"
+            }
+        }
+
+        val filterComplexStr = filterParts.joinToString(";\n")
+        var scriptFile: File? = null
+        if (context != null && filterComplexStr.length > 2000) {
+            scriptFile = File(context.cacheDir, "filter_script_final_${System.currentTimeMillis()}.txt")
+            scriptFile.writeText(filterComplexStr)
+            com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
+            cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
+        } else {
+            cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
+        }
+
+        val bitrate = when (_exportResolution.value) {
+            2160 -> "30M"
+            1440 -> "16M"
+            1080 -> "8M"
+            720 -> "5M"
+            480 -> "2M"
+            else -> "1M"
+        }
+        val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
+            ?.getString("default_encoder", "software") ?: "software"
+        val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
+
+        cmd.append(" -map \"$currentV\"")
+        if (currentAudioLabel != null) {
+            cmd.append(" -map \"$currentAudioLabel\" -c:a aac")
+        } else {
+            cmd.append(" -an")
+        }
+        cmd.append(" $videoCodec")
+
+        val totalDurationSecs = chunkPlan.totalDurationMs / 1000.0
+        val formattedTotalDur = String.format(java.util.Locale.US, "%.3f", totalDurationSecs).trimEnd('0').trimEnd('.')
+        cmd.append(" -t $formattedTotalDur \"$outputFilePath\"")
+
+        val commandStr = cmd.toString()
+        Log.d(TAG, "Built final pass command: $commandStr")
+        return ChunkCommand(
+            chunkIndex = -1,
+            command = commandStr,
+            outputPath = outputFilePath,
+            durationSecs = totalDurationSecs,
+            scriptFilePath = scriptFile?.absolutePath
+        )
+    }
+
+    /**
+     * Build a ChunkExportPlan for the project.
+     * Preserves single-pass export byte-identically when total sequence input count <= 24.
+     * Activates chunked rendering when input count > 24.
+     */
+    fun buildChunkExportPlan(
+        sourceFilePath: String,
+        outputFilePath: String,
+        fontFilePath: String? = null,
+        context: Context? = null
+    ): ChunkExportPlan? {
+        val currentProject = _project.value ?: return null
+        val mergeOp = currentProject.operations.filterIsInstance<EditOperation.Merge>().firstOrNull()
+        val transitions = currentProject.operations.filterIsInstance<EditOperation.Transition>()
+
+        val trimOp = currentProject.operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
+        val speedOp = currentProject.operations.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()
+        val reverseOp = currentProject.operations.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()
+        val mirrorOp = currentProject.operations.filterIsInstance<EditOperation.MirrorMain>().lastOrNull()
+        val maskMainOp = currentProject.operations.filterIsInstance<EditOperation.MaskMain>().lastOrNull()
+        val maskConfig = maskMainOp?.maskConfig ?: EditOperation.MaskConfig()
+        val isMirrored = mirrorOp?.isMirrored ?: false
+        val isReversed = reverseOp?.isReversed ?: false
+        val speed = speedOp?.speed ?: 1.0f
+        val proxyUri = reverseOp?.proxyUri ?: speedOp?.proxyUri
+
+        val isMainImage = sourceFilePath.endsWith(".png", ignoreCase = true) ||
+                          sourceFilePath.endsWith(".jpg", ignoreCase = true) ||
+                          sourceFilePath.endsWith(".jpeg", ignoreCase = true) ||
+                          sourceFilePath.endsWith(".webp", ignoreCase = true)
+
+        var sourceDurationMs = 5000L
+        if (!isMainImage) {
+            try {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(sourceFilePath)
+                    val dStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                    sourceDurationMs = dStr?.toLongOrNull() ?: 5000L
+                } finally {
+                    retriever.release()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error extracting source duration: ${e.message}")
+            }
+        } else {
+            sourceDurationMs = trimOp?.let { it.endMs - it.startMs } ?: 5000L
+        }
+
+        val primaryItem = EditOperation.MergeItem(
+            uri = android.net.Uri.parse(sourceFilePath),
+            durationMs = sourceDurationMs,
+            trimStartMs = trimOp?.startMs ?: 0L,
+            trimEndMs = trimOp?.endMs ?: sourceDurationMs,
+            speed = speed,
+            isReversed = isReversed,
+            isMirrored = isMirrored,
+            proxyUri = proxyUri,
+            maskConfig = maskConfig,
+            isImage = isMainImage
+        )
+
+        val allSequenceItems = mutableListOf(primaryItem)
+        if (mergeOp != null) {
+            allSequenceItems.addAll(mergeOp.items)
+        }
+
+        // TRIGGER CHECK: If <= 24, preserve existing single-pass byte-identical command
+        if (allSequenceItems.size <= ChunkPlanner.CHUNK_TRIGGER_THRESHOLD) {
+            val singlePassCmd = buildConsolidatedFFmpegCommand(
+                sourceFilePath = sourceFilePath,
+                outputFilePath = outputFilePath,
+                fontFilePath = fontFilePath,
+                context = context
+            ) ?: return null
+            return ChunkExportPlan(
+                isChunked = false,
+                singlePassCommand = singlePassCmd
+            )
+        }
+
+        // Large sequence (> 24 inputs) -> Execute Chunked Export
+        val plan = ChunkPlanner.plan(allSequenceItems, transitions)
+        val density = context?.resources?.displayMetrics?.density ?: 1.0f
+
+        var sourceVideoWidth = 1280
+        var sourceVideoHeight = 720
+        if (isMainImage) {
+            try {
+                val opts = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(sourceFilePath, opts)
+                if (opts.outWidth > 0 && opts.outHeight > 0) {
+                    sourceVideoWidth = opts.outWidth
+                    sourceVideoHeight = opts.outHeight
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error reading image dimensions: ${e.message}")
+            }
+        } else {
+            try {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(sourceFilePath)
+                    val wStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    val hStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    val rStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                    val w = wStr?.toIntOrNull() ?: 1280
+                    val h = hStr?.toIntOrNull() ?: 720
+                    val r = rStr?.toIntOrNull() ?: 0
+                    if (r == 90 || r == 270) {
+                        sourceVideoWidth = h
+                        sourceVideoHeight = w
+                    } else {
+                        sourceVideoWidth = w
+                        sourceVideoHeight = h
+                    }
+                } finally {
+                    retriever.release()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error reading video dimensions: ${e.message}")
+            }
+        }
+
+        val targetCanvasRatio = currentProject.canvasAspectRatio ?: com.boostlyte.vydra.models.CanvasAspectRatio.fromDimensions(sourceVideoWidth, sourceVideoHeight)
+        val (targetWidth, targetHeight) = targetCanvasRatio.getTargetDimensions(_exportResolution.value)
+
+        val chunkTempDir = context?.cacheDir ?: File("/tmp")
+        val timestamp = System.currentTimeMillis()
+        val chunkCommands = mutableListOf<ChunkCommand>()
+        val chunkTempPaths = mutableListOf<String>()
+
+        for (chunk in plan.chunks) {
+            val chunkTempFile = File(chunkTempDir, "temp_chunk_${chunk.chunkIndex}_${timestamp}.mp4")
+            chunkTempPaths.add(chunkTempFile.absolutePath)
+
+            val chunkCmd = buildChunkPassCommand(
+                chunkSpec = chunk,
+                sourceFilePath = sourceFilePath,
+                chunkOutputPath = chunkTempFile.absolutePath,
+                fontFilePath = fontFilePath,
+                context = context,
+                totalDurationMs = plan.totalDurationMs,
+                density = density,
+                targetWidth = targetWidth,
+                targetHeight = targetHeight,
+                operations = currentProject.operations
+            )
+            chunkCommands.add(chunkCmd)
+        }
+
+        val finalPassCmd = buildFinalPassCommand(
+            chunkPlan = plan,
+            chunkTempPaths = chunkTempPaths,
+            outputFilePath = outputFilePath,
+            context = context,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+            operations = currentProject.operations
+        )
+
+        return ChunkExportPlan(
+            isChunked = true,
+            chunkCommands = chunkCommands,
+            finalPassCommand = finalPassCmd.command,
+            chunkTempPaths = chunkTempPaths,
+            totalDurationSecs = plan.totalDurationMs / 1000.0,
+            chunkDurationsSecs = plan.chunks.map { it.durationMs / 1000.0 }
+        )
     }
 
     /**

@@ -107,4 +107,104 @@ class ChunkPlannerTest {
         val chunk1Duration = inChunk1.localEndMs - inChunk1.localStartMs
         assertEquals(10000L, chunk0Duration + chunk1Duration)
     }
+
+    @Test
+    fun testDurationInvariant_64And120Clips() {
+        // Test 64 clips (exact multiple of 16 -> 4 chunks of 16)
+        val items64 = (0 until 64).map { idx ->
+            val dur = 3000L + (idx % 7) * 400L
+            EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$idx.jpg"), durationMs = dur)
+        }
+        val transitions64 = (0 until 63).map { gapIdx ->
+            val transDur = 800L + (gapIdx % 4) * 200L
+            EditOperation.Transition(index = gapIdx, type = "fade", durationMs = transDur)
+        }
+        val layout64 = TimelineLayoutCalculator.computeTimelineLayout(items64, transitions64)
+        val plan64 = ChunkPlanner.plan(items64, transitions64)
+
+        assertTrue(plan64.isChunked)
+        assertEquals(4, plan64.chunks.size)
+        assertEquals(listOf(16, 16, 16, 16), plan64.chunks.map { it.clips.size })
+        val sumChunk64 = plan64.chunks.sumOf { it.durationMs }
+        val sumBoundary64 = plan64.boundaryTransitions.sumOf { it.transition?.durationMs ?: 0L }
+        assertEquals(layout64.totalDurationMs, sumChunk64 - sumBoundary64)
+
+        // Test 120 clips (stress test: 7 chunks of 16 + 1 chunk of 8)
+        val items120 = (0 until 120).map { idx ->
+            val dur = 2500L + (idx % 9) * 300L
+            EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$idx.jpg"), durationMs = dur)
+        }
+        val transitions120 = (0 until 119).map { gapIdx ->
+            val transDur = 600L + (gapIdx % 5) * 150L
+            EditOperation.Transition(index = gapIdx, type = "fade", durationMs = transDur)
+        }
+        val layout120 = TimelineLayoutCalculator.computeTimelineLayout(items120, transitions120)
+        val plan120 = ChunkPlanner.plan(items120, transitions120)
+
+        assertTrue(plan120.isChunked)
+        assertEquals(8, plan120.chunks.size)
+        assertEquals(listOf(16, 16, 16, 16, 16, 16, 16, 8), plan120.chunks.map { it.clips.size })
+        val sumChunk120 = plan120.chunks.sumOf { it.durationMs }
+        val sumBoundary120 = plan120.boundaryTransitions.sumOf { it.transition?.durationMs ?: 0L }
+        assertEquals(layout120.totalDurationMs, sumChunk120 - sumBoundary120)
+    }
+
+    @Test
+    fun testChunkPlanTransitionsEverywhere_boundaryIsolation() {
+        val items40 = (0 until 40).map { idx ->
+            EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$idx.jpg"), durationMs = 4000L)
+        }
+        val transitions40 = (0 until 39).map { gapIdx ->
+            EditOperation.Transition(index = gapIdx, type = "wipeleft", durationMs = 1000L)
+        }
+        val plan40 = ChunkPlanner.plan(items40, transitions40)
+
+        assertTrue(plan40.isChunked)
+        // 40 clips -> [16, 16, 8]
+        assertEquals(3, plan40.chunks.size)
+        assertEquals(2, plan40.boundaryTransitions.size)
+
+        // Boundary transitions must be gap 15 and gap 31
+        assertEquals(15, plan40.boundaryTransitions[0].globalGapIndex)
+        assertEquals(31, plan40.boundaryTransitions[1].globalGapIndex)
+
+        // Internal transitions inside each chunk must be remapped to 0 until (size - 1)
+        for (chunk in plan40.chunks) {
+            val maxExpectedGap = chunk.clips.size - 2
+            for (t in chunk.internalTransitions) {
+                assertTrue("Internal transition index must be <= max gap $maxExpectedGap", t.index in 0..maxExpectedGap)
+            }
+        }
+    }
+
+    @Test
+    fun testKeyframeTimeRemapCorrectness() {
+        val vm = com.boostlyte.vydra.viewmodels.VideoEditingViewModel()
+        val keyframes = listOf(
+            EditOperation.KeyframePoint(timeMs = 10000L, valueX = 0.0f, valueY = 0.0f),
+            EditOperation.KeyframePoint(timeMs = 20000L, valueX = 1.0f, valueY = 1.0f)
+        )
+
+        // Without time offset (chunk 0 starting at 0ms):
+        // effectiveStartSec = (10000 - 0) / 1000.0 = 10.0
+        val expr0 = vm.buildFFmpegInterpolationExpr(
+            keyframes = keyframes,
+            useValueY = false,
+            defaultValue = 0.0f,
+            startTimeMs = 10000L,
+            timeOffsetMs = 0L
+        )
+        assertTrue("Expression must use 10.0 for effectiveStartSec without offset", expr0.contains("(t-10.0)"))
+
+        // With time offset 10000ms (chunk 1 starting at global 10000ms):
+        // effectiveStartSec = (10000 - 10000) / 1000.0 = 0.0
+        val exprChunk1 = vm.buildFFmpegInterpolationExpr(
+            keyframes = keyframes,
+            useValueY = false,
+            defaultValue = 0.0f,
+            startTimeMs = 10000L,
+            timeOffsetMs = 10000L
+        )
+        assertTrue("Expression in chunk 1 must shift effectiveStartSec to 0.0", exprChunk1.contains("(t-0.0)"))
+    }
 }
