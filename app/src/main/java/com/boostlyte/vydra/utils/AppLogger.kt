@@ -22,6 +22,7 @@ object AppLogger {
     private const val MAX_LOG_SIZE_BYTES = 256 * 1024L // 256 KB max per log file
     private const val CRASH_LOG_NAME = "vydra_crash.log"
     private const val EXPORT_LOG_NAME = "vydra_export.log"
+    private const val FILTER_GRAPH_LOG_NAME = "vydra_filter_graph.log"
 
     private val ISO_DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US)
 
@@ -35,6 +36,7 @@ object AppLogger {
 
     fun getCrashLogFile(context: Context): File = File(getLogsDir(context), CRASH_LOG_NAME)
     fun getExportLogFile(context: Context): File = File(getLogsDir(context), EXPORT_LOG_NAME)
+    fun getFilterGraphLogFile(context: Context): File = File(getLogsDir(context), FILTER_GRAPH_LOG_NAME)
 
     fun getIsoTimestamp(): String = synchronized(ISO_DATE_FORMAT) {
         ISO_DATE_FORMAT.format(Date())
@@ -181,10 +183,31 @@ object AppLogger {
     }
 
     /**
+     * Saves or copies the generated filter_complex_script into cacheDir/logs/
+     * so it is permanently preserved in the "Share App Logs" diagnostic bundle.
+     */
+    fun saveFilterComplexScriptLog(context: Context, scriptContent: String, sourceFile: File? = null) {
+        try {
+            val destFile = getFilterGraphLogFile(context)
+            if (sourceFile != null && sourceFile.exists()) {
+                sourceFile.copyTo(destFile, overwrite = true)
+            } else {
+                destFile.writeText(scriptContent)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist filter graph script: ${e.message}")
+        }
+    }
+
+    /**
      * Returns list of existing log files for sharing.
      */
     fun getLogFiles(context: Context): List<File> {
         val dir = getLogsDir(context)
-        return listOf(File(dir, EXPORT_LOG_NAME), File(dir, CRASH_LOG_NAME)).filter { it.exists() && it.length() > 0L }
+        return listOf(
+            File(dir, EXPORT_LOG_NAME),
+            File(dir, CRASH_LOG_NAME),
+            File(dir, FILTER_GRAPH_LOG_NAME)
+        ).filter { it.exists() && it.length() > 0L }
     }
 }

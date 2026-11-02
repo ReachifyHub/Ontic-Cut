@@ -198,48 +198,58 @@ class VideoEditingViewModel : ViewModel() {
 
     /** Build a drawtext filter expression for a text operation. */
     private fun buildDrawtextExpr(op: EditOperation.AddText, fontFilePath: String?): String {
-        val escapedText = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeDrawtextText(op.text)
-
         val fontToUse = op.fontPath ?: fontFilePath
-        val fontPart = if (!fontToUse.isNullOrBlank()) {
-            val escapedFont = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeFontPath(fontToUse)
-            "fontfile='$escapedFont':"
-        } else {
-            Log.w(TAG, "No fontFilePath — text overlay may not render on Android.")
-            ""
-        }
 
-        // Use WYSIWYG fractional coordinates if available, else fall back to enum position
-        val positionPart = if (op.positionKeyframes.isNotEmpty()) {
+        // Use WYSIWYG fractional coordinates if available, else fall back to explicit coordinates
+        val (posX, posY) = if (op.positionKeyframes.isNotEmpty()) {
             val xExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = false, defaultValue = op.relativeX ?: 0.5f, startTimeMs = op.startTimeMs ?: 0L)
             val yExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = true, defaultValue = op.relativeY ?: 0.5f, startTimeMs = op.startTimeMs ?: 0L)
-            "x='(w*($xExpr))-(tw/2)':y='(h*($yExpr))-(th/2)'"
+            Pair("'(w*($xExpr))-(tw/2)'", "'(h*($yExpr))-(th/2)'")
         } else if (op.hasCustomPosition()) {
-            "x='(w*${op.relativeX})-(tw/2)':y='(h*${op.relativeY})-(th/2)'"
+            Pair("'(w*${op.relativeX})-(tw/2)'", "'(h*${op.relativeY})-(th/2)'")
         } else {
-            op.position.ffmpegParam
+            when (op.position) {
+                TextPosition.TOP_LEFT -> Pair("24", "24")
+                TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "24")
+                TextPosition.TOP_RIGHT -> Pair("w-tw-24", "24")
+                TextPosition.CENTER_LEFT -> Pair("24", "(h-th)/2")
+                TextPosition.CENTER -> Pair("(w-tw)/2", "(h-th)/2")
+                TextPosition.CENTER_RIGHT -> Pair("w-tw-24", "(h-th)/2")
+                TextPosition.BOTTOM_LEFT -> Pair("24", "h-th-40")
+                TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> Pair("(w-tw)/2", "h-th-40")
+                TextPosition.BOTTOM_RIGHT -> Pair("w-tw-24", "h-th-40")
+            }
         }
 
-        val enablePart = buildEnableExpr(op.startTimeMs, op.endTimeMs)
-        
-        val alphaPart = if (op.opacityKeyframes.isNotEmpty()) {
-            val alphaExpr = buildFFmpegInterpolationExpr(op.opacityKeyframes, useValueY = false, defaultValue = op.opacity, startTimeMs = op.startTimeMs ?: 0L)
-            ":alpha='$alphaExpr'"
+        val alphaExpr = if (op.opacityKeyframes.isNotEmpty()) {
+            buildFFmpegInterpolationExpr(op.opacityKeyframes, useValueY = false, defaultValue = op.opacity, startTimeMs = op.startTimeMs ?: 0L)
         } else if (op.opacity < 1.0f) {
-            ":alpha='${op.opacity}'"
-        } else {
-            ""
-        }
-        val shadowPart = if (op.borderThickness > 0) {
+            "${op.opacity}"
+        } else null
+
+        val (shadowColor, shadowOffset) = if (op.borderThickness > 0) {
             val resScale = (_exportResolution.value.toFloat() / 720f).coerceIn(0.5f, 3.0f)
             val offset = maxOf(1, Math.round(op.borderThickness * 0.8f * resScale))
-            ":shadowcolor=black@0.75:shadowx=$offset:shadowy=$offset"
-        } else ""
-        val alignPart = if (op.textAlign.isNotEmpty()) ":text_align=${op.textAlign}" else ""
-        val lineSpacingPart = if (op.lineSpacing != 0f) ":line_spacing=${op.lineSpacing.toInt()}" else ""
+            Pair("black@0.75", offset)
+        } else Pair(null, 0)
+
         val fontColor = formatColorForFFmpeg(op.color)
-        
-        return "drawtext=expansion=none:${fontPart}text='$escapedText':fontcolor=$fontColor:fontsize=${op.fontSize}:$positionPart$enablePart$alphaPart$shadowPart$alignPart$lineSpacingPart"
+
+        return com.boostlyte.vydra.utils.FFmpegFilterUtils.buildValidatedDrawtextFilter(
+            text = op.text,
+            fontFilePath = fontToUse,
+            fontSize = op.fontSize,
+            fontColor = fontColor,
+            x = posX,
+            y = posY,
+            startTimeMs = op.startTimeMs,
+            endTimeMs = op.endTimeMs,
+            shadowColor = shadowColor,
+            shadowOffset = shadowOffset,
+            alphaExpr = alphaExpr,
+            textAlign = if (op.textAlign.isNotEmpty()) op.textAlign else null,
+            lineSpacing = op.lineSpacing.toInt()
+        )
     }
 
     private fun buildFFmpegMaskAlphaExpr(
@@ -430,7 +440,12 @@ class VideoEditingViewModel : ViewModel() {
         var stageIndex = 0
 
         // Process overlays first so their relative coordinates align with the uncropped original video, matching the UI.
-        val overlayOps = operations.filterNot { it is EditOperation.Crop }
+        // Deduplicate: If explicit AddSubtitles cues are present, suppress duplicate auto-caption AddText overlays
+        val hasExplicitSubtitles = operations.any { it is EditOperation.AddSubtitles && it.cues.isNotEmpty() }
+        val overlayOps = operations.filterNot {
+            it is EditOperation.Crop ||
+            (hasExplicitSubtitles && it is EditOperation.AddText && it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID)
+        }
         val cropOps = operations.filterIsInstance<EditOperation.Crop>()
 
         for (op in overlayOps) {
@@ -565,49 +580,50 @@ class VideoEditingViewModel : ViewModel() {
                     val marginY = (24f * effectiveDensity * (refHeight / 1080f)).toInt()
                     val lineSpacing = (scaledFontSize * 1.25f).toInt()
                     
+                    val fontToUse = if (!op.fontPath.isNullOrBlank() && java.io.File(op.fontPath).exists()) op.fontPath else fontFilePath
+                    val fontColor = formatColorForFFmpeg(op.color)
+                    val boxColor = if (op.backgroundColor != "none" && op.backgroundColor.isNotBlank()) {
+                        formatColorForFFmpeg(op.backgroundColor)
+                    } else {
+                        "black@0.5"
+                    }
+
                     for (cue in op.cues) {
                         val lines = getWrappedSubtitleLines(cue.text, op.fontSize, effectiveDensity)
                         val totalBlockHeight = lines.size * lineSpacing
-                        val enablePart = buildEnableExpr(cue.startTimeMs, cue.endTimeMs)
-                        
-                        val fontToUse = if (!op.fontPath.isNullOrBlank() && java.io.File(op.fontPath).exists()) op.fontPath else fontFilePath
-                        val fontPart = if (!fontToUse.isNullOrBlank()) {
-                            val escapedFont = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeFontPath(fontToUse)
-                            "fontfile='$escapedFont':"
-                        } else {
-                            ""
-                        }
 
                         for ((lineIdx, lineText) in lines.withIndex()) {
-                            val escapedLine = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeDrawtextText(lineText)
-
                             val lineOffset = lineIdx * lineSpacing
 
-                            val posPart = if (op.hasCustomPosition()) {
+                            val (posX, posY) = if (op.hasCustomPosition()) {
                                 val startY = "(h*${op.relativeY})-${totalBlockHeight / 2}"
-                                "x='(w*${op.relativeX})-(tw/2)':y='$startY+$lineOffset'"
+                                Pair("'(w*${op.relativeX})-(tw/2)'", "'$startY+$lineOffset'")
                             } else {
                                 when (op.position) {
-                                    TextPosition.TOP_LEFT -> "x=24:y=24+$lineOffset"
-                                    TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> "x=(w-tw)/2:y=24+$lineOffset"
-                                    TextPosition.TOP_RIGHT -> "x=w-tw-24:y=24+$lineOffset"
-                                    TextPosition.CENTER_LEFT -> "x=24:y=(h-${totalBlockHeight})/2+$lineOffset"
-                                    TextPosition.CENTER -> "x=(w-tw)/2:y=(h-${totalBlockHeight})/2+$lineOffset"
-                                    TextPosition.CENTER_RIGHT -> "x=w-tw-24:y=(h-${totalBlockHeight})/2+$lineOffset"
-                                    TextPosition.BOTTOM_LEFT -> "x=24:y=h-$marginY-$totalBlockHeight+$lineOffset"
-                                    TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> "x=(w-tw)/2:y=h-$marginY-$totalBlockHeight+$lineOffset"
-                                    TextPosition.BOTTOM_RIGHT -> "x=w-tw-24:y=h-$marginY-$totalBlockHeight+$lineOffset"
+                                    TextPosition.TOP_LEFT -> Pair("24", "24+$lineOffset")
+                                    TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "24+$lineOffset")
+                                    TextPosition.TOP_RIGHT -> Pair("w-tw-24", "24+$lineOffset")
+                                    TextPosition.CENTER_LEFT -> Pair("24", "(h-${totalBlockHeight})/2+$lineOffset")
+                                    TextPosition.CENTER -> Pair("(w-tw)/2", "(h-${totalBlockHeight})/2+$lineOffset")
+                                    TextPosition.CENTER_RIGHT -> Pair("w-tw-24", "(h-${totalBlockHeight})/2+$lineOffset")
+                                    TextPosition.BOTTOM_LEFT -> Pair("24", "h-$marginY-$totalBlockHeight+$lineOffset")
+                                    TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> Pair("(w-tw)/2", "h-$marginY-$totalBlockHeight+$lineOffset")
+                                    TextPosition.BOTTOM_RIGHT -> Pair("w-tw-24", "h-$marginY-$totalBlockHeight+$lineOffset")
                                 }
                             }
 
-                            val boxColor = if (op.backgroundColor != "none" && op.backgroundColor.isNotBlank()) {
-                                formatColorForFFmpeg(op.backgroundColor)
-                            } else {
-                                "black@0.5"
-                            }
-                            val boxPart = ":box=1:boxcolor=$boxColor:boxborderw=$boxBorderW"
-                            val fontColor = formatColorForFFmpeg(op.color)
-                            val filterExpr = "drawtext=expansion=none:${fontPart}text='$escapedLine':fontcolor=$fontColor:fontsize=${scaledFontSize}:${posPart}${boxPart}$enablePart"
+                            val filterExpr = com.boostlyte.vydra.utils.FFmpegFilterUtils.buildValidatedDrawtextFilter(
+                                text = lineText,
+                                fontFilePath = fontToUse,
+                                fontSize = scaledFontSize,
+                                fontColor = fontColor,
+                                x = posX,
+                                y = posY,
+                                startTimeMs = cue.startTimeMs,
+                                endTimeMs = cue.endTimeMs,
+                                boxColor = boxColor,
+                                boxBorderW = boxBorderW
+                            )
                             
                             val nextLabel = "[v$stageIndex]"
                             stages.add("$currentLabel$filterExpr$nextLabel")
@@ -1055,14 +1071,19 @@ class VideoEditingViewModel : ViewModel() {
                 val clipMotionType = motionOp?.motionType ?: if (i > 0) mergeOp?.items?.getOrNull(i - 1)?.motionEffect else null
                 val d = durationsArray[i].coerceAtLeast(0.1)
 
+                val motionW = (((mainWidth * 1.15).toInt()) / 2) * 2
+                val motionH = (((mainHeight * 1.15).toInt()) / 2) * 2
+                val coverScale = "scale=w=$motionW:h=$motionH:force_original_aspect_ratio=increase"
+                val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
+
                 val motionFilter = when (clipMotionType) {
-                    "zoom_in" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth*1.15:$mainHeight*1.15,zoompan=z='1.0+0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=30"
-                    "zoom_out" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth*1.15:$mainHeight*1.15,zoompan=z='1.12-0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=30"
-                    "pan_left" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'"
-                    "pan_right" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'"
-                    "pan_up" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'"
-                    "pan_down" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$d)'"
-                    "drift_up_right" -> "scale=w='1.15*$mainWidth':h='1.15*$mainHeight':force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)*(1-(t/$d))'"
+                    "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=${_exportFps.value}"
+                    "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=${_exportFps.value}"
+                    "pan_left" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'"
+                    "pan_right" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'"
+                    "pan_up" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'"
+                    "pan_down" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$d)'"
+                    "drift_up_right" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)*(1-(t/$d))'"
                     else -> null
                 }
 
@@ -1070,14 +1091,14 @@ class VideoEditingViewModel : ViewModel() {
                     filterParts.add("[pre$i]$motionFilter[raw_stage$i]")
                 } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.BLUR) {
                     val blur = bgOp.blurRadius
-                    val bgScale = "format=yuv420p,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight,boxblur=$blur"
+                    val bgScale = "format=yuv420p,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:(in_w-$mainWidth)/2:(in_h-$mainHeight)/2,boxblur=$blur"
                     val fgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease"
                     filterParts.add("[pre$i]split=2[bg_orig$i][fg_orig$i]")
                     filterParts.add("[bg_orig$i]$bgScale[bg$i]")
                     filterParts.add("[fg_orig$i]$fgScale[fg$i]")
                     filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2[raw_stage$i]")
                 } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgImageIndex != -1) {
-                    val bgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight"
+                    val bgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:(in_w-$mainWidth)/2:(in_h-$mainHeight)/2"
                     val fgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease"
                     filterParts.add("[$bgImageIndex:v]$bgScale[bg$i]")
                     filterParts.add("[pre$i]$fgScale[fg$i]")
@@ -1088,13 +1109,13 @@ class VideoEditingViewModel : ViewModel() {
                     val color = bgOp?.colorHex ?: "black"
                     val padColor = if (color.startsWith("#")) formatColorForFFmpeg(color) else "black"
                     // Create a solid color background of mainWidth x mainHeight
-                    filterParts.add("color=c=$padColor:s=${mainWidth}x${mainHeight}:r=30[bg$i]")
+                    filterParts.add("color=c=$padColor:s=${mainWidth}x${mainHeight}:r=${_exportFps.value}[bg$i]")
                     filterParts.add("[pre$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease[fg$i]")
                     filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$i]")
                 }
 
                 // Explicit normalization stage for clip i: guarantees exact resolution, padding, SAR, fps, and pixel format before xfade/transitions
-                filterParts.add("[raw_stage$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm$i]")
+                filterParts.add("[raw_stage$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
 
                 val isClipMuted = operations.filterIsInstance<EditOperation.MuteClip>().find { it.index == i }?.isMuted ?: false
                 if (hasAudioArray[i] && !isClipMuted) {
@@ -1390,9 +1411,13 @@ class VideoEditingViewModel : ViewModel() {
                 filterParts.add("${finalVideoLabel}nullsink")
             }
             val filterComplexStr = filterParts.joinToString(";\n")
+            if (context != null) {
+                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr)
+            }
             if (context != null && (filterComplexStr.length > 2000 || (mergeOp != null && mergeOp.items.size >= 10))) {
                 val scriptFile = File(context.cacheDir, "filter_script_${System.currentTimeMillis()}.txt")
                 scriptFile.writeText(filterComplexStr)
+                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
                 cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
             } else {
                 cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
@@ -1622,7 +1647,7 @@ class VideoEditingViewModel : ViewModel() {
         when {
             bgOp?.type == EditOperation.CanvasBackground.BackgroundType.BLUR -> {
                 val blur = bgOp.blurRadius
-                val bgScale = "format=yuv420p,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight,boxblur=$blur"
+                val bgScale = "format=yuv420p,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight:(in_w-$targetWidth)/2:(in_h-$targetHeight)/2,boxblur=$blur"
                 val fgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease"
                 filterComplexParts.add("${finalVideoLabel}split=2[bg_nm_orig][fg_nm_orig]")
                 filterComplexParts.add("[bg_nm_orig]$bgScale[bg_nm]")
@@ -1630,7 +1655,7 @@ class VideoEditingViewModel : ViewModel() {
                 filterComplexParts.add("[bg_nm][fg_nm]overlay=(W-w)/2:(H-h)/2,setsar=1,fps=${_exportFps.value},format=yuv420p$fmtLabel")
             }
             bgOp?.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgImageIndex != -1 -> {
-                val bgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight"
+                val bgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight:(in_w-$targetWidth)/2:(in_h-$targetHeight)/2"
                 val fgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease"
                 filterComplexParts.add("[$bgImageIndex:v]$bgScale[bg_nm]")
                 filterComplexParts.add("${finalVideoLabel}$fgScale[fg_nm]")
@@ -1653,9 +1678,13 @@ class VideoEditingViewModel : ViewModel() {
             }
             
             val filterComplexStr = filterComplexParts.joinToString(";\n")
+            if (context != null) {
+                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr)
+            }
             if (context != null && filterComplexStr.length > 2000) {
                 val scriptFile = File(context.cacheDir, "filter_script_${System.currentTimeMillis()}.txt")
                 scriptFile.writeText(filterComplexStr)
+                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
                 cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
             } else {
                 cmd.append(" -filter_complex \"${filterComplexParts.joinToString(";")}\"")
