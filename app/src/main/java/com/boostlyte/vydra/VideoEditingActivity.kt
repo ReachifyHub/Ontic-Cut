@@ -5842,7 +5842,7 @@ class VideoEditingActivity : AppCompatActivity() {
         picker.show(supportFragmentManager, "MediaPickerBottomSheet")
     }
 
-    private fun processMergeVideoUris(selectedVideoUris: List<Uri>) {
+    private fun processMergeVideoUris(selectedVideoUris: List<Uri>, explicitTargetIdx: Int? = null) {
         if (selectedVideoUris.isEmpty()) return
         lifecycleScope.launch {
             val mergeItems = withContext(Dispatchers.IO) {
@@ -5894,10 +5894,22 @@ class VideoEditingActivity : AppCompatActivity() {
                 isImportLoading = true
                 showLoading("Importing media...")
                 val sequenceItems = getSequenceItems()
-                val targetIdx = pendingInsertIndex ?: calculatePlayheadInsertionIndex() ?: sequenceItems.size
+                val targetIdx = explicitTargetIdx ?: pendingInsertIndex ?: sequenceItems.size
                 pendingInsertIndex = null
                 val currentPrimary = sequenceItems.firstOrNull()
                 viewModel.insertSequenceItems(targetIdx, mergeItems, currentPrimary)
+
+                // Recalculate timeline layout & pixels-per-ms on full sequence to prevent squish
+                viewModel.project.value?.let { proj ->
+                    val updatedItems = getSequenceItems()
+                    val trans = proj.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>()
+                    val layout = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(updatedItems, trans)
+                    val scrollWidth = timelineHorizontalScroll.width.toFloat()
+                    val density = resources.displayMetrics.density
+                    pixelsPerMs = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.calculatePixelsPerMs(layout.totalDurationMs, scrollWidth, density)
+                    renderTracks(proj)
+                }
+
                 Toast.makeText(this@VideoEditingActivity, "${mergeItems.size} clip(s) added to sequence", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this@VideoEditingActivity, R.string.toast_failed_to_load_selected_video, Toast.LENGTH_SHORT).show()
@@ -5952,7 +5964,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 if (uris.isNotEmpty()) {
                     handleMainSelectedVideo(uris.first())
                     if (uris.size > 1) {
-                        processMergeVideoUris(uris.drop(1))
+                        processMergeVideoUris(uris.drop(1), explicitTargetIdx = 1)
                     }
                 }
             }
@@ -6661,9 +6673,8 @@ class VideoEditingActivity : AppCompatActivity() {
                             val scrollWidth = timelineHorizontalScroll.width.toFloat()
                             if (scrollWidth > 0) {
                                 val safeDuration = totalDuration
-                                val newPixelsPerMs = (scrollWidth - 32.dpToPx()) / safeDuration
                                 val density = resources.displayMetrics.density
-                                pixelsPerMs = newPixelsPerMs.coerceIn(0.001f * density, 2.0f * density)
+                                pixelsPerMs = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.calculatePixelsPerMs(safeDuration, scrollWidth, density)
                                 viewModel.project.value?.let { renderTracks(it) }
                                 isInitialFitDone = true
                             }
@@ -6853,7 +6864,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 val extraUris = intent.getParcelableArrayListExtra<Uri>("EXTRA_MEDIA_URIS")
                 if (!extraUris.isNullOrEmpty()) {
                     intent.removeExtra("EXTRA_MEDIA_URIS")
-                    processMergeVideoUris(extraUris)
+                    processMergeVideoUris(extraUris, explicitTargetIdx = 1)
                 }
             }
         }
@@ -6980,7 +6991,9 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private fun getTotalSequenceDuration(): Long {
-        return getSequenceItems().sumOf { it.trimmedDurationMs }
+        val items = getSequenceItems()
+        val transitions = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>() ?: emptyList()
+        return com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(items, transitions).totalDurationMs
     }
 
     private var pendingInsertIndex: Int? = null
@@ -7853,9 +7866,8 @@ class VideoEditingActivity : AppCompatActivity() {
                                 val scrollWidth = timelineHorizontalScroll.width.toFloat()
                                 if (scrollWidth > 0) {
                                     val safeDuration = totalDuration
-                                    val newPixelsPerMs = (scrollWidth - 32.dpToPx()) / safeDuration
                                     val density = resources.displayMetrics.density
-                                    pixelsPerMs = newPixelsPerMs.coerceIn(0.001f * density, 2.0f * density)
+                                    pixelsPerMs = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.calculatePixelsPerMs(safeDuration, scrollWidth, density)
                                     viewModel.project.value?.let { renderTracks(it) }
                                     isInitialFitDone = true
                                 }
@@ -7937,9 +7949,8 @@ class VideoEditingActivity : AppCompatActivity() {
                                         val scrollWidth = timelineHorizontalScroll.width.toFloat()
                                         if (scrollWidth > 0) {
                                             val safeDuration = totalDuration
-                                            val newPixelsPerMs = (scrollWidth - 32.dpToPx()) / safeDuration
                                             val density = resources.displayMetrics.density
-                                            pixelsPerMs = newPixelsPerMs.coerceIn(0.001f * density, 2.0f * density)
+                                            pixelsPerMs = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.calculatePixelsPerMs(safeDuration, scrollWidth, density)
                                             viewModel.project.value?.let { renderTracks(it) }
                                             isInitialFitDone = true
                                         }
@@ -8193,8 +8204,10 @@ class VideoEditingActivity : AppCompatActivity() {
         activeSegmentViews.clear()
 
         val sequenceItems = getSequenceItems()
+        val transitions = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>()
+        val timelineLayout = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(sequenceItems, transitions)
 
-        val totalSequenceDuration = getTotalSequenceDuration()
+        val totalSequenceDuration = timelineLayout.totalDurationMs
         if (totalSequenceDuration <= 0L) {
             updateTimelineAddButtonPosition()
             return
@@ -8384,11 +8397,15 @@ class VideoEditingActivity : AppCompatActivity() {
         val transitionViewsToLayout = mutableListOf<Pair<View, FrameLayout.LayoutParams>>()
 
         sequenceItems.forEachIndexed { index, item ->
+            val clipLayout = timelineLayout.clips.getOrNull(index)
+            val clipStartMs = clipLayout?.startMs ?: accumulatedStartMs
+            val clipDurMs = clipLayout?.durationMs ?: item.trimmedDurationMs
+
             val segmentView = layoutInflater.inflate(R.layout.item_sequence_segment, sequenceTrackContainer, false) as FrameLayout
             segmentView.clipChildren = false
             segmentView.clipToPadding = false
-            val segmentWidth = (item.trimmedDurationMs * pixelsPerMs).toInt()
-            val segmentLeft = (accumulatedStartMs * pixelsPerMs).toInt()
+            val segmentWidth = (clipDurMs * pixelsPerMs).toInt()
+            val segmentLeft = (clipStartMs * pixelsPerMs).toInt()
             val params = FrameLayout.LayoutParams(segmentWidth, ViewGroup.LayoutParams.MATCH_PARENT).apply {
                 leftMargin = segmentLeft
             }
@@ -8613,9 +8630,13 @@ class VideoEditingActivity : AppCompatActivity() {
                     btnTransition.setImageResource(R.drawable.ic_add_24)
                 }
                 
+                val transLayout = timelineLayout.transitions.find { it.gapIndex == index - 1 }
+                val transOffsetMs = transLayout?.offsetMs ?: clipStartMs
+                val transLeft = (transOffsetMs * pixelsPerMs).toInt()
+
                 val transitionWidth = 24.dpToPx()
                 val transParams = FrameLayout.LayoutParams(transitionWidth, transitionWidth).apply {
-                    leftMargin = segmentLeft - transitionWidth / 2
+                    leftMargin = transLeft - transitionWidth / 2
                     gravity = android.view.Gravity.CENTER_VERTICAL
                 }
                 transitionViewsToLayout.add(Pair(transitionView, transParams))

@@ -88,18 +88,22 @@ data class VideoProject(
      * This is computed during the final export and is not stored.
      */
     fun getDurationAfterTrims(): Long? {
-        // This will be computed when building the final FFmpeg command
-        var effectiveDuration: Long? = null
-        
-        for (operation in operations) {
-            if (operation is EditOperation.Trim) {
-                effectiveDuration = operation.endMs - operation.startMs
-                // Note: only the last trim is considered; in a real scenario,
-                // you'd chain them if multiple trims exist
-            }
+        val trimOp = operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
+        val c0Dur = if (trimOp != null) (trimOp.endMs - trimOp.startMs).coerceAtLeast(0L) else 5000L
+        val c0Item = EditOperation.MergeItem(
+            uri = sourceUri,
+            durationMs = c0Dur,
+            trimStartMs = trimOp?.startMs ?: 0L,
+            trimEndMs = trimOp?.endMs ?: c0Dur
+        )
+        val mergeOp = operations.filterIsInstance<EditOperation.Merge>().firstOrNull()
+        val allItems = mutableListOf(c0Item)
+        if (mergeOp != null) {
+            allItems.addAll(mergeOp.items)
         }
-        
-        return effectiveDuration
+        val transitions = operations.filterIsInstance<EditOperation.Transition>()
+        val layout = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(allItems, transitions)
+        return layout.totalDurationMs
     }
     
     /**

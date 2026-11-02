@@ -294,17 +294,18 @@ class VideoEditingViewModel : ViewModel() {
         return if (mc.isInverted) "(255 - ($shapeExpr))" else "($shapeExpr)"
     }
 
-    private fun buildFFmpegInterpolationExpr(
+    fun buildFFmpegInterpolationExpr(
         keyframes: List<EditOperation.KeyframePoint>,
         useValueY: Boolean,
         defaultValue: Float,
         startTimeMs: Long,
-        timeVar: String = "t"
+        timeVar: String = "t",
+        timeOffsetMs: Long = 0L
     ): String {
         if (keyframes.isEmpty()) return defaultValue.toString()
         val sorted = keyframes.sortedBy { it.timeMs }
-        val startSec = startTimeMs / 1000.0
-        val tRel = "($timeVar-$startSec)"
+        val effectiveStartSec = (startTimeMs - timeOffsetMs) / 1000.0
+        val tRel = "($timeVar-$effectiveStartSec)"
         
         if (sorted.size == 1) {
             val v = if (useValueY) sorted[0].valueY else sorted[0].valueX

@@ -39,43 +39,19 @@ object TransitionTimelineCalculator {
             return TransitionTimelineMath(clipDurationsSec[0], emptyList())
         }
 
-        val inputCount = clipDurationsSec.size
-        val transitionOps = List(inputCount - 1) { gapIdx ->
-            transitions.find { it.index == gapIdx }
+        val clipDurationsMs = clipDurationsSec.map { (it * 1000.0).toLong() }
+        val layout = TimelineLayoutCalculator.computeTimelineLayoutFromDurations(clipDurationsMs, transitions)
+        val transList = layout.transitions.map {
+            TransitionOffsetInfo(
+                gapIndex = it.gapIndex,
+                offsetSec = it.offsetMs / 1000.0,
+                durationSec = it.durationMs / 1000.0,
+                transitionType = it.transitionType
+            )
         }
-
-        val resultTransitions = mutableListOf<TransitionOffsetInfo>()
-        var accumulatedDuration = clipDurationsSec[0]
-
-        for (gapIdx in 0 until inputCount - 1) {
-            val transOp = transitionOps[gapIdx]
-            val nextClipDuration = clipDurationsSec[gapIdx + 1]
-
-            if (transOp == null || transOp.type.equals("none", ignoreCase = true) || transOp.durationMs <= 0) {
-                accumulatedDuration += nextClipDuration
-            } else {
-                val rawTransDuration = transOp.durationMs / 1000.0
-                val transDuration = rawTransDuration
-                    .coerceAtMost(accumulatedDuration)
-                    .coerceAtMost(nextClipDuration)
-                val offset = (accumulatedDuration - transDuration).coerceAtLeast(0.0)
-
-                resultTransitions.add(
-                    TransitionOffsetInfo(
-                        gapIndex = gapIdx,
-                        offsetSec = offset,
-                        durationSec = transDuration,
-                        transitionType = transOp.type
-                    )
-                )
-
-                accumulatedDuration = offset + nextClipDuration
-            }
-        }
-
         return TransitionTimelineMath(
-            totalDurationSec = accumulatedDuration,
-            transitions = resultTransitions
+            totalDurationSec = layout.totalDurationMs / 1000.0,
+            transitions = transList
         )
     }
 }
