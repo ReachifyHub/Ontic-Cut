@@ -234,6 +234,10 @@ class MainActivity : AppCompatActivity() {
                 .start(this)
         }
         
+        binding.btnShareAppLogs.setBounceClickListener {
+            showShareAppLogsDialog()
+        }
+        
         // Initialize Settings UI
         val prefs = getSharedPreferences("vydra_prefs", MODE_PRIVATE)
         val savedUriString = prefs.getString("export_directory_uri", null)
@@ -528,6 +532,71 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.show()
+    }
+
+    private fun showShareAppLogsDialog() {
+        val logs = com.boostlyte.vydra.utils.AppLogger.getRecentLogs(this, 50)
+        val scrollView = android.widget.ScrollView(this).apply {
+            setPadding(40, 20, 40, 20)
+        }
+        val textView = android.widget.TextView(this).apply {
+            text = logs
+            setTextIsSelectable(true)
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(getColor(R.color.textColor))
+        }
+        scrollView.addView(textView)
+
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.str_share_logs)
+            .setView(scrollView)
+            .setPositiveButton("Share Logs") { _, _ ->
+                val logFiles = com.boostlyte.vydra.utils.AppLogger.getLogFiles(this)
+                if (logFiles.isNotEmpty()) {
+                    val uris = ArrayList<Uri>()
+                    for (f in logFiles) {
+                        try {
+                            uris.add(androidx.core.content.FileProvider.getUriForFile(this, "${packageName}.fileprovider", f))
+                        } catch (e: Exception) {
+                            Log.w("MainActivity", "Failed to get uri for log file: ${e.message}")
+                        }
+                    }
+                    if (uris.isNotEmpty()) {
+                        val shareIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                            type = "text/plain"
+                            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                            putExtra(Intent.EXTRA_SUBJECT, "Vydra Application Logs")
+                            putExtra(Intent.EXTRA_TEXT, logs)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(Intent.createChooser(shareIntent, "Share App Logs"))
+                    } else {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Vydra Application Logs")
+                            putExtra(Intent.EXTRA_TEXT, logs)
+                        }
+                        startActivity(Intent.createChooser(shareIntent, "Share App Logs"))
+                    }
+                } else {
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, "Vydra Application Logs")
+                        putExtra(Intent.EXTRA_TEXT, logs)
+                    }
+                    startActivity(Intent.createChooser(shareIntent, "Share App Logs"))
+                }
+            }
+            .setNegativeButton(R.string.str_copy_log) { _, _ ->
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Vydra Logs", logs))
+                Toast.makeText(this, R.string.toast_log_copied_to_clipboard, Toast.LENGTH_SHORT).show()
+            }
+            .setNeutralButton(R.string.str_ok) { d, _ ->
+                d.dismiss()
+            }
+            .show()
     }
 
     private fun switchTab(tabIndex: Int) {

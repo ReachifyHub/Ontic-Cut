@@ -284,10 +284,13 @@
 - **Fix Effort:** N/A (`S`).
 
 #### 4.2 Auto-Captions Display & Edit
-- **Status:** `WORKS`
-- **Evidence:** Auto Assemble and `startAutoCaptionsFlow()` generate caption cues via `CaptionCueBuilder` using Whisper transcription timestamps. Auto-captions are assigned `groupId = CaptionCueBuilder.CAPTION_GROUP_ID` and rendered onto a dedicated `CaptionTrackView` (lines 7677–7706). Tapping a caption segment seeks to its start timestamp, selects the cue, and dragging trim handles invokes `onCaptionTrimChanged` to adjust start/end times.
-- **Root-Cause Hypothesis:** Working as intended.
-- **Fix Effort:** N/A (`M`).
+- **Status:** `WORKS` (Export Filter Escaping Resolved)
+- **Evidence:** Auto Assemble and `startAutoCaptionsFlow()` generate caption cues via `CaptionCueBuilder` using Whisper transcription timestamps. Auto-captions are assigned `groupId = CaptionCueBuilder.CAPTION_GROUP_ID` and rendered onto a dedicated `CaptionTrackView`. Tapping a caption segment seeks to its start timestamp, selects the cue, and dragging trim handles invokes `onCaptionTrimChanged` to adjust start/end times.
+- **Export Resolution & Evidence:**
+  - *Production Failure:* Real device export with subtitles previously failed with FFmpeg code 1: `[AVFilterGraph] No such filter: '188.16'`, `Error initializing complex filters.`.
+  - *Root Cause:* Dynamic `enable` expressions were emitted with unescaped commas inside filter expressions (e.g., `:enable='between(t,188.16,191.02)'`). FFmpeg's graph parser (`libavfilter/graphparser.c`) splits filter chains on unescaped commas, misinterpreting the decimal timestamp token `188.16` as a filter name.
+  - *Fix:* Centralized in `FFmpegFilterUtils.buildEnableFilter()` and `FFmpegFilterUtils.escapeDrawtextText()`. All decimal timestamps and dynamic filter arguments escape commas with `\,` inside single quotes (e.g. `:enable='between(t\,188.160\,191.020)'`), protecting them across both direct `-filter_complex` commands and `-filter_complex_script` files.
+- **Fix Effort:** Completed (`M`).
 
 ---
 
@@ -461,11 +464,14 @@
 
 #### 9.3 Output Correctness
 - **Status:** `FIXED`
-- **Evidence:** `VideoEditingViewModel.kt:1083-1185`, `FFmpegRenderEngine.kt:140-185`, `FFmpegRenderEngine.kt:270-350`.
+- **Evidence:** `VideoEditingViewModel.kt:840-890`, `VideoEditingViewModel.kt:1083-1185`, `FFmpegRenderEngine.kt:140-185`, `ExportService.kt:90-170`, `VideoEditingActivity.kt:945-985`.
 - **Root-Cause & Resolution:**
   1. Chained `xfade`/`acrossfade` PTS desynchronization resolved: timestamps are normalized with `settb=1/30,setpts=N` and `asetpts=PTS-STARTPTS,aresample=async=1000` after each transition stage, preventing non-monotonic PTS errors.
   2. Filter script lifecycle resolved: `filter_script_*.txt` files used for complex filter graphs are retained through execution and any hardware-to-software fallback retries, and are cleanly deleted in the `finally` block of `FFmpegRenderEngine.executeCommand()` and `exportFinal()`. Stale leftover scripts are also cleaned up on engine initialization.
-- **Fix Effort:** `L`
+  3. Export crash containment & home-screen dump resolved: previously, `VideoEditingActivity` launched `ErrorDisplayActivity` passing unbounded multi-kilobyte FFmpeg logs directly in `Intent` extras, triggering `TransactionTooLargeException` in Binder IPC which killed the process and returned users to the Android launcher. Replaced with an in-editor `MaterialAlertDialog` that displays error codes and a clear plain-language explanation while keeping the user's timeline and cuts completely intact.
+  4. Diagnostic breadcrumbs and uncaught crash logging: implemented `AppLogger` writing `EXPORT_STARTED`, `EXPORT_ENDED`, `EXPORT_FAILED` (with script file path and return code), and `EXPORT_CANCELLED` to `cacheDir/logs/vydra_export.log`. Uncaught crashes persist device/memory stats and stack traces to `cacheDir/logs/vydra_crash.log`. Orphaned exports log `EXPORT_DIED_MIDWAY` on subsequent launch. "Share App Logs" added to Settings with in-app 50-line viewer and Android share sheet integration. Sensitive tokens and API keys are redacted.
+  5. Export duration fidelity: ensured input flags (`-framerate 30 -loop 1 -t <value>` for images and `-ss <start> -t <value>` for video segments) use the exact persisted timeline duration rather than arbitrary 5.0s fallbacks when persisted durations exist, and the final output `-t` equals the true accumulated timeline sequence duration.
+- **Fix Effort:** Completed (`L`).
 
 ---
 

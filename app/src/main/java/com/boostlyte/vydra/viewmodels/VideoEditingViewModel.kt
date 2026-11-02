@@ -198,17 +198,11 @@ class VideoEditingViewModel : ViewModel() {
 
     /** Build a drawtext filter expression for a text operation. */
     private fun buildDrawtextExpr(op: EditOperation.AddText, fontFilePath: String?): String {
-        val escapedText = op.text
-            .replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace(":", "\\:")
+        val escapedText = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeDrawtextText(op.text)
 
         val fontToUse = op.fontPath ?: fontFilePath
         val fontPart = if (!fontToUse.isNullOrBlank()) {
-            val escapedFont = fontToUse
-                .replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace(":", "\\:")
+            val escapedFont = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeFontPath(fontToUse)
             "fontfile='$escapedFont':"
         } else {
             Log.w(TAG, "No fontFilePath — text overlay may not render on Android.")
@@ -352,15 +346,8 @@ class VideoEditingViewModel : ViewModel() {
         }
     }
 
-    private fun buildEnableExpr(startTimeMs: Long?, endTimeMs: Long?): String {
-        if (startTimeMs == null && endTimeMs == null) return ""
-        val startSec = maxOf(0L, startTimeMs ?: 0L) / 1000.0
-        return if (endTimeMs != null) {
-            val endSec = maxOf(0L, endTimeMs) / 1000.0
-            ":enable='between(t,$startSec,$endSec)'"
-        } else {
-            ":enable='gte(t,$startSec)'"
-        }
+    fun buildEnableExpr(startTimeMs: Long?, endTimeMs: Long?): String {
+        return com.boostlyte.vydra.utils.FFmpegFilterUtils.buildEnableFilter(startTimeMs, endTimeMs)
     }
 
     private fun getFFmpegFilterForAdjust(op: EditOperation.Adjust): String? {
@@ -585,20 +572,14 @@ class VideoEditingViewModel : ViewModel() {
                         
                         val fontToUse = if (!op.fontPath.isNullOrBlank() && java.io.File(op.fontPath).exists()) op.fontPath else fontFilePath
                         val fontPart = if (!fontToUse.isNullOrBlank()) {
-                            val escapedFont = fontToUse
-                                .replace("\\", "\\\\")
-                                .replace("'", "\\'")
-                                .replace(":", "\\:")
+                            val escapedFont = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeFontPath(fontToUse)
                             "fontfile='$escapedFont':"
                         } else {
                             ""
                         }
 
                         for ((lineIdx, lineText) in lines.withIndex()) {
-                            val escapedLine = lineText
-                                .replace("\\", "\\\\")
-                                .replace("'", "\\'")
-                                .replace(":", "\\:")
+                            val escapedLine = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeDrawtextText(lineText)
 
                             val lineOffset = lineIdx * lineSpacing
 
@@ -868,7 +849,15 @@ class VideoEditingViewModel : ViewModel() {
                 } else {
                     val videoPath = resolveUriToPath(item.uri) ?: item.uri.toString()
                     val startSecs = item.trimStartMs / 1000.0
-                    val duration = (item.trimEndMs - item.trimStartMs) / 1000.0
+                    val itemDurSec = if (item.trimmedDurationMs > 0L) {
+                        item.trimmedDurationMs / 1000.0
+                    } else if (item.trimEndMs > item.trimStartMs) {
+                        (item.trimEndMs - item.trimStartMs) / 1000.0
+                    } else if (item.durationMs > 0L) {
+                        item.durationMs / 1000.0
+                    } else {
+                        5.0
+                    }
                     
                     val isImage = item.isImage || 
                                   videoPath.endsWith(".png", ignoreCase = true) || 
@@ -877,9 +866,9 @@ class VideoEditingViewModel : ViewModel() {
                                   videoPath.endsWith(".webp", ignoreCase = true)
                     
                     if (isImage) {
-                        cmd.append(" -framerate 30 -loop 1 -t $duration -i \"$videoPath\"")
+                        cmd.append(" -framerate 30 -loop 1 -t $itemDurSec -i \"$videoPath\"")
                     } else {
-                        cmd.append(" -ss $startSecs -t $duration -i \"$videoPath\"")
+                        cmd.append(" -ss $startSecs -t $itemDurSec -i \"$videoPath\"")
                     }
                 }
                 mergeVideoIndices.add(inputIndex)
@@ -995,7 +984,15 @@ class VideoEditingViewModel : ViewModel() {
                         }
                     }
                 } catch (e: Exception) { false }
-                durationsArray[idx + 1] = item.trimmedDurationMs / 1000.0
+                durationsArray[idx + 1] = if (item.trimmedDurationMs > 0L) {
+                    item.trimmedDurationMs / 1000.0
+                } else if (item.trimEndMs > item.trimStartMs) {
+                    (item.trimEndMs - item.trimStartMs) / 1000.0
+                } else if (item.durationMs > 0L) {
+                    item.durationMs / 1000.0
+                } else {
+                    5.0
+                }
             }
 
 
@@ -1436,7 +1433,8 @@ class VideoEditingViewModel : ViewModel() {
             }
 
             if (outputDuration != null) {
-                cmd.append(" -t $outputDuration")
+                val formattedDur = String.format(java.util.Locale.US, "%.3f", outputDuration).trimEnd('0').trimEnd('.')
+                cmd.append(" -t $formattedDur")
             }
             cmd.append(" \"$outputFilePath\"")
 

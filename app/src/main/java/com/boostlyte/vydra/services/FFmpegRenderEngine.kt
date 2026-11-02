@@ -710,16 +710,10 @@ class FFmpegRenderEngine(private val context: Context) {
         positionParam: String,
         fontFilePath: String?
     ): String {
-        val escapedText = text
-            .replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace(":", "\\:")
+        val escapedText = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeDrawtextText(text)
 
         val fontPart = if (!fontFilePath.isNullOrBlank()) {
-            val escapedFontPath = fontFilePath
-                .replace("\\", "\\\\")
-                .replace("'", "\\'")
-                .replace(":", "\\:")
+            val escapedFontPath = com.boostlyte.vydra.utils.FFmpegFilterUtils.escapeFontPath(fontFilePath)
             "fontfile='$escapedFontPath':"
         } else {
             Log.w(TAG, "No fontFilePath — text may not render. Call copyFontToCache() first.")

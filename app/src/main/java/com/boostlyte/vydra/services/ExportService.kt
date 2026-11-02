@@ -90,6 +90,12 @@ class ExportService : Service() {
         val durationSecs = intent.getDoubleExtra(EXTRA_TOTAL_DURATION_SECS, 0.0)
         val isAudioOnly = intent.getBooleanExtra(EXTRA_IS_AUDIO_ONLY, false)
 
+        val scriptRegex = Regex("""-filter_complex_script\s+["']?([^"'\s]+)["']?""")
+        val scriptFilePath = scriptRegex.find(command)?.groupValues?.getOrNull(1)
+
+        val projectStats = "durationSecs=$durationSecs isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath script=$scriptFilePath"
+        com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
+
         startForeground(NOTIFICATION_ID, buildNotification(0, "Exporting..."))
 
         serviceScope.launch {
@@ -101,12 +107,16 @@ class ExportService : Service() {
                     ffmpegCommand = command,
                     totalDurationSecs = durationSecs,
                     onProgress = { progress ->
-                        val now = System.currentTimeMillis()
-                        if (progress != lastReportedProgress && (now - lastNotificationTime >= 250L || progress >= 100)) {
-                            lastReportedProgress = progress
-                            lastNotificationTime = now
-                            updateNotification(progress, "Exporting...")
-                            broadcastProgress(progress)
+                        try {
+                            val now = System.currentTimeMillis()
+                            if (progress != lastReportedProgress && (now - lastNotificationTime >= 250L || progress >= 100)) {
+                                lastReportedProgress = progress
+                                lastNotificationTime = now
+                                updateNotification(progress, "Exporting...")
+                                broadcastProgress(progress)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error updating export progress: ${e.message}")
                         }
                     }
                 )
@@ -121,27 +131,38 @@ class ExportService : Service() {
 
                         if (!tempFile.exists() || tempFile.length() == 0L) {
                             Log.e(TAG, "Rendered output file is missing or 0 bytes: $tempOutputPath")
+                            com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "Rendered file is missing or empty", -1, scriptFilePath)
                             showCompletionNotification("Export Failed", "Rendered file is missing or empty", null)
                             broadcastFailure("Rendered output file is empty or missing", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         } else {
-                            val savedUri = saveVideoToGallery(tempFile, isAudioOnly)
+                            val savedUri = try {
+                                saveVideoToGallery(tempFile, isAudioOnly)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Exception saving to gallery", e)
+                                null
+                            }
                             if (savedUri != null) {
+                                com.boostlyte.vydra.utils.AppLogger.logExportEnded(this@ExportService, 0, tempOutputPath)
                                 showCompletionNotification("Export Complete", "Video saved to gallery", savedUri)
                                 broadcastSuccess(savedUri.toString())
                                 Log.d(TAG, "Export successful: $savedUri")
                             } else {
+                                com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "Failed to save video to gallery", -1, scriptFilePath)
                                 showCompletionNotification("Export Failed", "Failed to save video to gallery", null)
                                 broadcastFailure("Failed to save video to gallery", ErrorCode.GALLERY_SAVE_FAILED.code)
                             }
                         }
                     }
                     is FFmpegRenderEngine.RenderResult.Failure -> {
+                        val returnCode = result.session?.returnCode?.value
+                        com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, result.error, returnCode, scriptFilePath)
                         showCompletionNotification("Export Failed", "Error during rendering", null)
                         broadcastFailure(result.error, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         Log.e(TAG, "Export failed: ${result.error}")
                     }
                     is FFmpegRenderEngine.RenderResult.Cancelled -> {
                         Log.d(TAG, "Export was cancelled by user")
+                        com.boostlyte.vydra.utils.AppLogger.logExportCancelled(this@ExportService)
                         val manager = getSystemService(NotificationManager::class.java)
                         manager?.cancel(NOTIFICATION_ID)
                         broadcastCancelled()
@@ -149,19 +170,24 @@ class ExportService : Service() {
                 }
 
                 // Cleanup temp files
-                if (tempFile.exists()) tempFile.delete()
-                if (concatFile?.exists() == true) concatFile.delete()
                 try {
+                    if (tempFile.exists()) tempFile.delete()
+                    if (concatFile?.exists() == true) concatFile.delete()
                     cacheDir.listFiles { f -> f.name.startsWith("filter_script_") && f.name.endsWith(".txt") }?.forEach { it.delete() }
                 } catch (_: Exception) {}
 
             } catch (e: Exception) {
                 Log.e(TAG, "Export exception", e)
+                com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, e.message ?: "Unknown error", -1, scriptFilePath)
                 showCompletionNotification("Export Failed", e.message ?: "Unknown error", null)
                 broadcastFailure(e.message ?: "Unknown error", ErrorCode.UNEXPECTED_CRASH.code)
             } finally {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                try {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error stopping service: ${e.message}")
+                }
             }
         }
 

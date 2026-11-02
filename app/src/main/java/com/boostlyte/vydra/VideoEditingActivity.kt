@@ -943,12 +943,48 @@ class VideoEditingActivity : AppCompatActivity() {
 
 
     private fun showProErrorDialog(errorCode: ErrorCode, technicalLog: String) {
-        val intent = Intent(this, ErrorDisplayActivity::class.java).apply {
-            putExtra("ERROR_CODE", errorCode.code)
-            putExtra("ERROR_DESCRIPTION", errorCode.description)
-            putExtra("ERROR_LOG", technicalLog)
+        if (isFinishing || isDestroyed) return
+
+        val plainExplanation = when (errorCode) {
+            ErrorCode.GALLERY_SAVE_FAILED -> "Failed to save the finished video to your device gallery. Check device storage space and permissions."
+            ErrorCode.FFMPEG_EXECUTION_FAILED -> "Video processing encountered an error during rendering. Your timeline and cuts are preserved."
+            ErrorCode.UNEXPECTED_CRASH -> "An unexpected system issue occurred during export. Your timeline has been saved."
+            else -> errorCode.description
         }
-        startActivity(intent)
+
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            try {
+                com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                    .setTitle("Export Failed (${errorCode.code})")
+                    .setMessage(plainExplanation)
+                    .setPositiveButton(R.string.str_ok) { dialog, _ ->
+                        dialog.dismiss()
+                    }
+                    .setNegativeButton(R.string.str_copy_log) { _, _ ->
+                        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                        clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("Vydra Export Log", technicalLog))
+                        Toast.makeText(this, R.string.toast_log_copied_to_clipboard, Toast.LENGTH_SHORT).show()
+                    }
+                    .setNeutralButton(R.string.str_details) { _, _ ->
+                        try {
+                            val safeLog = if (technicalLog.length > 16384) technicalLog.take(16384) + "\n...[TRUNCATED]" else technicalLog
+                            val intent = Intent(this, ErrorDisplayActivity::class.java).apply {
+                                putExtra("ERROR_CODE", errorCode.code)
+                                putExtra("ERROR_DESCRIPTION", plainExplanation)
+                                putExtra("ERROR_LOG", safeLog)
+                            }
+                            startActivity(intent)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to launch details activity: ${e.message}")
+                        }
+                    }
+                    .setCancelable(true)
+                    .show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to show export error dialog: ${e.message}")
+            }
+        }
     }
 
     private fun initializeViews() {
