@@ -40,7 +40,7 @@
 | 27 | Audio Tracks | Delete Audio | **WORKS** | S | `VideoEditingActivity.kt:btnAudioDelete`, `VideoEditingViewModel.kt:deleteOperation()` |
 | 28 | Audio Tracks | Voice Recording | **WORKS** | S | `VideoEditingActivity.kt:showVoiceOverDialog()`, `MediaRecorder` |
 | 29 | **Subtitles** | .SRT File Import | **WORKS** | S | `SubtitleParser.kt:parse()`, `VideoEditingActivity.kt:5380-5425` |
-| 30 | Subtitles | Auto-Captions Display & Edit | **WORKS** | M | `CaptionTrackView.kt`, `CaptionCueBuilder.kt`, `VideoEditingActivity.kt:7677-7706` |
+| 30 | Subtitles | Auto-Captions Display & Edit | **WORKS** | M | `CaptionTrackView.kt`, `CaptionCueBuilder.kt`, `VideoEditingActivity.kt` (Font & Size Parity) |
 | 31 | **Transitions** | Apply Between Clips | **FIXED** | M | `VideoEditingActivity.kt:8159-8173`, `VideoEditingViewModelExt.kt:addTransitionOperation()` |
 | 32 | Transitions | Animated Toolbar Preview | **FIXED** | S | `TransitionPreviewCache.kt`, `VideoEditingActivity.kt:showTransitionDialog()` |
 | 33 | Transitions | Preview Playback | **BROKEN** | L | `VideoEditingActivity.kt:6593-6640`, `TransitionPreviewOverlayView.kt` |
@@ -298,6 +298,18 @@
   - *Root Cause:* Dynamic `enable` expressions were emitted with unescaped commas inside filter expressions (e.g., `:enable='between(t,188.16,191.02)'`). FFmpeg's graph parser (`libavfilter/graphparser.c`) splits filter chains on unescaped commas, misinterpreting the decimal timestamp token `188.16` as a filter name.
   - *Fix:* Centralized in `FFmpegFilterUtils.buildEnableFilter()` and `FFmpegFilterUtils.escapeDrawtextText()`. All decimal timestamps and dynamic filter arguments escape commas with `\,` inside single quotes (e.g. `:enable='between(t\,188.160\,191.020)'`), protecting them across both direct `-filter_complex` commands and `-filter_complex_script` files.
 - **Fix Effort:** Completed (`M`).
+
+#### 4.3 Auto-Caption Font & Size Parity (Phase 16C)
+- **Status:** `WORKS`
+- **Evidence:** Added Font selector (`btnSelectAutoCaptionFont`) and font size slider (`autoCaptionFontSizeSlider`, 10.0–80.0sp) directly to `subtitles_editing_toolbar.xml`'s `layoutAutoCaptionsActive`, mirroring the `.SRT` subtitles controls with identical font library (`FontManager.getAllFonts()`) and size ranges.
+- **Implementation & Flow:**
+  - *Group Styling:* Adjusting font or font size updates all cues in the active caption group (`groupId = CaptionCueBuilder.CAPTION_GROUP_ID`) simultaneously via `VideoEditingActivity.updateAutoCaptionGroupStyle()`, while isolating manual text overlays and `.srt` operations.
+  - *Immediate Preview Reflection:* `CaptionTrackView.rebuildCueCache()` dynamically updates `textPaint.typeface` and scales `textPaint.textSize`, recalculating centered vertical offsets. Video player overlay `TextOverlayView` immediately reflects custom font and scaled text dimensions during timeline playback.
+  - *Persistence:* Preserves `fontPath` and `fontSize` across project save, restart, and reload cycles through `ProjectSerializer` serialization-deserialization roundtrips.
+  - *Export Filtergraph:* Flow verified in `VideoEditingViewModel.buildDrawtextExpr()` and `FFmpegFilterUtils.buildValidatedDrawtextFilter()` passing custom `fontfile` and `fontsize`.
+  - *Regeneration Safety:* Re-generating captions preserves previously configured custom font and font size.
+- **Packaging Freeze Compliance:** Kept `app/build.gradle` (arm64-v8a ABI filter, versionCode, versionName, signingConfigs), `.github/workflows/*`, and all protected core components byte-identical.
+- **Fix Effort:** Completed (`S`).
 
 ---
 

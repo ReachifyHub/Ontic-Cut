@@ -155,6 +155,90 @@
                     android:contentDescription="Regenerate Captions" />
             </LinearLayout>
 
+            <!-- Auto-Caption Font Row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="60dp"
+                    android:layout_height="wrap_content"
+                    android:text="Font"
+                    android:textColor="@color/textColor"
+                    android:textSize="14sp"
+                    android:fontFamily="sans-serif-medium" />
+
+                <LinearLayout
+                    android:id="@+id/btnSelectAutoCaptionFont"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="12dp"
+                    android:background="@drawable/tool_button_inactive"
+                    android:clickable="true"
+                    android:focusable="true">
+
+                    <TextView
+                        android:id="@+id/tvSelectedAutoCaptionFontName"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Roboto Regular"
+                        android:textColor="@color/textColor"
+                        android:textSize="14sp"
+                        android:ellipsize="end"
+                        android:maxLines="1" />
+
+                    <ImageView
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:src="@drawable/ic_arrow_drop_down_24"
+                        app:tint="@color/textColor" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Auto-Caption Font Size Slider Row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="12dp">
+
+                <ImageView
+                    android:layout_width="24dp"
+                    android:layout_height="24dp"
+                    android:src="@drawable/ic_text_24"
+                    app:tint="@color/iconSecondary" />
+
+                <com.google.android.material.slider.Slider
+                    android:id="@+id/autoCaptionFontSizeSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:valueFrom="10.0"
+                    android:valueTo="80.0"
+                    android:value="22.0"
+                    android:stepSize="1.0"
+                    app:thumbColor="@color/colorPrimary"
+                    app:trackColorActive="@color/colorPrimary" />
+
+                <TextView
+                    android:id="@+id/tvAutoCaptionFontSizeValue"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:gravity="end"
+                    android:text="@string/str_22"
+                    android:textColor="@color/textColor"
+                    android:textSize="14sp"
+                    android:fontFamily="sans-serif-medium" />
+            </LinearLayout>
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -187,6 +271,17 @@
                     app:strokeColor="@color/outline"
                     app:cornerRadius="24dp"/>
             </LinearLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDoneAutoCaptions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/str_save"
+                android:backgroundTint="@color/colorPrimary"
+                android:textColor="@android:color/white"
+                app:cornerRadius="24dp"
+                android:textAllCaps="false"/>
         </LinearLayout>
 
         <!-- Subtitles active state -->

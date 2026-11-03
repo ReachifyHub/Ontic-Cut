@@ -406,6 +406,30 @@ class VideoEditingActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupAutoCaptionFontSelector(subtitlesToolbar: View?) {
+        val toolbar = subtitlesToolbar ?: return
+        val btnSelectAutoCaptionFont = toolbar.findViewById<View>(R.id.btnSelectAutoCaptionFont) ?: return
+        val tvSelectedAutoCaptionFontName = toolbar.findViewById<TextView>(R.id.tvSelectedAutoCaptionFontName)
+
+        val allFonts = com.boostlyte.vydra.utils.FontManager.getAllFonts(this, fontFilePath)
+        val project = viewModel.project.value
+        val autoCaptionOps = project?.operations?.filterIsInstance<EditOperation.AddText>()?.filter {
+            it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+        } ?: emptyList()
+        val currentPath = autoCaptionOps.firstOrNull()?.fontPath ?: fontFilePath
+        val activeFont = allFonts.find { it.path == currentPath } ?: allFonts.firstOrNull()
+        if (activeFont != null && tvSelectedAutoCaptionFontName != null) {
+            tvSelectedAutoCaptionFontName.text = activeFont.name
+        }
+
+        btnSelectAutoCaptionFont.setBounceClickListener {
+            showFontManagerBottomSheet { selectedFont ->
+                tvSelectedAutoCaptionFontName?.text = selectedFont.name
+                updateAutoCaptionGroupStyle(fontPath = selectedFont.path, updateFont = true)
+            }
+        }
+    }
+
     private fun showFontManagerBottomSheet(onFontSelected: ((com.boostlyte.vydra.utils.FontItem) -> Unit)? = null) {
         val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this)
         val view = layoutInflater.inflate(R.layout.dialog_font_manager, null)
@@ -439,6 +463,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         draggableTextOverlay?.setFontPath(fontItem.path)
                         textEditingToolbar?.findViewById<View>(R.id.formatSettingsContainer)?.let { setupTextFontSelector(it) }
                         setupSubtitleFontSelector(subtitlesEditingToolbar)
+                        setupAutoCaptionFontSelector(subtitlesEditingToolbar)
                         bottomSheet.dismiss()
                     },
                     onDelete = { fontItem ->
@@ -451,6 +476,7 @@ class VideoEditingActivity : AppCompatActivity() {
                                     refreshFontList()
                                     textEditingToolbar?.findViewById<View>(R.id.formatSettingsContainer)?.let { setupTextFontSelector(it) }
                                     setupSubtitleFontSelector(subtitlesEditingToolbar)
+                                    setupAutoCaptionFontSelector(subtitlesEditingToolbar)
                                 } else {
                                     Toast.makeText(this, "Failed to delete font", Toast.LENGTH_SHORT).show()
                                 }
@@ -2275,6 +2301,9 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<Button>(R.id.btnSaveSubtitles)?.setBounceClickListener {
                     exitSubtitlesEditingMode()
                 }
+                toolbar.findViewById<Button>(R.id.btnDoneAutoCaptions)?.setBounceClickListener {
+                    exitSubtitlesEditingMode()
+                }
                 toolbar.findViewById<Slider>(R.id.subtitleFontSizeSlider)?.addOnChangeListener { _, value, fromUser ->
                     if (fromUser) {
                         val project = viewModel.project.value
@@ -2284,6 +2313,13 @@ class VideoEditingActivity : AppCompatActivity() {
                             updateSubtitleOp(subOp.copy(fontSize = newSize))
                             toolbar.findViewById<TextView>(R.id.tvSubtitleFontSizeValue)?.text = "$newSize"
                         }
+                    }
+                }
+                toolbar.findViewById<Slider>(R.id.autoCaptionFontSizeSlider)?.addOnChangeListener { _, value, fromUser ->
+                    if (fromUser) {
+                        val newSize = value.toInt()
+                        toolbar.findViewById<TextView>(R.id.tvAutoCaptionFontSizeValue)?.text = "$newSize"
+                        updateAutoCaptionGroupStyle(fontSize = newSize, updateSize = true)
                     }
                 }
             }
@@ -4229,6 +4265,14 @@ class VideoEditingActivity : AppCompatActivity() {
         if (autoCaptionOps.isNotEmpty()) {
             layoutAuto?.visibility = View.VISIBLE
             tvAutoStatus?.text = "Auto Captions: ${autoCaptionOps.size} cues"
+
+            val sliderAuto = toolbar.findViewById<Slider>(R.id.autoCaptionFontSizeSlider)
+            val tvAutoValue = toolbar.findViewById<TextView>(R.id.tvAutoCaptionFontSizeValue)
+            val currentSize = autoCaptionOps.firstOrNull()?.fontSize ?: com.boostlyte.vydra.captions.CaptionCueBuilder.DEFAULT_FONT_SIZE
+            sliderAuto?.value = currentSize.toFloat().coerceIn(10f, 80f)
+            tvAutoValue?.text = "$currentSize"
+
+            setupAutoCaptionFontSelector(toolbar)
         } else {
             layoutAuto?.visibility = View.GONE
         }
@@ -4380,6 +4424,21 @@ class VideoEditingActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.Default) {
             val newTextOps = com.boostlyte.vydra.captions.CaptionCueBuilder.cuesToEditOperations(cues)
+            val prevAutoOps = viewModel.project.value?.operations?.filterIsInstance<EditOperation.AddText>()?.filter {
+                it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+            }
+            val existingFont = prevAutoOps?.firstOrNull()?.fontPath
+            val existingSize = prevAutoOps?.firstOrNull()?.fontSize
+            val styledOps = if (existingFont != null || existingSize != null) {
+                newTextOps.map {
+                    it.copy(
+                        fontPath = existingFont ?: it.fontPath,
+                        fontSize = existingSize ?: it.fontSize
+                    )
+                }
+            } else {
+                newTextOps
+            }
 
             viewModel.executeCommand(
                 com.boostlyte.vydra.commands.MutateProjectCommand("Generate Auto Captions") { proj ->
@@ -4388,7 +4447,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         it is EditOperation.AddText && it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
                     }
                     proj.copy(
-                        operations = cleanOps + newTextOps,
+                        operations = cleanOps + styledOps,
                         lastModifiedAt = System.currentTimeMillis()
                     )
                 }
@@ -4425,6 +4484,44 @@ class VideoEditingActivity : AppCompatActivity() {
             }
             .setNegativeButton(R.string.cancel, null)
             .show()
+    }
+
+    private fun updateAutoCaptionGroupStyle(
+        fontPath: String? = null,
+        updateFont: Boolean = false,
+        fontSize: Int? = null,
+        updateSize: Boolean = false
+    ) {
+        viewModel.executeCommand(
+            com.boostlyte.vydra.commands.MutateProjectCommand("Update Auto Captions Style") { proj ->
+                val updatedOps = proj.operations.map { op ->
+                    if (op is EditOperation.AddText && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                        var updated = op
+                        if (updateFont) {
+                            updated = updated.copy(fontPath = fontPath)
+                        }
+                        if (updateSize && fontSize != null) {
+                            updated = updated.copy(fontSize = fontSize)
+                        }
+                        updated
+                    } else {
+                        op
+                    }
+                }
+                proj.copy(
+                    operations = updatedOps,
+                    lastModifiedAt = System.currentTimeMillis()
+                )
+            }
+        )
+        currentCaptionTrackView?.let { track ->
+            val currentOps = viewModel.project.value?.operations?.filterIsInstance<EditOperation.AddText>()?.filter {
+                it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+            } ?: emptyList()
+            if (currentOps.isNotEmpty()) {
+                track.captionOperations = currentOps
+            }
+        }
     }
 
     private fun updateSubtitleOp(newOp: EditOperation.AddSubtitles) {

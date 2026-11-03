@@ -69,6 +69,21 @@ class CaptionTrackView @JvmOverloads constructor(
     }
 
     private fun rebuildCueCache() {
+        val firstOp = captionOperations.firstOrNull()
+        if (firstOp?.fontPath != null) {
+            try {
+                textPaint.typeface = android.graphics.Typeface.createFromFile(firstOp.fontPath)
+            } catch (e: Exception) {
+                textPaint.typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+        } else {
+            textPaint.typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        if (firstOp != null && firstOp.fontSize > 0) {
+            textPaint.textSize = (firstOp.fontSize.toFloat()).coerceIn(20f, 32f)
+        } else {
+            textPaint.textSize = 28f
+        }
         val textYOffset = -((textPaint.descent() + textPaint.ascent()) / 2f)
         cachedCueLayouts = captionOperations.map { op ->
             val startMs = op.startTimeMs ?: 0L
