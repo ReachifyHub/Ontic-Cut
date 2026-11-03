@@ -186,6 +186,16 @@ class VideoEditingActivity : AppCompatActivity() {
     private var lastAppliedCanvasH = -1
     private var lastAppliedBaseRatio = -1f
     private var currentBlurJob: Job? = null
+
+    // Editor Responsiveness & Per-Tick Optimizations
+    private var currentCaptionTrackView: com.boostlyte.vydra.customviews.CaptionTrackView? = null
+    private var cachedSequenceItems: List<com.boostlyte.vydra.models.EditOperation.MergeItem> = emptyList()
+    private var cachedSequenceDurationMs: Long = 0L
+    private var lastActiveClipIndexForPlayer: Int = -1
+    private var lastSplitButtonEnabledState: Boolean? = null
+    private val scrollIdleRunnable = Runnable {
+        prewarmVisibleThumbnails()
+    }
     
     private val activeExtractionUris = mutableSetOf<Uri>()
     private val frameExtractionSemaphore = kotlinx.coroutines.sync.Semaphore(2)
@@ -743,6 +753,11 @@ class VideoEditingActivity : AppCompatActivity() {
         // Initialize ViewModel and engine
         viewModel = ViewModelProvider(this).get(VideoEditingViewModel::class.java)
         ffmpegEngine = FFmpegRenderEngine(this)
+
+        // Asynchronously resolve transition preview drawable resource IDs on background thread
+        lifecycleScope.launch(Dispatchers.IO) {
+            com.boostlyte.vydra.utils.TransitionPreviewCache.resolveAll(this@VideoEditingActivity)
+        }
         
         androidx.localbroadcastmanager.content.LocalBroadcastManager.getInstance(this).registerReceiver(
             exportReceiver,
@@ -1109,6 +1124,8 @@ class VideoEditingActivity : AppCompatActivity() {
                 seekToGlobalPosition(targetMs)
             }
             updateTimelineAddButtonPosition()
+            timelineHorizontalScroll.removeCallbacks(scrollIdleRunnable)
+            timelineHorizontalScroll.postDelayed(scrollIdleRunnable, 150)
         }
 
         timelineHorizontalScroll.setOnTouchListener { _, event ->
@@ -1129,6 +1146,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                     android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                         isUserScrollingTimeline = false
+                        timelineHorizontalScroll.removeCallbacks(scrollIdleRunnable)
+                        timelineHorizontalScroll.postDelayed(scrollIdleRunnable, 150)
                         if (isMagnetEnabled) {
                             val scrollX = timelineHorizontalScroll.scrollX
                             val targetMs = (scrollX / pixelsPerMs).toLong()
@@ -5586,11 +5605,14 @@ class VideoEditingActivity : AppCompatActivity() {
 
     private fun updateSplitButtonState() {
         val selectedIdx = selectedVideoIndex ?: return
-        val sequenceItems = getSequenceItems()
+        val sequenceItems = cachedSequenceItems.ifEmpty { getSequenceItems().also { cachedSequenceItems = it } }
         val btnSplit = videoEditingToolbar?.findViewById<ImageButton>(R.id.btnVideoSplit) ?: return
         if (selectedIdx !in sequenceItems.indices) {
-            btnSplit.isEnabled = false
-            btnSplit.alpha = 0.35f
+            if (lastSplitButtonEnabledState != false) {
+                lastSplitButtonEnabledState = false
+                btnSplit.isEnabled = false
+                btnSplit.alpha = 0.35f
+            }
             return
         }
         val playheadMs = getExactPlayheadPosition()
@@ -5600,8 +5622,11 @@ class VideoEditingActivity : AppCompatActivity() {
         }
         val end = start + sequenceItems[selectedIdx].trimmedDurationMs
         val isInside = playheadMs > start + 50L && playheadMs < end - 50L
-        btnSplit.isEnabled = isInside
-        btnSplit.alpha = if (isInside) 1.0f else 0.35f
+        if (lastSplitButtonEnabledState != isInside) {
+            lastSplitButtonEnabledState = isInside
+            btnSplit.isEnabled = isInside
+            btnSplit.alpha = if (isInside) 1.0f else 0.35f
+        }
     }
 
     private fun splitSelectedVideo() {
@@ -5657,6 +5682,10 @@ class VideoEditingActivity : AppCompatActivity() {
         }
         isVideoLoaded = false
         videoUri = null
+        currentCaptionTrackView = null
+        cachedSequenceItems = emptyList()
+        cachedSequenceDurationMs = 0L
+        lastActiveClipIndexForPlayer = -1
         viewModel.clearAllOperations() // wait, no initialize is better
         
         // Clean up orphaned cache/proxy files in background
@@ -7203,6 +7232,9 @@ class VideoEditingActivity : AppCompatActivity() {
                 isProgrammaticScroll = false
             }
 
+            // Update active caption highlight (invalidates ONLY when crossing a cue boundary)
+            currentCaptionTrackView?.updatePlayhead(currentGlobalPos)
+
             textOverlayView?.currentPositionMs = currentGlobalPos
             imageOverlayView?.currentPositionMs = currentGlobalPos
 
@@ -7212,8 +7244,8 @@ class VideoEditingActivity : AppCompatActivity() {
 
             syncBgAudio(currentGlobalPos, player.isPlaying)
 
-            // Apply color filter corresponding to the active clip
-            val sequenceItems = getSequenceItems()
+            // Apply color filter and clip effects using cached sequence items
+            val sequenceItems = cachedSequenceItems.ifEmpty { getSequenceItems().also { cachedSequenceItems = it } }
             var accumulatedStartMs = 0L
             var activeClipIndex = 0
             for ((index, item) in sequenceItems.withIndex()) {
@@ -7226,11 +7258,35 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
                 accumulatedStartMs += item.trimmedDurationMs
             }
-            val activeFilterName = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.ColorFilter>()
-                ?.find { it.index == activeClipIndex }?.filterName ?: "none"
-            val activeAdjust = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Adjust>()
-                ?.find { it.index == activeClipIndex }
-            applyColorFilterAndAdjustToPlayer(activeFilterName, activeAdjust)
+
+            // Update per-clip filters and preview mirrors ONLY when active clip changes
+            if (activeClipIndex != lastActiveClipIndexForPlayer) {
+                lastActiveClipIndexForPlayer = activeClipIndex
+                val activeFilterName = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.ColorFilter>()
+                    ?.find { it.index == activeClipIndex }?.filterName ?: "none"
+                val activeAdjust = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Adjust>()
+                    ?.find { it.index == activeClipIndex }
+                applyColorFilterAndAdjustToPlayer(activeFilterName, activeAdjust)
+
+                if (activeClipIndex != lastActiveClipIndexForBlur) {
+                    lastActiveClipIndexForBlur = activeClipIndex
+                    updateCanvasBackgroundPreview(activeClipIndex)
+                }
+
+                val isMirrored = if (activeClipIndex == 0) {
+                    viewModel.project.value?.operations?.any { it is com.boostlyte.vydra.models.EditOperation.MirrorMain && it.isMirrored } == true
+                } else {
+                    viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Merge>()
+                        ?.firstOrNull()?.items?.getOrNull(activeClipIndex - 1)?.isMirrored == true
+                }
+
+                val videoSurface = playerView.videoSurfaceView
+                if (videoSurface != null) {
+                    videoSurface.scaleX = if (isMirrored) -1f else 1f
+                } else {
+                    findTextureView(playerView)?.scaleX = if (isMirrored) -1f else 1f
+                }
+            }
             
             if (activeClipIndex >= 0 && activeClipIndex < sequenceItems.size) {
                 val activeItem = sequenceItems[activeClipIndex]
@@ -7335,25 +7391,6 @@ class VideoEditingActivity : AppCompatActivity() {
                     photoSequencePreviewImageView?.translationY = 0f
                     playerView.visibility = View.VISIBLE
                 }
-            }
-            
-            if (activeClipIndex != lastActiveClipIndexForBlur) {
-                lastActiveClipIndexForBlur = activeClipIndex
-                updateCanvasBackgroundPreview(activeClipIndex)
-            }
-
-            val isMirrored = if (activeClipIndex == 0) {
-                viewModel.project.value?.operations?.any { it is com.boostlyte.vydra.models.EditOperation.MirrorMain && it.isMirrored } == true
-            } else {
-                viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Merge>()
-                    ?.firstOrNull()?.items?.getOrNull(activeClipIndex - 1)?.isMirrored == true
-            }
-            
-            val videoSurface = playerView.videoSurfaceView
-            if (videoSurface != null) {
-                videoSurface.scaleX = if (isMirrored) -1f else 1f
-            } else {
-                findTextureView(playerView)?.scaleX = if (isMirrored) -1f else 1f
             }
 
             // Real-time transition preview overlay update
@@ -7461,6 +7498,7 @@ class VideoEditingActivity : AppCompatActivity() {
         updateDurationDisplay(globalPos.toInt(), totalDuration.toInt())
         textOverlayView?.currentPositionMs = globalPos
         imageOverlayView?.currentPositionMs = globalPos
+        currentCaptionTrackView?.updatePlayhead(globalPos)
 
         if (isKeyframeEditingMode) {
             updateDraggableOverlayFromKeyframes(globalPos)
@@ -7478,15 +7516,17 @@ class VideoEditingActivity : AppCompatActivity() {
         val isMasterMuted = if (::player.isInitialized) player.volume == 0f else false
         val isMainVideoMuted = project.operations.any { it is com.boostlyte.vydra.models.EditOperation.MuteAudio }
 
-        // Clean up removed audio players
-        val activeOpIds = audioOps.map { it.id }.toSet()
-        val iter = bgAudioPlayerMap.iterator()
-        while (iter.hasNext()) {
-            val entry = iter.next()
-            if (entry.key !in activeOpIds) {
-                entry.value.release()
-                iter.remove()
-                currentDuckingFactors.remove(entry.key)
+        // Clean up removed audio players only when active audio count changes
+        if (bgAudioPlayerMap.size != audioOps.size) {
+            val activeOpIds = audioOps.map { it.id }.toSet()
+            val iter = bgAudioPlayerMap.iterator()
+            while (iter.hasNext()) {
+                val entry = iter.next()
+                if (entry.key !in activeOpIds) {
+                    entry.value.release()
+                    iter.remove()
+                    currentDuckingFactors.remove(entry.key)
+                }
             }
         }
 
@@ -8219,10 +8259,12 @@ class VideoEditingActivity : AppCompatActivity() {
         activeSegmentViews.clear()
 
         val sequenceItems = getSequenceItems()
+        cachedSequenceItems = sequenceItems
         val transitions = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>()
         val timelineLayout = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(sequenceItems, transitions)
 
         val totalSequenceDuration = timelineLayout.totalDurationMs
+        cachedSequenceDurationMs = totalSequenceDuration
         if (totalSequenceDuration <= 0L) {
             updateTimelineAddButtonPosition()
             return
@@ -8811,9 +8853,13 @@ class VideoEditingActivity : AppCompatActivity() {
                         isTrackDragging = isDragging
                     }
                 }
+                currentCaptionTrackView = captionTrack
                 textTrackContainer.addView(captionTrack)
+            } else {
+                currentCaptionTrackView = null
             }
         } else {
+            currentCaptionTrackView = null
             textTrackContainer.visibility = View.GONE
         }
 
@@ -8974,7 +9020,7 @@ class VideoEditingActivity : AppCompatActivity() {
         if (timelineWidth <= 0) return
 
         val halfWidth = timelineWidth / 2
-        val totalDurationMs = getSequenceItems().sumOf { it.trimmedDurationMs }
+        val totalDurationMs = getTotalSequenceDuration()
         val totalTrackWidthPx = halfWidth + (totalDurationMs * pixelsPerMs).toInt()
 
         val scrollX = timelineHorizontalScroll.scrollX
@@ -9331,6 +9377,33 @@ class VideoEditingActivity : AppCompatActivity() {
 
         val itemBgs = mutableMapOf<String, FrameLayout>()
         val itemTvShorts = mutableMapOf<String, TextView>()
+        val itemIvPreviews = mutableMapOf<String, ImageView>()
+        var activeRunningAnimation: android.graphics.drawable.AnimationDrawable? = null
+        var activeRunningIv: ImageView? = null
+
+        // Ensure transition preview drawables are resolved in cache
+        com.boostlyte.vydra.utils.TransitionPreviewCache.resolveAll(this)
+
+        val startDrawable = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.trans_frame_start)
+        val endDrawable = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.trans_frame_end)
+
+        fun startAnimationFor(selectedType: String) {
+            activeRunningAnimation?.stop()
+            activeRunningAnimation = null
+            if (selectedType != "none") {
+                val iv = itemIvPreviews[selectedType]
+                val frameIds = com.boostlyte.vydra.utils.TransitionPreviewCache.getFrameResIds(selectedType)
+                if (iv != null && frameIds != null && startDrawable != null && endDrawable != null) {
+                    val anim = com.boostlyte.vydra.utils.TransitionPreviewCache.createAnimation(this, frameIds, startDrawable, endDrawable)
+                    if (anim != null) {
+                        iv.setImageDrawable(anim)
+                        iv.post { anim.start() }
+                        activeRunningAnimation = anim
+                        activeRunningIv = iv
+                    }
+                }
+            }
+        }
 
         fun refreshSelectionStates() {
             for ((typeKey, bgFrame) in itemBgs) {
@@ -9361,58 +9434,41 @@ class VideoEditingActivity : AppCompatActivity() {
             bg.clipToOutline = true
 
             val ivPreview = itemView.findViewById<ImageView>(R.id.transitionPreviewImage)
-            val startDrawable = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.trans_frame_start)
-            val endDrawable = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.trans_frame_end)
+            itemIvPreviews[type] = ivPreview
 
-            if (startDrawable != null && endDrawable != null) {
-                if (type == "none") {
-                    ivPreview.setImageDrawable(androidx.core.content.ContextCompat.getDrawable(this, R.drawable.ic_close_24))
+            if (type == "none") {
+                ivPreview.setImageDrawable(androidx.core.content.ContextCompat.getDrawable(this, R.drawable.ic_close_24))
+                ivPreview.visibility = View.VISIBLE
+                tvShort.visibility = View.GONE
+            } else {
+                val frameIds = com.boostlyte.vydra.utils.TransitionPreviewCache.getFrameResIds(type)
+                if (frameIds != null) {
+                    // Show static first frame preview without running animation loop
+                    val staticThumb = androidx.core.content.ContextCompat.getDrawable(this, frameIds[0])
+                    ivPreview.setImageDrawable(staticThumb)
                     ivPreview.visibility = View.VISIBLE
                     tvShort.visibility = View.GONE
                 } else {
-                    val animation = android.graphics.drawable.AnimationDrawable().apply {
-                        isOneShot = false
-                    }
-                    val frame1Res = resources.getIdentifier("trans_preview_${type}_1", "drawable", packageName)
-                    val frame2Res = resources.getIdentifier("trans_preview_${type}_2", "drawable", packageName)
-                    val frame3Res = resources.getIdentifier("trans_preview_${type}_3", "drawable", packageName)
-
-                    if (frame1Res != 0 && frame2Res != 0 && frame3Res != 0) {
-                        val f1 = androidx.core.content.ContextCompat.getDrawable(this, frame1Res)
-                        val f2 = androidx.core.content.ContextCompat.getDrawable(this, frame2Res)
-                        val f3 = androidx.core.content.ContextCompat.getDrawable(this, frame3Res)
-
-                        if (f1 != null && f2 != null && f3 != null) {
-                            animation.addFrame(startDrawable, 600)
-                            animation.addFrame(f1, 100)
-                            animation.addFrame(f2, 100)
-                            animation.addFrame(f3, 100)
-                            animation.addFrame(endDrawable, 600)
-
-                            ivPreview.setImageDrawable(animation)
-                            ivPreview.visibility = View.VISIBLE
-                            tvShort.visibility = View.GONE
-                            ivPreview.post { animation.start() }
-                        } else {
-                            ivPreview.visibility = View.GONE
-                            tvShort.visibility = View.VISIBLE
-                            tvShort.text = name.substring(0, minOf(2, name.length)).uppercase()
-                        }
-                    } else {
-                        ivPreview.visibility = View.GONE
-                        tvShort.visibility = View.VISIBLE
-                        tvShort.text = name.substring(0, minOf(2, name.length)).uppercase()
-                    }
+                    ivPreview.visibility = View.GONE
+                    tvShort.visibility = View.VISIBLE
+                    tvShort.text = name.substring(0, minOf(2, name.length)).uppercase()
                 }
-            } else {
-                ivPreview.visibility = View.GONE
-                tvShort.visibility = View.VISIBLE
-                tvShort.text = name.substring(0, minOf(2, name.length)).uppercase()
             }
 
             itemView.setOnClickListener {
+                val prevType = activeTransitionType
                 activeTransitionType = type
                 refreshSelectionStates()
+                // Restore static thumbnail on previously running preview item
+                if (prevType != "none" && prevType != type) {
+                    val prevIv = itemIvPreviews[prevType]
+                    val prevIds = com.boostlyte.vydra.utils.TransitionPreviewCache.getFrameResIds(prevType)
+                    if (prevIv != null && prevIds != null) {
+                        prevIv.setImageDrawable(androidx.core.content.ContextCompat.getDrawable(this, prevIds[0]))
+                    }
+                }
+                // Lazily start animation for the newly selected item only
+                startAnimationFor(type)
                 applyTransitionToIndex(transitionIndex, type, activeDurationMs)
             }
 
@@ -9420,6 +9476,14 @@ class VideoEditingActivity : AppCompatActivity() {
         }
 
         refreshSelectionStates()
+        // Lazily start animation ONLY for the currently selected item
+        startAnimationFor(activeTransitionType)
+
+        bottomSheet.setOnDismissListener {
+            activeRunningAnimation?.stop()
+            activeRunningAnimation = null
+            activeRunningIv = null
+        }
 
         view.findViewById<View>(R.id.btnApplyToAll)?.setOnClickListener {
             val transitionsCount = chunkDurationsMs.size - 1
@@ -9453,6 +9517,39 @@ class VideoEditingActivity : AppCompatActivity() {
                 imageOverlayView?.currentPositionMs = newSeekTime
             } else {
                 Log.d("SeekError", "Seek position out of bounds.")
+            }
+        }
+    }
+
+    private fun prewarmVisibleThumbnails() {
+        if (!::timelineHorizontalScroll.isInitialized) return
+        val timelineWidth = timelineHorizontalScroll.width
+        if (timelineWidth <= 0 || pixelsPerMs <= 0f) return
+        val scrollX = timelineHorizontalScroll.scrollX
+
+        // Pre-warm visible viewport with 1 full screen buffer on each side
+        val visibleStartMs = ((scrollX - timelineWidth) / pixelsPerMs).toLong().coerceAtLeast(0L)
+        val visibleEndMs = ((scrollX + 2 * timelineWidth) / pixelsPerMs).toLong()
+
+        val sequenceItems = cachedSequenceItems.ifEmpty { getSequenceItems().also { cachedSequenceItems = it } }
+        var currentStartMs = 0L
+        val photosToPrewarm = mutableListOf<Pair<Uri, Int>>()
+
+        for (item in sequenceItems) {
+            val clipStart = currentStartMs
+            val clipEnd = currentStartMs + item.trimmedDurationMs
+            currentStartMs = clipEnd
+
+            if (clipEnd >= visibleStartMs && clipStart <= visibleEndMs) {
+                if (item.isImage || isImageUri(item.uri)) {
+                    photosToPrewarm.add(Pair(item.uri, 120))
+                }
+            }
+        }
+
+        if (photosToPrewarm.isNotEmpty()) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                com.boostlyte.vydra.utils.ImagePreviewCache.prewarmThumbnails(this@VideoEditingActivity, photosToPrewarm)
             }
         }
     }

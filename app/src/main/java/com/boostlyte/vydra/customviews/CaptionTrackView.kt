@@ -23,24 +23,66 @@ class CaptionTrackView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
 
+    data class CachedCueLayout(
+        val op: EditOperation.AddText,
+        val startMs: Long,
+        val endMs: Long,
+        val cleanText: String,
+        val textYOffset: Float
+    )
+
+    private var cachedCueLayouts: List<CachedCueLayout> = emptyList()
+
     var totalDurationMs: Long = 0L
     var customMsPerPixel: Float? = null
     var captionOperations: List<EditOperation.AddText> = emptyList()
         set(value) {
             field = value
+            rebuildCueCache()
             invalidate()
         }
 
     var selectedOperationId: String? = null
         set(value) {
-            field = value
-            invalidate()
+            if (field != value) {
+                field = value
+                invalidate()
+            }
         }
+
+    var currentPlayheadMs: Long = -1L
+        private set
+    var activeCueId: String? = null
+        private set
+
+    /**
+     * Updates playhead position. Invalidates ONLY when the playhead crosses a cue boundary!
+     */
+    fun updatePlayhead(playheadMs: Long) {
+        currentPlayheadMs = playheadMs
+        val activeCue = cachedCueLayouts.firstOrNull { playheadMs in it.startMs..it.endMs }
+        val newActiveId = activeCue?.op?.id
+        if (newActiveId != activeCueId) {
+            activeCueId = newActiveId
+            invalidate() // Invalidate ONLY when crossing a cue boundary!
+        }
+    }
+
+    private fun rebuildCueCache() {
+        val textYOffset = -((textPaint.descent() + textPaint.ascent()) / 2f)
+        cachedCueLayouts = captionOperations.map { op ->
+            val startMs = op.startTimeMs ?: 0L
+            val endMs = op.endTimeMs ?: (startMs + 1000L)
+            val clean = op.text.replace("\n", " ").trim()
+            CachedCueLayout(op, startMs, endMs, clean, textYOffset)
+        }
+    }
 
     var onCaptionClicked: ((String) -> Unit)? = null
     var onCaptionTrimChanged: ((EditOperation.AddText, Long, Long) -> Unit)? = null
     var onDragStateChanged: ((Boolean) -> Unit)? = null
 
+    // ── Pre-allocated Paints (Cached) ──────────────────────────────────────────
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#1C1929") // Dark purple-tinted track background
         style = Paint.Style.FILL
@@ -55,6 +97,12 @@ class CaptionTrackView @JvmOverloads constructor(
         color = Color.parseColor("#9575CD")
         style = Paint.Style.STROKE
         strokeWidth = 2f
+    }
+
+    private val activeCueBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#FFD54F") // Amber border highlight for currently active cue
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
     }
 
     private val selectedCuePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -90,6 +138,11 @@ class CaptionTrackView @JvmOverloads constructor(
         isFakeBoldText = true
     }
 
+    // ── Reusable Scratch Rects (Zero-Allocation onDraw) ────────────────────────
+    private val scratchTrackRect = RectF()
+    private val scratchCueRect = RectF()
+    private val scratchHandleRect = RectF()
+
     private var isDragging = false
     private var dragTarget: DragTarget = DragTarget.NONE
     private var draggingOp: EditOperation.AddText? = null
@@ -117,8 +170,8 @@ class CaptionTrackView @JvmOverloads constructor(
         if (w <= 0 || h <= 0) return
 
         // 1. Draw track lane background
-        val trackRect = RectF(0f, 2f, w, h - 2f)
-        canvas.drawRoundRect(trackRect, 8f, 8f, bgPaint)
+        scratchTrackRect.set(0f, 2f, w, h - 2f)
+        canvas.drawRoundRect(scratchTrackRect, 8f, 8f, bgPaint)
 
         val pxPerMs = getPxPerMs()
         val cornerRadius = 6f
@@ -127,29 +180,32 @@ class CaptionTrackView @JvmOverloads constructor(
         val clipLeft = canvas.clipBounds.left.toFloat()
         val clipRight = canvas.clipBounds.right.toFloat()
 
-        // 2. Draw all caption cue blocks (skipping off-screen cues for instant scrolling)
-        for (op in captionOperations) {
-            val startMs = op.startTimeMs ?: 0L
-            val endMs = op.endTimeMs ?: (startMs + 1000L)
-            val left = (startMs * pxPerMs).coerceAtLeast(0f)
-            val right = (endMs * pxPerMs).coerceAtLeast(left + 12f)
+        // 2. Draw cached caption cue blocks (skipping off-screen cues for instant scrolling)
+        for (cached in cachedCueLayouts) {
+            val left = (cached.startMs * pxPerMs).coerceAtLeast(0f)
+            val right = (cached.endMs * pxPerMs).coerceAtLeast(left + 12f)
             if (right < clipLeft - 50f || left > clipRight + 50f) continue
 
-            val isSelected = (op.id == selectedOperationId)
-            val cueRect = RectF(left, pillMarginY, right, h - pillMarginY)
+            val isSelected = (cached.op.id == selectedOperationId)
+            val isActive = (cached.op.id == activeCueId)
+            scratchCueRect.set(left, pillMarginY, right, h - pillMarginY)
 
             // Fill & Border
             val fillPaint = if (isSelected) selectedCuePaint else cuePaint
-            canvas.drawRoundRect(cueRect, cornerRadius, cornerRadius, fillPaint)
-            canvas.drawRoundRect(cueRect, cornerRadius, cornerRadius, if (isSelected) selectionBorderPaint else cueBorderPaint)
+            val borderPaint = when {
+                isSelected -> selectionBorderPaint
+                isActive -> activeCueBorderPaint
+                else -> cueBorderPaint
+            }
+            canvas.drawRoundRect(scratchCueRect, cornerRadius, cornerRadius, fillPaint)
+            canvas.drawRoundRect(scratchCueRect, cornerRadius, cornerRadius, borderPaint)
 
-            // Text content (single line clipped)
-            val cleanText = op.text.replace("\n", " ").trim()
-            if (cleanText.isNotEmpty() && (right - left) > 30f) {
+            // Text content (single line clipped, using precomputed layout and offset)
+            if (cached.cleanText.isNotEmpty() && (right - left) > 30f) {
                 canvas.save()
-                canvas.clipRect(cueRect.left + 8f, cueRect.top, cueRect.right - 8f, cueRect.bottom)
-                val textY = cueRect.centerY() - ((textPaint.descent() + textPaint.ascent()) / 2f)
-                canvas.drawText(cleanText, cueRect.left + 10f, textY, textPaint)
+                canvas.clipRect(scratchCueRect.left + 8f, scratchCueRect.top, scratchCueRect.right - 8f, scratchCueRect.bottom)
+                val textY = scratchCueRect.centerY() + cached.textYOffset
+                canvas.drawText(cached.cleanText, scratchCueRect.left + 10f, textY, textPaint)
                 canvas.restore()
             }
 
@@ -157,9 +213,11 @@ class CaptionTrackView @JvmOverloads constructor(
             if (isSelected) {
                 val handleRadius = 5f
                 // Left handle
-                canvas.drawRoundRect(RectF(left - 2f, pillMarginY + 8f, left + 4f, h - pillMarginY - 8f), handleRadius, handleRadius, handlePaint)
+                scratchHandleRect.set(left - 2f, pillMarginY + 8f, left + 4f, h - pillMarginY - 8f)
+                canvas.drawRoundRect(scratchHandleRect, handleRadius, handleRadius, handlePaint)
                 // Right handle
-                canvas.drawRoundRect(RectF(right - 4f, pillMarginY + 8f, right + 2f, h - pillMarginY - 8f), handleRadius, handleRadius, handlePaint)
+                scratchHandleRect.set(right - 4f, pillMarginY + 8f, right + 2f, h - pillMarginY - 8f)
+                canvas.drawRoundRect(scratchHandleRect, handleRadius, handleRadius, handlePaint)
             }
         }
     }
@@ -256,11 +314,11 @@ class CaptionTrackView @JvmOverloads constructor(
 
     private fun findCueAtX(x: Float): EditOperation.AddText? {
         val pxPerMs = getPxPerMs()
-        for (op in captionOperations) {
-            val left = (op.startTimeMs ?: 0L) * pxPerMs - 6f
-            val right = (op.endTimeMs ?: 0L) * pxPerMs + 6f
+        for (cached in cachedCueLayouts) {
+            val left = cached.startMs * pxPerMs - 6f
+            val right = cached.endMs * pxPerMs + 6f
             if (x in left..right) {
-                return op
+                return cached.op
             }
         }
         return null

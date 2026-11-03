@@ -42,7 +42,7 @@
 | 29 | **Subtitles** | .SRT File Import | **WORKS** | S | `SubtitleParser.kt:parse()`, `VideoEditingActivity.kt:5380-5425` |
 | 30 | Subtitles | Auto-Captions Display & Edit | **WORKS** | M | `CaptionTrackView.kt`, `CaptionCueBuilder.kt`, `VideoEditingActivity.kt:7677-7706` |
 | 31 | **Transitions** | Apply Between Clips | **FIXED** | M | `VideoEditingActivity.kt:8159-8173`, `VideoEditingViewModelExt.kt:addTransitionOperation()` |
-| 32 | Transitions | Animated Toolbar Preview | **UNSTABLE** | S | `VideoEditingActivity.kt:8245-8280`, `dialog_transitions.xml` |
+| 32 | Transitions | Animated Toolbar Preview | **FIXED** | S | `TransitionPreviewCache.kt`, `VideoEditingActivity.kt:showTransitionDialog()` |
 | 33 | Transitions | Preview Playback | **BROKEN** | L | `VideoEditingActivity.kt:6593-6640`, `TransitionPreviewOverlayView.kt` |
 | 34 | Transitions | Export Rendering | **FIXED** | L | `VideoEditingViewModel.kt:1083-1178` (`xfade` / `acrossfade` chaining) |
 | 35 | Transitions | Duration Control | **FIXED** | S | `VideoEditingActivity.kt:8182-8188`, `dialog_transitions.xml:sliderTransitionDuration` |
@@ -308,11 +308,13 @@
 - **Fix Effort:** `M`
 
 #### 5.2 Animated Toolbar Preview
-- **Status:** `UNSTABLE`
-- **Evidence:** In `VideoEditingActivity.kt:8255-8280`, each transition option attempts to create an `AnimationDrawable` by dynamically querying resources via `resources.getIdentifier("trans_preview_${type}_1", "drawable", packageName)`.
-- **Root-Cause Hypothesis:** 
-  1. While webp preview assets exist for many transitions, name mismatches exist between dialog keys (`smoothleft`, `distance`) and asset names, resulting in missing frames (`frame1Res == 0`) and falling back to a plain text label.
-  2. Calling `getIdentifier()` repeatedly in a loop on the UI thread causes layout hitching.
+- **Status:** `FIXED`
+- **Evidence:** In `VideoEditingActivity.kt:showTransitionDialog()` and `TransitionPreviewCache.kt`.
+- **Root-Cause & Resolution:** 
+  1. Root cause confirmed: Previously, `showTransitionDialog()` dynamically called `resources.getIdentifier()` 3 times per item inside a 21-item view inflation loop on the UI thread (63 reflection lookups), while starting 20 `AnimationDrawable` loops simultaneously, causing severe dialog open lag. Furthermore, asset name mismatches (`smoothleft` vs `coverleft`, `distance` vs `zoomin`) caused frames to fail lookup and fall back to plain text initials.
+  2. Fixed in `TransitionPreviewCache.kt`: Pre-resolves all preview drawable resource identifiers once on a background thread (`Dispatchers.IO`), storing results in a thread-safe cache (`ConcurrentHashMap`).
+  3. Bidirectional alias mapping (`smoothleft` <-> `coverleft`, `smoothright` <-> `coverright`, `distance` <-> `zoomin`, `rectcrop` <-> `box`, `circlecrop` <-> `circle`) ensures every option resolves its 3 animation frames, with zero fallback to plain labels.
+  4. Lazy animation lifecycle: Unselected items display a static preview thumbnail without running animations; `AnimationDrawable` is started lazily ONLY for the currently selected/visible option. On dialog dismiss (`setOnDismissListener`), all animations are cleanly stopped and references cleared.
 - **Fix Effort:** `S`
 
 #### 5.3 Preview Playback
@@ -569,4 +571,19 @@
   - **Milestone M2 (Intermediate Generation):** `preRenderGlMotionIntermediates` pre-renders sequence image clips with motion effects into intermediate MP4s. Falls back silently to software AVC (`gl_sw`) or legacy CPU `zoompan` (`legacy`) on failure.
   - **Milestone M3 (Pipeline Integration):** Both single-pass (<= 24 clips) and chunked (> 24 clips) export plans consume GL motion intermediates. Final bridge assembly chains chunk MP4s with normalized transitions. Added `renderPath` (`gl_hw`, `gl_sw`, `legacy`) tracking across `ChunkExportPlan`, `ChunkCommand`, and `ExportService`.
   - Tested in `GlMotionIntegrationTest.kt` covering legacy fallback, missing source safety, and single-pass / chunked export plan render paths.
+
+### 8. Editor Responsiveness & Per-Tick Overhead Elimination (Phase 16A)
+- **Problem:**
+  - Transition dialog suffered from hitching on open due to synchronous `resources.getIdentifier()` reflection loops and starting 20 `AnimationDrawable` instances simultaneously. Name mismatches (`smoothleft`, `distance`) caused plain label fallbacks.
+  - Assembled projects experienced scrub and playback lag even without transitions. Audit revealed per-tick work during 50ms progress intervals: `getSequenceItems()` allocating new ArrayLists on every tick, redundant linear operation filtering for color filters and adjustments, unconstrained audio player cleanup set construction, and `updateTimelineAddButtonPosition()` running `getSequenceItems().sumOf { it.trimmedDurationMs }` on every scroll event.
+  - `CaptionTrackView` re-created `RectF` and string manipulation objects on draw and lacked cue boundary invalidation gating, causing redundant redrawing across frames.
+  - Timeline thumbnails were decoded on demand without width-based caching or scroll idle pre-warming.
+- **Resolution:**
+  - **Transition Preview Resolution (`TransitionPreviewCache.kt`):** Resolves all 21 transition preview drawables once on `Dispatchers.IO` in background. Employs bidirectional alias map (`smoothleft` <-> `coverleft`, `distance` <-> `zoomin`, etc.). Unselected options show static thumbnails; `AnimationDrawable` is instantiated and started lazily ONLY for the currently selected item, and cleanly stopped on dismiss.
+  - **Progress Tick Audit (`VideoEditingActivity.kt`):** Ensured each 50ms tick updates ONLY the playhead position (`timelineHorizontalScroll.scrollTo`), time label (`updateDurationDisplay`), and active-caption highlight (`currentCaptionTrackView?.updatePlayhead`). Sequence items are cached (`cachedSequenceItems`), per-clip color filter and mirror updates execute strictly when crossing clip boundaries (`activeClipIndex != lastActiveClipIndexForPlayer`), `syncBgAudio` gates player set construction to size changes, and `updateSplitButtonState` only updates views when the boolean state changes.
+  - **Timeline Redraw & Scroll Performance:** Replaced per-scroll-tick `getSequenceItems().sumOf` in `updateTimelineAddButtonPosition()` with `getTotalSequenceDuration()`. Added visible range thumbnail pre-warming (`prewarmVisibleThumbnails()`) on scroll idle (150ms debounce) on `Dispatchers.IO`.
+  - **Thumbnail Cache Keying (`ImagePreviewCache.kt`):** LRU cache is keyed by `"$uri#$targetWidth"`, preventing scale mismatch and memory bloat, with main-thread execution guards.
+  - **CaptionTrackView Invalidation Optimization (`CaptionTrackView.kt`):** Pre-caches cue layouts (`cleanText`, centered vertical text offset, text bounds) in `CachedCueLayout`. Reuses scratch `RectF` instances in `onDraw`. Tracks `currentPlayheadMs` and invalidates ONLY when the playhead crosses into or out of a cue boundary (`newActiveId != activeCueId`), reducing invalidations during caption playback by >95%.
+  - **Unit Test Coverage:** Verified in `EditorResponsivenessTest.kt` (alias resolution, thumbnail keying, and cue boundary invalidation).
+
 

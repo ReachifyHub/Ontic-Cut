@@ -65,12 +65,24 @@ object ImagePreviewCache {
         previewCache.put(uri.toString(), bitmap)
     }
 
+    fun makeThumbnailKey(uri: Uri, targetWidth: Int): String {
+        return "$uri#$targetWidth"
+    }
+
+    fun getThumbnailBitmap(uri: Uri, targetWidth: Int = 96): Bitmap? {
+        return thumbnailCache.get(makeThumbnailKey(uri, targetWidth))
+    }
+
     fun getThumbnailBitmap(uri: Uri): Bitmap? {
-        return thumbnailCache.get(uri.toString())
+        return getThumbnailBitmap(uri, 96)
+    }
+
+    fun putThumbnailBitmap(uri: Uri, targetWidth: Int = 96, bitmap: Bitmap) {
+        thumbnailCache.put(makeThumbnailKey(uri, targetWidth), bitmap)
     }
 
     fun putThumbnailBitmap(uri: Uri, bitmap: Bitmap) {
-        thumbnailCache.put(uri.toString(), bitmap)
+        putThumbnailBitmap(uri, 96, bitmap)
     }
 
     fun clear() {
@@ -142,14 +154,32 @@ object ImagePreviewCache {
     }
 
     fun decodeThumbnail(context: Context, uri: Uri, targetWidth: Int, targetHeight: Int): Bitmap? {
-        val cached = getThumbnailBitmap(uri)
-        if (cached != null) return cached
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            Log.w(TAG, "decodeThumbnail called on Main/UI thread for $uri! Thumbnails should be decoded asynchronously.")
+        }
+        val cached = getThumbnailBitmap(uri, targetWidth)
+        if (cached != null && !cached.isRecycled) return cached
 
         val decoded = decodeDownsampledBitmap(context, uri, targetWidth, targetHeight)
         if (decoded != null) {
-            putThumbnailBitmap(uri, decoded)
+            putThumbnailBitmap(uri, targetWidth, decoded)
         }
         return decoded
+    }
+
+    /**
+     * Asynchronously pre-warms thumbnails for given URIs off the main thread.
+     */
+    suspend fun prewarmThumbnails(
+        context: Context,
+        urisWithWidth: List<Pair<Uri, Int>>
+    ) = withContext(Dispatchers.IO) {
+        for ((uri, targetWidth) in urisWithWidth) {
+            val cached = getThumbnailBitmap(uri, targetWidth)
+            if (cached == null || cached.isRecycled) {
+                decodeThumbnail(context, uri, targetWidth, targetWidth)
+            }
+        }
     }
 
     /**
