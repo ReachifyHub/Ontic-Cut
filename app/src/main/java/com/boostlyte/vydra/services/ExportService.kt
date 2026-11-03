@@ -53,6 +53,7 @@ class ExportService : Service() {
         const val EXTRA_TOTAL_DURATION_SECS = "extra_total_duration_secs"
         const val EXTRA_IS_AUDIO_ONLY = "extra_is_audio_only"
         const val EXTRA_CHUNK_PLAN_FILE = "extra_chunk_plan_file"
+        const val EXTRA_RENDER_PATH = "extra_render_path"
     }
 
     override fun onCreate() {
@@ -115,7 +116,8 @@ class ExportService : Service() {
         val scriptRegex = Regex("""-filter_complex_script\s+["']?([^"'\s]+)["']?""")
         val scriptFilePath = scriptRegex.find(command)?.groupValues?.getOrNull(1)
 
-        val projectStats = "durationSecs=$durationSecs isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath script=$scriptFilePath"
+        val renderPath = intent.getStringExtra(EXTRA_RENDER_PATH) ?: "legacy"
+        val projectStats = "durationSecs=$durationSecs isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath script=$scriptFilePath RENDER_PATH=$renderPath"
         com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
 
         startForeground(NOTIFICATION_ID, buildNotification(0, "Exporting..."))
@@ -124,6 +126,9 @@ class ExportService : Service() {
             try {
                 var lastReportedProgress = -1
                 var lastNotificationTime = 0L
+
+                val passStartIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
+                val passStartTimeMs = System.currentTimeMillis()
 
                 val result = ffmpegEngine.exportFinal(
                     ffmpegCommand = command,
@@ -143,11 +148,24 @@ class ExportService : Service() {
                     }
                 )
 
+                val passEndTimeMs = System.currentTimeMillis()
+                val passEndIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
+                val passDurationSec = (passEndTimeMs - passStartTimeMs) / 1000.0
+
                 val tempFile = File(tempOutputPath)
                 val concatFile = concatFilePath?.let { File(it) }
 
                 when (result) {
                     is FFmpegRenderEngine.RenderResult.Success -> {
+                        com.boostlyte.vydra.utils.AppLogger.logPassResult(
+                            context = this@ExportService,
+                            passName = "single_pass",
+                            startTimeIso = passStartIso,
+                            endTimeIso = passEndIso,
+                            durationSecs = passDurationSec,
+                            returnCode = 0,
+                            renderPath = renderPath
+                        )
                         updateNotification(100, "Saving video...")
                         broadcastProgress(100)
 
@@ -177,6 +195,15 @@ class ExportService : Service() {
                     }
                     is FFmpegRenderEngine.RenderResult.Failure -> {
                         val returnCode = result.session?.returnCode?.value
+                        val errorLines = result.error.split("\n")
+                        com.boostlyte.vydra.utils.AppLogger.logPassFailed(
+                            context = this@ExportService,
+                            passName = "single_pass",
+                            returnCode = returnCode,
+                            scriptPath = scriptFilePath,
+                            renderPath = renderPath,
+                            ffmpegLogs = errorLines
+                        )
                         com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, result.error, returnCode, scriptFilePath)
                         showCompletionNotification("Export Failed", "Error during rendering", null)
                         broadcastFailure(result.error, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
@@ -508,6 +535,10 @@ class ExportService : Service() {
                     Log.d(TAG, "Starting Chunk $chunkIdx/$numChunks (duration: ${chunkCmd.durationSecs}s)")
                     updateNotification(spanStart.toInt(), "Exporting part $chunkIdx/$numChunks...")
 
+                    val chunkRenderPath = chunkCmd.renderPath.ifEmpty { plan.renderPath }
+                    val passStartIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
+                    val passStartTimeMs = System.currentTimeMillis()
+
                     val result = ffmpegEngine.exportFinal(
                         ffmpegCommand = chunkCmd.command,
                         totalDurationSecs = chunkCmd.durationSecs,
@@ -527,6 +558,10 @@ class ExportService : Service() {
                         }
                     )
 
+                    val passEndTimeMs = System.currentTimeMillis()
+                    val passEndIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
+                    val passDurationSec = (passEndTimeMs - passStartTimeMs) / 1000.0
+
                     // Release FFmpegKit sessions fully before starting next chunk
                     try {
                         com.antonkarpenko.ffmpegkit.FFmpegKitConfig.clearSessions()
@@ -536,6 +571,15 @@ class ExportService : Service() {
 
                     when (result) {
                         is FFmpegRenderEngine.RenderResult.Success -> {
+                            com.boostlyte.vydra.utils.AppLogger.logPassResult(
+                                context = this@ExportService,
+                                passName = "chunk_$chunkIdx",
+                                startTimeIso = passStartIso,
+                                endTimeIso = passEndIso,
+                                durationSecs = passDurationSec,
+                                returnCode = 0,
+                                renderPath = chunkRenderPath
+                            )
                             val chunkOutputFile = File(chunkCmd.outputPath)
                             if (!chunkOutputFile.exists() || chunkOutputFile.length() == 0L) {
                                 val errorMsg = "Chunk $chunkIdx/$numChunks output file missing or empty"
@@ -551,6 +595,15 @@ class ExportService : Service() {
                         is FFmpegRenderEngine.RenderResult.Failure -> {
                             val stageName = "Chunk $chunkIdx/$numChunks"
                             val returnCode = result.session?.returnCode?.value
+                            val errorLines = result.error.split("\n")
+                            com.boostlyte.vydra.utils.AppLogger.logPassFailed(
+                                context = this@ExportService,
+                                passName = "chunk_$chunkIdx",
+                                returnCode = returnCode,
+                                scriptPath = chunkCmd.scriptFilePath,
+                                renderPath = chunkRenderPath,
+                                ffmpegLogs = errorLines
+                            )
                             Log.e(TAG, "$stageName failed: ${result.error}")
                             cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
                             com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "$stageName failed: ${result.error}", returnCode, chunkCmd.scriptFilePath)
@@ -586,6 +639,10 @@ class ExportService : Service() {
                 var lastReportedProgress = -1
                 var lastNotificationTime = 0L
 
+                val finalPassStartIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
+                val finalPassStartTimeMs = System.currentTimeMillis()
+                val finalRenderPath = plan.renderPath
+
                 Log.d(TAG, "Starting final pass assembly (total duration: ${plan.totalDurationSecs}s)")
                 updateNotification(finalSpanStart.toInt(), "Assembling final video...")
 
@@ -608,6 +665,10 @@ class ExportService : Service() {
                     }
                 )
 
+                val finalPassEndTimeMs = System.currentTimeMillis()
+                val finalPassEndIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
+                val finalPassDurationSec = (finalPassEndTimeMs - finalPassStartTimeMs) / 1000.0
+
                 try {
                     com.antonkarpenko.ffmpegkit.FFmpegKitConfig.clearSessions()
                 } catch (e: Exception) {
@@ -616,6 +677,15 @@ class ExportService : Service() {
 
                 when (finalResult) {
                     is FFmpegRenderEngine.RenderResult.Success -> {
+                        com.boostlyte.vydra.utils.AppLogger.logPassResult(
+                            context = this@ExportService,
+                            passName = "final_pass",
+                            startTimeIso = finalPassStartIso,
+                            endTimeIso = finalPassEndIso,
+                            durationSecs = finalPassDurationSec,
+                            returnCode = 0,
+                            renderPath = finalRenderPath
+                        )
                         updateNotification(100, "Saving video...")
                         broadcastProgress(100)
 
@@ -645,6 +715,15 @@ class ExportService : Service() {
                     }
                     is FFmpegRenderEngine.RenderResult.Failure -> {
                         val returnCode = finalResult.session?.returnCode?.value
+                        val errorLines = finalResult.error.split("\n")
+                        com.boostlyte.vydra.utils.AppLogger.logPassFailed(
+                            context = this@ExportService,
+                            passName = "final_pass",
+                            returnCode = returnCode,
+                            scriptPath = null,
+                            renderPath = finalRenderPath,
+                            ffmpegLogs = errorLines
+                        )
                         com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "Final pass failed: ${finalResult.error}", returnCode, null)
                         showCompletionNotification("Export Failed", "Error during final assembly", null)
                         broadcastFailure("Final pass failed: ${finalResult.error}", ErrorCode.FFMPEG_EXECUTION_FAILED.code)

@@ -38,6 +38,9 @@ object FFmpegFilterUtils {
      */
     fun escapeDrawtextText(text: String): String {
         return text
+            .replace("\r\n", " ")
+            .replace("\n", " ")
+            .replace("\r", " ")
             .replace("\\", "\\\\")
             .replace("'", "'\\''")
             .replace(":", "\\:")

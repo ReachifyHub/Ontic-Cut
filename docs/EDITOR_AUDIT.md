@@ -545,3 +545,28 @@
   - Added strict normalization filter stages to each sequence item before entering transitions:
     `scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p`.
   - Applied the same normalization to intermediate `xfade` and `concat` stage outputs so all chained transition inputs have identical resolution, aspect ratio, SAR=1, 30 fps, and YUV420P format.
+
+### 5. Caption Double-Draw Elimination & Multi-Combo Subtitle Integrity
+- **Problem:** Exported videos with subtitles suffered from a garbled overlapping line across the top. In filter script generation, unescaped `\n` characters produced by `CaptionCueBuilder.wrapTextToTwoLines` broke `drawtext` commands across two lines. Line 1 was interpreted by FFmpeg as an unstyled, always-on default filter at (0, 0), while Line 2 had the styled drawtext. Additionally, when auto-captions and .SRT were both active or duplicate cues existed, cues double-drew.
+- **Resolution:**
+  - `FFmpegFilterUtils.escapeDrawtextText` sanitizes `\r\n`, `\n`, `\r` into a single space `" "`, preventing line splitting in complex filter scripts.
+  - `VideoEditingViewModel.kt`: Deduplicates cues with identical timestamps, suppresses auto-captions when explicit `.srt` subtitles exist (Combo 3), and emits exactly 1 drawtext per cue in `AddSubtitles`.
+  - In `buildChunkPassCommand`, fixed cue time offset handling (`timeOffsetMs = 0L` for chunk overlays because cues are already chunk-local), preventing timing collapse.
+  - Added comprehensive test suite in `CoverCropAndCaptionGraphTest.kt` covering Combo 1 (auto-captions only), Combo 2 (.SRT only), Combo 3 (both), and newline escaping.
+
+### 6. Export Diagnostics & Per-Pass Logging
+- **Problem:** When exports failed on physical devices, FFmpeg error logs were truncated or overwritten, making root-cause diagnosis impossible without Logcat.
+- **Resolution:**
+  - `AppLogger.kt`: Added `logPassResult(context, passName, startTimeIso, endTimeIso, durationSecs, returnCode, renderPath)` and `logPassFailed(context, passName, returnCode, scriptPath, renderPath, ffmpegLogs)`.
+  - On failure, captures the last 300 lines of FFmpeg execution output into `vydra_export.log`.
+  - Increased log buffer size to 1MB and log retrieval to 350 lines.
+  - `ExportService.kt` logs exact pass start/end ISO timestamps, duration in seconds, return code, and `renderPath` for single-pass, chunk passes, and final assembly pass.
+
+### 7. OpenGL ES Motion Renderer (`GlMotionRenderer`) & Silent Fallback Chain (Milestones M1–M3)
+- **Problem:** Ken Burns zoom/pan on CPU via FFmpeg `zoompan` caused visible integer-pixel stepping on slow zooms and high export latency on mobile devices.
+- **Resolution:**
+  - **Milestone M1 (`GlMotionRenderer` & `GlMotionTransform`):** Standalone OpenGL ES 2.0+ offscreen surface renderer encoding directly into `MediaCodec` + `MediaMuxer`. Floating-point UV crop math eliminates integer stepping across 7 motion effects (`zoom_in`, `zoom_out`, `pan_left`, `pan_right`, `pan_up`, `pan_down`, `drift_up_right`). Unit tests in `GlMotionTransformTest.kt` verify smooth progression, non-stepping coordinates, boundary safety `[0, 1]`, and aspect ratio preservation.
+  - **Milestone M2 (Intermediate Generation):** `preRenderGlMotionIntermediates` pre-renders sequence image clips with motion effects into intermediate MP4s. Falls back silently to software AVC (`gl_sw`) or legacy CPU `zoompan` (`legacy`) on failure.
+  - **Milestone M3 (Pipeline Integration):** Both single-pass (<= 24 clips) and chunked (> 24 clips) export plans consume GL motion intermediates. Final bridge assembly chains chunk MP4s with normalized transitions. Added `renderPath` (`gl_hw`, `gl_sw`, `legacy`) tracking across `ChunkExportPlan`, `ChunkCommand`, and `ExportService`.
+  - Tested in `GlMotionIntegrationTest.kt` covering legacy fallback, missing source safety, and single-pass / chunked export plan render paths.
+

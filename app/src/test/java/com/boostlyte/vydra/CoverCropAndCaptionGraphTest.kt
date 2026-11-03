@@ -143,7 +143,105 @@ class CoverCropAndCaptionGraphTest {
     }
 
     @Test
-    fun testCaptionDeduplicationInExportPipeline() {
+    fun testEscapeDrawtextText_sanitizesNewlines() {
+        val multiline = "First line of caption\nSecond line of caption\r\nThird line"
+        val escaped = FFmpegFilterUtils.escapeDrawtextText(multiline)
+        assertFalse("Escaped text must not contain newline", escaped.contains("\n"))
+        assertFalse("Escaped text must not contain carriage return", escaped.contains("\r"))
+        assertEquals("First line of caption Second line of caption Third line", escaped)
+    }
+
+    @Test
+    fun testCaptionDeduplication_Combo1_AutoCaptionsOnly() {
+        // Project with ONLY auto-captions (including multi-line wrapped text)
+        val cues = listOf(
+            CaptionCue(0L, 2000L, CaptionCueBuilder.wrapTextToTwoLines("This is a very long caption that should wrap to two lines automatically")),
+            CaptionCue(2000L, 4000L, "Short cue"),
+            CaptionCue(4000L, 6000L, "Another regular cue")
+        )
+        val autoCaptionOps = CaptionCueBuilder.cuesToEditOperations(cues)
+        assertEquals(3, autoCaptionOps.size)
+
+        val project = VideoProject(
+            sourceUri = DummyUri.fromPath("/tmp/video.mp4"),
+            sourceName = "video.mp4",
+            operations = autoCaptionOps
+        )
+
+        val viewModel = VideoEditingViewModel()
+        viewModel.loadProject(project)
+
+        val cmd = viewModel.buildConsolidatedFFmpegCommand(
+            sourceFilePath = "/tmp/video.mp4",
+            outputFilePath = "/tmp/output.mp4",
+            fontFilePath = "/tmp/Roboto.ttf"
+        )
+        assertNotNull(cmd)
+
+        val drawtextMatches = Regex("""drawtext=expansion=none:""").findAll(cmd!!)
+        // Exactly 3 drawtext filters (one for each cue), with NO second stray/unstyled drawtext
+        assertEquals(3, drawtextMatches.count())
+
+        val filterMatches = Regex("""drawtext=expansion=none:[^;\[]+""").findAll(cmd)
+        for (match in filterMatches) {
+            val filterString = match.value.trimEnd(']')
+            assertTrue(
+                "Emitted drawtext filter must be fully validated: $filterString",
+                FFmpegFilterUtils.validateDrawtextFilter(filterString)
+            )
+            // Assert no unescaped newlines in filter string that would break the script
+            assertFalse("Drawtext filter string must not contain raw newline", filterString.contains("\n"))
+        }
+    }
+
+    @Test
+    fun testCaptionDeduplication_Combo2_SrtOnly() {
+        // Project with ONLY SRT subtitles
+        val srtCues = listOf(
+            SubtitleCue(0L, 2000L, "First subtitle cue"),
+            SubtitleCue(2000L, 4500L, "Second subtitle cue with a bit more length"),
+            SubtitleCue(4500L, 7000L, "Third subtitle cue")
+        )
+        val addSubtitlesOp = EditOperation.AddSubtitles(
+            subtitlesUri = DummyUri.fromPath("/tmp/sub.srt"),
+            srtContent = "dummy",
+            fileName = "sub.srt",
+            cues = srtCues,
+            fontSize = 24
+        )
+
+        val project = VideoProject(
+            sourceUri = DummyUri.fromPath("/tmp/video.mp4"),
+            sourceName = "video.mp4",
+            operations = listOf(addSubtitlesOp)
+        )
+
+        val viewModel = VideoEditingViewModel()
+        viewModel.loadProject(project)
+
+        val cmd = viewModel.buildConsolidatedFFmpegCommand(
+            sourceFilePath = "/tmp/video.mp4",
+            outputFilePath = "/tmp/output.mp4",
+            fontFilePath = "/tmp/Roboto.ttf"
+        )
+        assertNotNull(cmd)
+
+        val drawtextMatches = Regex("""drawtext=expansion=none:""").findAll(cmd!!)
+        // Exactly 3 drawtext filters (one for each SRT cue)
+        assertEquals(3, drawtextMatches.count())
+
+        val filterMatches = Regex("""drawtext=expansion=none:[^;\[]+""").findAll(cmd)
+        for (match in filterMatches) {
+            val filterString = match.value.trimEnd(']')
+            assertTrue(
+                "Emitted drawtext filter must be fully validated: $filterString",
+                FFmpegFilterUtils.validateDrawtextFilter(filterString)
+            )
+        }
+    }
+
+    @Test
+    fun testCaptionDeduplication_Combo3_BothSrtAndAutoCaptions() {
         // Project containing both an SRT subtitle track AND auto-caption AddText overlays
         val srtCues = listOf(
             SubtitleCue(0L, 2000L, "Subtitle Cue 1"),

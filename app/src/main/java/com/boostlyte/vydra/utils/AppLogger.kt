@@ -19,7 +19,7 @@ import java.util.Locale
 object AppLogger {
 
     private const val TAG = "AppLogger"
-    private const val MAX_LOG_SIZE_BYTES = 256 * 1024L // 256 KB max per log file
+    private const val MAX_LOG_SIZE_BYTES = 1024 * 1024L // 1 MB max per log file
     private const val CRASH_LOG_NAME = "vydra_crash.log"
     private const val EXPORT_LOG_NAME = "vydra_export.log"
     private const val FILTER_GRAPH_LOG_NAME = "vydra_filter_graph.log"
@@ -118,6 +118,56 @@ object AppLogger {
     }
 
     /**
+     * Records pass completion breadcrumb with start/end ISO timestamps, duration, returnCode, and render path.
+     */
+    fun logPassResult(
+        context: Context,
+        passName: String,
+        startTimeIso: String,
+        endTimeIso: String,
+        durationSecs: Double,
+        returnCode: Int,
+        renderPath: String
+    ) {
+        val line = "PASS_COMPLETED ${getIsoTimestamp()} pass=$passName start=$startTimeIso end=$endTimeIso duration=${String.format(Locale.US, "%.2f", durationSecs)}s returnCode=$returnCode RENDER_PATH=$renderPath"
+        appendToFileCapped(getExportLogFile(context), line)
+    }
+
+    /**
+     * Records pass failure breadcrumb with returnCode, script path, line count, render path,
+     * and writes up to 300 lines of FFmpeg log to cacheDir/logs/vydra_export.log.
+     */
+    fun logPassFailed(
+        context: Context,
+        passName: String,
+        returnCode: Int?,
+        scriptPath: String?,
+        renderPath: String,
+        ffmpegLogs: List<String> = emptyList()
+    ) {
+        val file = getExportLogFile(context)
+        val scriptLineCount = if (!scriptPath.isNullOrBlank()) {
+            try {
+                val f = File(scriptPath)
+                if (f.exists()) f.readLines().size else 0
+            } catch (_: Exception) { 0 }
+        } else 0
+
+        val line = "PASS_FAILED ${getIsoTimestamp()} pass=$passName returnCode=${returnCode ?: -1} scriptPath=${scriptPath ?: "none"} scriptLineCount=$scriptLineCount RENDER_PATH=$renderPath"
+        appendToFileCapped(file, line)
+
+        if (ffmpegLogs.isNotEmpty()) {
+            val tailLogs = ffmpegLogs.takeLast(300)
+            val logBlock = buildString {
+                appendLine("--- BEGIN FFMPEG LOG TAIL (${tailLogs.size} lines) ---")
+                tailLogs.forEach { appendLine(redact(it)) }
+                appendLine("--- END FFMPEG LOG TAIL ---")
+            }
+            appendToFileCapped(file, logBlock)
+        }
+    }
+
+    /**
      * Records export failure breadcrumb.
      */
     fun logExportFailed(context: Context, reason: String, returnCode: Int?, scriptPath: String?) {
@@ -163,18 +213,19 @@ object AppLogger {
 
     /**
      * Retrieves the last [maxLines] of combined export and crash logs.
+     * Default maxLines is 350 to ensure the 300-line failure tail is readable.
      */
-    fun getRecentLogs(context: Context, maxLines: Int = 50): String {
+    fun getRecentLogs(context: Context, maxLines: Int = 350): String {
         val lines = mutableListOf<String>()
         val exportFile = getExportLogFile(context)
         if (exportFile.exists()) {
             lines.add("--- EXPORT LOGS (${exportFile.name}) ---")
-            lines.addAll(exportFile.readLines().takeLast(maxLines / 2))
+            lines.addAll(exportFile.readLines().takeLast(maxLines - 50))
         }
         val crashFile = getCrashLogFile(context)
         if (crashFile.exists()) {
             lines.add("\n--- CRASH LOGS (${crashFile.name}) ---")
-            lines.addAll(crashFile.readLines().takeLast(maxLines / 2))
+            lines.addAll(crashFile.readLines().takeLast(50))
         }
         if (lines.isEmpty()) {
             return "No log records found."

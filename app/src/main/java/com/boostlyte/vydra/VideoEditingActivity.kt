@@ -6291,7 +6291,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         java.io.ObjectOutputStream(java.io.FileOutputStream(planFile)).use {
                             it.writeObject(chunkPlan)
                         }
-                        Triple(null, planFile, chunkPlan.totalDurationSecs)
+                        ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath)
                     } else {
                         var ffmpegCommand = chunkPlan.singlePassCommand ?: return@withContext null
                         Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
@@ -6318,7 +6318,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
                         val calculatedDur = viewModel.getCalculatedExportDurationSec(this@VideoEditingActivity)
                         val totalDurationSecs = if (calculatedDur > 0.0) calculatedDur else (getTotalSequenceDuration() / 1000.0)
-                        Triple(ffmpegCommand, generatedConcat, totalDurationSecs)
+                        ExportPrepResult(ffmpegCommand, generatedConcat, totalDurationSecs, chunkPlan.renderPath)
                     }
                 }
 
@@ -6328,7 +6328,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                val (ffmpegCommand, generatedFile, totalDurationSecs) = prepResult
+                val (ffmpegCommand, generatedFile, totalDurationSecs, renderPath) = prepResult
                 val isChunkedPlan = (ffmpegCommand == null)
 
                 exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = getString(R.string.str_please_don_t_close_the_app)
@@ -6341,6 +6341,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         concatFile = generatedFile
                         putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_COMMAND, ffmpegCommand)
                         putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_CONCAT_FILE_PATH, concatFile?.absolutePath)
+                        putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_RENDER_PATH, renderPath)
                     }
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_TEMP_OUTPUT_PATH, tempOutputPath)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_TOTAL_DURATION_SECS, totalDurationSecs)
@@ -11379,6 +11380,13 @@ class VideoEditingActivity : AppCompatActivity() {
             true
         }
     }
+
+    private data class ExportPrepResult(
+        val ffmpegCommand: String?,
+        val generatedFile: File?,
+        val totalDurationSecs: Double,
+        val renderPath: String
+    )
 
     companion object {
         private const val TAG = "VideoEditingActivity"

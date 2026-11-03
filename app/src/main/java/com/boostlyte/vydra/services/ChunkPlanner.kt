@@ -43,7 +43,8 @@ data class ChunkCommand(
     val command: String,
     val outputPath: String,
     val durationSecs: Double,
-    val scriptFilePath: String? = null
+    val scriptFilePath: String? = null,
+    val renderPath: String = "legacy"
 ) : Serializable
 
 data class ChunkExportPlan(
@@ -53,7 +54,8 @@ data class ChunkExportPlan(
     val finalPassCommand: String? = null,
     val chunkTempPaths: List<String> = emptyList(),
     val totalDurationSecs: Double = 0.0,
-    val chunkDurationsSecs: List<Double> = emptyList()
+    val chunkDurationsSecs: List<Double> = emptyList(),
+    val renderPath: String = "legacy"
 ) : Serializable
 
 /**

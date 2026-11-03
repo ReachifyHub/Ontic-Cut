@@ -232,6 +232,13 @@ class VideoEditingViewModel : ViewModel() {
             "${op.opacity}"
         } else null
 
+        val safeStartMs = op.startTimeMs?.let { maxOf(0L, it - timeOffsetMs) }
+        val safeEndMs = op.endTimeMs?.let { maxOf(0L, it - timeOffsetMs) }
+
+        val isAutoCaption = op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+        val boxColor = if (isAutoCaption) "black@0.5" else null
+        val boxBorderW = if (isAutoCaption) 4 else 0
+
         val (shadowColor, shadowOffset) = if (op.borderThickness > 0) {
             val resScale = (_exportResolution.value.toFloat() / 720f).coerceIn(0.5f, 3.0f)
             val offset = maxOf(1, Math.round(op.borderThickness * 0.8f * resScale))
@@ -247,8 +254,10 @@ class VideoEditingViewModel : ViewModel() {
             fontColor = fontColor,
             x = posX,
             y = posY,
-            startTimeMs = op.startTimeMs,
-            endTimeMs = op.endTimeMs,
+            startTimeMs = safeStartMs,
+            endTimeMs = safeEndMs,
+            boxColor = boxColor,
+            boxBorderW = boxBorderW,
             shadowColor = shadowColor,
             shadowOffset = shadowOffset,
             alphaExpr = alphaExpr,
@@ -447,11 +456,23 @@ class VideoEditingViewModel : ViewModel() {
         var stageIndex = 0
 
         // Process overlays first so their relative coordinates align with the uncropped original video, matching the UI.
-        // Deduplicate: If explicit AddSubtitles cues are present, suppress duplicate auto-caption AddText overlays
+        // Deduplicate: If explicit AddSubtitles cues are present, suppress duplicate auto-caption AddText overlays.
+        // Also deduplicate auto-caption cues that share the same start/end time windows.
         val hasExplicitSubtitles = operations.any { it is EditOperation.AddSubtitles && it.cues.isNotEmpty() }
-        val overlayOps = operations.filterNot {
-            it is EditOperation.Crop ||
-            (hasExplicitSubtitles && it is EditOperation.AddText && it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID)
+        val seenAutoCaptionTimes = mutableSetOf<Pair<Long?, Long?>>()
+        val overlayOps = operations.filterNot { op ->
+            if (op is EditOperation.Crop) return@filterNot true
+            if (hasExplicitSubtitles && op is EditOperation.AddText && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                return@filterNot true
+            }
+            if (op is EditOperation.AddText && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                val key = Pair(op.startTimeMs, op.endTimeMs)
+                if (seenAutoCaptionTimes.contains(key)) {
+                    return@filterNot true
+                }
+                seenAutoCaptionTimes.add(key)
+            }
+            false
         }
         val cropOps = operations.filterIsInstance<EditOperation.Crop>()
 
@@ -596,50 +617,43 @@ class VideoEditingViewModel : ViewModel() {
                     }
 
                     for (cue in op.cues) {
-                        val lines = getWrappedSubtitleLines(cue.text, op.fontSize, effectiveDensity)
-                        val totalBlockHeight = lines.size * lineSpacing
-
-                        for ((lineIdx, lineText) in lines.withIndex()) {
-                            val lineOffset = lineIdx * lineSpacing
-
-                            val (posX, posY) = if (op.hasCustomPosition()) {
-                                val startY = "(h*${op.relativeY})-${totalBlockHeight / 2}"
-                                Pair("'(w*${op.relativeX})-(tw/2)'", "'$startY+$lineOffset'")
-                            } else {
-                                when (op.position) {
-                                    TextPosition.TOP_LEFT -> Pair("24", "24+$lineOffset")
-                                    TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "24+$lineOffset")
-                                    TextPosition.TOP_RIGHT -> Pair("w-tw-24", "24+$lineOffset")
-                                    TextPosition.CENTER_LEFT -> Pair("24", "(h-${totalBlockHeight})/2+$lineOffset")
-                                    TextPosition.CENTER -> Pair("(w-tw)/2", "(h-${totalBlockHeight})/2+$lineOffset")
-                                    TextPosition.CENTER_RIGHT -> Pair("w-tw-24", "(h-${totalBlockHeight})/2+$lineOffset")
-                                    TextPosition.BOTTOM_LEFT -> Pair("24", "h-$marginY-$totalBlockHeight+$lineOffset")
-                                    TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> Pair("(w-tw)/2", "h-$marginY-$totalBlockHeight+$lineOffset")
-                                    TextPosition.BOTTOM_RIGHT -> Pair("w-tw-24", "h-$marginY-$totalBlockHeight+$lineOffset")
-                                }
+                        val cleanText = cue.text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+                        val (posX, posY) = if (op.hasCustomPosition()) {
+                            Pair("'(w*${op.relativeX})-(tw/2)'", "'(h*${op.relativeY})-(th/2)'")
+                        } else {
+                            when (op.position) {
+                                TextPosition.TOP_LEFT -> Pair("24", "24")
+                                TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "24")
+                                TextPosition.TOP_RIGHT -> Pair("w-tw-24", "24")
+                                TextPosition.CENTER_LEFT -> Pair("24", "(h-th)/2")
+                                TextPosition.CENTER -> Pair("(w-tw)/2", "(h-th)/2")
+                                TextPosition.CENTER_RIGHT -> Pair("w-tw-24", "(h-th)/2")
+                                TextPosition.BOTTOM_LEFT -> Pair("24", "h-$marginY-th")
+                                TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> Pair("(w-tw)/2", "h-$marginY-th")
+                                TextPosition.BOTTOM_RIGHT -> Pair("w-tw-24", "h-$marginY-th")
                             }
-
-                            val cueStartLocal = (cue.startTimeMs - timeOffsetMs).coerceAtLeast(0L)
-                            val cueEndLocal = (cue.endTimeMs - timeOffsetMs).coerceAtLeast(0L)
-
-                            val filterExpr = com.boostlyte.vydra.utils.FFmpegFilterUtils.buildValidatedDrawtextFilter(
-                                text = lineText,
-                                fontFilePath = fontToUse,
-                                fontSize = scaledFontSize,
-                                fontColor = fontColor,
-                                x = posX,
-                                y = posY,
-                                startTimeMs = cueStartLocal,
-                                endTimeMs = cueEndLocal,
-                                boxColor = boxColor,
-                                boxBorderW = boxBorderW
-                            )
-                            
-                            val nextLabel = "[v$stageIndex]"
-                            stages.add("$currentLabel$filterExpr$nextLabel")
-                            currentLabel = nextLabel
-                            stageIndex++
                         }
+
+                        val cueStartLocal = (cue.startTimeMs - timeOffsetMs).coerceAtLeast(0L)
+                        val cueEndLocal = (cue.endTimeMs - timeOffsetMs).coerceAtLeast(0L)
+
+                        val filterExpr = com.boostlyte.vydra.utils.FFmpegFilterUtils.buildValidatedDrawtextFilter(
+                            text = cleanText,
+                            fontFilePath = fontToUse,
+                            fontSize = scaledFontSize,
+                            fontColor = fontColor,
+                            x = posX,
+                            y = posY,
+                            startTimeMs = cueStartLocal,
+                            endTimeMs = cueEndLocal,
+                            boxColor = boxColor,
+                            boxBorderW = boxBorderW
+                        )
+                        
+                        val nextLabel = "[v$stageIndex]"
+                        stages.add("$currentLabel$filterExpr$nextLabel")
+                        currentLabel = nextLabel
+                        stageIndex++
                     }
                 }
                 else -> {}
@@ -676,7 +690,8 @@ class VideoEditingViewModel : ViewModel() {
         sourceFilePath: String,
         outputFilePath: String,
         fontFilePath: String? = null,
-        context: Context? = null
+        context: Context? = null,
+        operationsOverride: List<EditOperation>? = null
     ): String? {
         val currentProject = _project.value ?: return null
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
@@ -751,7 +766,7 @@ class VideoEditingViewModel : ViewModel() {
             return "-y -i \"$sourceFilePath\" -c copy \"$outputFilePath\""
         }
 
-        val operations = currentProject.operations
+        val operations = operationsOverride ?: currentProject.operations
 
         // Detect if source video has an audio stream
         val hasAudio = if (isMainImage) {
@@ -2122,7 +2137,7 @@ class VideoEditingViewModel : ViewModel() {
                 imageInputIndices = visibleImageIndices,
                 density = density,
                 sourceVideoHeight = targetHeight,
-                timeOffsetMs = chunkStart
+                timeOffsetMs = 0L
             )
             filterParts.addAll(overlayStages)
             currentVideoLabel = tempLabel
@@ -2419,8 +2434,15 @@ class VideoEditingViewModel : ViewModel() {
             sourceDurationMs = trimOp?.let { it.endMs - it.startMs } ?: 5000L
         }
 
+        val primaryUri: android.net.Uri = try {
+            val parsed: android.net.Uri? = android.net.Uri.parse(sourceFilePath)
+            parsed ?: currentProject.sourceUri
+        } catch (_: Exception) {
+            currentProject.sourceUri
+        }
+
         val primaryItem = EditOperation.MergeItem(
-            uri = android.net.Uri.parse(sourceFilePath),
+            uri = primaryUri,
             durationMs = sourceDurationMs,
             trimStartMs = trimOp?.startMs ?: 0L,
             trimEndMs = trimOp?.endMs ?: sourceDurationMs,
@@ -2436,24 +2458,6 @@ class VideoEditingViewModel : ViewModel() {
         if (mergeOp != null) {
             allSequenceItems.addAll(mergeOp.items)
         }
-
-        // TRIGGER CHECK: If <= 24, preserve existing single-pass byte-identical command
-        if (allSequenceItems.size <= ChunkPlanner.CHUNK_TRIGGER_THRESHOLD) {
-            val singlePassCmd = buildConsolidatedFFmpegCommand(
-                sourceFilePath = sourceFilePath,
-                outputFilePath = outputFilePath,
-                fontFilePath = fontFilePath,
-                context = context
-            ) ?: return null
-            return ChunkExportPlan(
-                isChunked = false,
-                singlePassCommand = singlePassCmd
-            )
-        }
-
-        // Large sequence (> 24 inputs) -> Execute Chunked Export
-        val plan = ChunkPlanner.plan(allSequenceItems, transitions)
-        val density = context?.resources?.displayMetrics?.density ?: 1.0f
 
         var sourceVideoWidth = 1280
         var sourceVideoHeight = 720
@@ -2499,6 +2503,54 @@ class VideoEditingViewModel : ViewModel() {
 
         val chunkTempDir = context?.cacheDir ?: File("/tmp")
         val timestamp = System.currentTimeMillis()
+
+        val preferredEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)?.getString("default_encoder", "hardware") ?: "hardware"
+
+        // Pre-render GL motion intermediates for static image clips with motion effects (Milestone M1 & M2)
+        val (effectiveSequenceItems, overallRenderPath) = preRenderGlMotionIntermediates(
+            items = allSequenceItems,
+            operations = currentProject.operations,
+            cacheDir = chunkTempDir,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+            fps = _exportFps.value,
+            preferredEncoder = preferredEncoder
+        )
+
+        val effectiveSourcePath = if (effectiveSequenceItems.isNotEmpty() && !effectiveSequenceItems[0].isImage) {
+            effectiveSequenceItems[0].uri.path ?: sourceFilePath
+        } else {
+            sourceFilePath
+        }
+
+        val updatedOperations = if (effectiveSequenceItems.size > 1 && mergeOp != null) {
+            currentProject.operations.map { op ->
+                if (op is EditOperation.Merge) op.copy(items = effectiveSequenceItems.drop(1)) else op
+            }
+        } else {
+            currentProject.operations
+        }
+
+        // TRIGGER CHECK: If <= 24, execute single-pass export using GL intermediates if available (Milestone M3)
+        if (allSequenceItems.size <= ChunkPlanner.CHUNK_TRIGGER_THRESHOLD) {
+            val singlePassCmd = buildConsolidatedFFmpegCommand(
+                sourceFilePath = effectiveSourcePath,
+                outputFilePath = outputFilePath,
+                fontFilePath = fontFilePath,
+                context = context,
+                operationsOverride = updatedOperations
+            ) ?: return null
+            return ChunkExportPlan(
+                isChunked = false,
+                singlePassCommand = singlePassCmd,
+                renderPath = overallRenderPath
+            )
+        }
+
+        // Large sequence (> 24 inputs) -> Execute Chunked Export consuming GL intermediates
+        val plan = ChunkPlanner.plan(effectiveSequenceItems, transitions)
+        val density = context?.resources?.displayMetrics?.density ?: 1.0f
+
         val chunkCommands = mutableListOf<ChunkCommand>()
         val chunkTempPaths = mutableListOf<String>()
 
@@ -2508,7 +2560,7 @@ class VideoEditingViewModel : ViewModel() {
 
             val chunkCmd = buildChunkPassCommand(
                 chunkSpec = chunk,
-                sourceFilePath = sourceFilePath,
+                sourceFilePath = effectiveSourcePath,
                 chunkOutputPath = chunkTempFile.absolutePath,
                 fontFilePath = fontFilePath,
                 context = context,
@@ -2516,9 +2568,9 @@ class VideoEditingViewModel : ViewModel() {
                 density = density,
                 targetWidth = targetWidth,
                 targetHeight = targetHeight,
-                operations = currentProject.operations
+                operations = updatedOperations
             )
-            chunkCommands.add(chunkCmd)
+            chunkCommands.add(chunkCmd.copy(renderPath = overallRenderPath))
         }
 
         val finalPassCmd = buildFinalPassCommand(
@@ -2528,7 +2580,7 @@ class VideoEditingViewModel : ViewModel() {
             context = context,
             targetWidth = targetWidth,
             targetHeight = targetHeight,
-            operations = currentProject.operations
+            operations = updatedOperations
         )
 
         return ChunkExportPlan(
@@ -2537,8 +2589,78 @@ class VideoEditingViewModel : ViewModel() {
             finalPassCommand = finalPassCmd.command,
             chunkTempPaths = chunkTempPaths,
             totalDurationSecs = plan.totalDurationMs / 1000.0,
-            chunkDurationsSecs = plan.chunks.map { it.durationMs / 1000.0 }
+            chunkDurationsSecs = plan.chunks.map { it.durationMs / 1000.0 },
+            renderPath = overallRenderPath
         )
+    }
+
+    /**
+     * Pre-renders image sequence items with motion effects into intermediate MP4 files using GlMotionRenderer.
+     * Silent fallback chain: gl_hw -> gl_sw -> legacy.
+     */
+    fun preRenderGlMotionIntermediates(
+        items: List<EditOperation.MergeItem>,
+        operations: List<EditOperation>,
+        cacheDir: File,
+        targetWidth: Int,
+        targetHeight: Int,
+        fps: Int,
+        preferredEncoder: String = "hardware"
+    ): Pair<List<EditOperation.MergeItem>, String> {
+        val updatedItems = mutableListOf<EditOperation.MergeItem>()
+        var anyGlSuccess = false
+        var anyGlSw = false
+        val timestamp = System.currentTimeMillis()
+
+        for ((idx, item) in items.withIndex()) {
+            val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == idx }
+            val clipMotionType = motionOp?.motionType ?: item.motionEffect
+
+            if (item.isImage && clipMotionType != null && clipMotionType != "none") {
+                val imagePath = item.uri.path ?: ""
+                val intermediateFile = File(cacheDir, "gl_motion_${idx}_${timestamp}.mp4")
+                val durationSec = (item.trimEndMs - item.trimStartMs).coerceAtLeast(100L) / 1000.0
+
+                val glResult = com.boostlyte.vydra.render.gl.GlMotionRenderer.renderMotionClip(
+                    imagePath = imagePath,
+                    outputPath = intermediateFile.absolutePath,
+                    targetWidth = targetWidth,
+                    targetHeight = targetHeight,
+                    durationSecs = durationSec,
+                    fps = fps,
+                    motionType = clipMotionType,
+                    preferredEncoder = preferredEncoder
+                )
+
+                if (glResult is com.boostlyte.vydra.render.gl.GlMotionRenderer.GlRenderResult.Success && File(glResult.outputPath).exists()) {
+                    Log.d(TAG, "GL motion render succeeded for item $idx (${glResult.renderPath}) -> ${glResult.outputPath}")
+                    anyGlSuccess = true
+                    if (glResult.renderPath == "gl_sw") {
+                        anyGlSw = true
+                    }
+                    updatedItems.add(
+                        item.copy(
+                            uri = android.net.Uri.fromFile(intermediateFile),
+                            isImage = false,
+                            motionEffect = null
+                        )
+                    )
+                } else {
+                    Log.w(TAG, "GL motion render failed for item $idx, using legacy FFmpeg zoompan")
+                    updatedItems.add(item)
+                }
+            } else {
+                updatedItems.add(item)
+            }
+        }
+
+        val overallRenderPath = if (anyGlSuccess) {
+            if (anyGlSw) "gl_sw" else "gl_hw"
+        } else {
+            "legacy"
+        }
+
+        return Pair(updatedItems, overallRenderPath)
     }
 
     /**
