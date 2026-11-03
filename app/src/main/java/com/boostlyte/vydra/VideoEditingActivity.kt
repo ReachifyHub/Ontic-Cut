@@ -573,7 +573,11 @@ class VideoEditingActivity : AppCompatActivity() {
     
     private var audioPreviewPlayer: android.media.MediaPlayer? = null
     private val bgAudioPlayerMap = mutableMapOf<String, com.google.android.exoplayer2.ExoPlayer>()
-    
+    private val currentRampedVolumes = mutableMapOf<String, Float>()
+    private var lastAudioVolumeUpdateTimeMs = 0L
+    private var lastActiveAudioClipIndex = -1
+    private var lastAudioSyncGlobalPos = -1L
+    private var wasAudioPlaying = false
     private var isInitialFitDone = false
 
     private var mediaRecorder: android.media.MediaRecorder? = null
@@ -1971,7 +1975,8 @@ class VideoEditingActivity : AppCompatActivity() {
                         } catch (_: Exception) {}
                     }
                     val opId = editingAudioOpId ?: viewModel.selectedOperationId.value
-                    if (opId != null) {
+                    if (opId != null && (!::player.isInitialized || !player.isPlaying)) {
+                        currentRampedVolumes[opId] = pVol
                         bgAudioPlayerMap[opId]?.volume = pVol
                     }
                 }
@@ -2053,6 +2058,13 @@ class VideoEditingActivity : AppCompatActivity() {
                         .setPositiveButton("Delete") { _, _ ->
                             val id = editingAudioOpId ?: viewModel.selectedOperationId.value
                             if (id != null) {
+                                bgAudioPlayerMap.remove(id)?.let { p ->
+                                    Log.d(TAG, "AudioPlayerLifecycle: Releasing ExoPlayer on delete for $id")
+                                    p.stop()
+                                    p.release()
+                                }
+                                currentRampedVolumes.remove(id)
+                                currentDuckingFactors.remove(id)
                                 viewModel.deleteOperation(id)
                             }
                             exitAudioEditingMode(commit = false)
@@ -2098,6 +2110,11 @@ class VideoEditingActivity : AppCompatActivity() {
                         btnAudioPreviewPlay.setImageResource(R.drawable.ic_play_24)
                         return@setBounceClickListener
                     }
+
+                    if (::player.isInitialized && player.isPlaying) {
+                        player.pause()
+                    }
+                    pauseAllBgAudio()
 
                     val id = editingAudioOpId ?: viewModel.selectedOperationId.value ?: return@setBounceClickListener
                     val project = viewModel.project.value ?: return@setBounceClickListener
@@ -5680,6 +5697,7 @@ class VideoEditingActivity : AppCompatActivity() {
             if (player.isPlaying) player.pause()
             player.clearMediaItems()
         }
+        releaseAllBgAudio()
         isVideoLoaded = false
         videoUri = null
         currentCaptionTrackView = null
@@ -6735,8 +6753,13 @@ class VideoEditingActivity : AppCompatActivity() {
                     if (::btnFullscreenPlayPause.isInitialized) {
                         btnFullscreenPlayPause.setImageResource(R.drawable.ic_pause_24)
                     }
+                    if (audioPreviewPlayer?.isPlaying == true) {
+                        audioPreviewPlayer?.stop()
+                        audioPreviewPlayer?.release()
+                        audioPreviewPlayer = null
+                    }
                     startProgressUpdater()
-                    syncBgAudio(getGlobalPosition(), true)
+                    syncBgAudio(getGlobalPosition(), true, isSeek = true)
                 } else {
                     btnPlayPause.setImageResource(R.drawable.ic_play_24)
                     if (::btnFullscreenPlayPause.isInitialized) {
@@ -7503,46 +7526,81 @@ class VideoEditingActivity : AppCompatActivity() {
         if (isKeyframeEditingMode) {
             updateDraggableOverlayFromKeyframes(globalPos)
         }
-        syncBgAudio(globalPos, player.isPlaying)
+        if (audioPreviewPlayer?.isPlaying == true) {
+            audioPreviewPlayer?.stop()
+            audioPreviewPlayer?.release()
+            audioPreviewPlayer = null
+        }
+        syncBgAudio(globalPos, player.isPlaying, isSeek = true)
         if (videoEditingToolbar?.visibility == View.VISIBLE && selectedVideoIndex != null) {
             updateSplitButtonState()
         }
     }
 
-    private fun syncBgAudio(globalPos: Long, isPlaying: Boolean) {
+    private fun syncBgAudio(globalPos: Long, isPlaying: Boolean, isSeek: Boolean = false) {
         val project = viewModel.project.value ?: return
         val totalSeqDuration = getTotalSequenceDuration()
         val audioOps = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio>()
         val isMasterMuted = if (::player.isInitialized) player.volume == 0f else false
         val isMainVideoMuted = project.operations.any { it is com.boostlyte.vydra.models.EditOperation.MuteAudio }
 
-        // Clean up removed audio players only when active audio count changes
-        if (bgAudioPlayerMap.size != audioOps.size) {
-            val activeOpIds = audioOps.map { it.id }.toSet()
-            val iter = bgAudioPlayerMap.iterator()
-            while (iter.hasNext()) {
-                val entry = iter.next()
-                if (entry.key !in activeOpIds) {
-                    entry.value.release()
-                    iter.remove()
-                    currentDuckingFactors.remove(entry.key)
-                }
+        // Clean up removed/orphaned audio players immediately
+        val activeOpIds = audioOps.map { it.id }.toSet()
+        val iter = bgAudioPlayerMap.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            if (entry.key !in activeOpIds) {
+                Log.d(TAG, "AudioPlayerLifecycle: Releasing removed/orphaned player ${entry.key}")
+                entry.value.stop()
+                entry.value.release()
+                iter.remove()
+                currentRampedVolumes.remove(entry.key)
+                currentDuckingFactors.remove(entry.key)
             }
         }
 
+        // Debug assertion logging instance count
+        Log.d(TAG, "AudioPlayerLifecycle Assertion: bgAudioPlayerMap.size=${bgAudioPlayerMap.size}, activeAudioOps=${audioOps.size}")
+        if (bgAudioPlayerMap.size > audioOps.size) {
+            Log.w(TAG, "AudioPlayerLifecycle Invariant Warning: ${bgAudioPlayerMap.size} players exceeds ${audioOps.size} active operations!")
+        }
+
+        // Detect clip boundary crossing or playback state transitions
+        val sequenceItems = cachedSequenceItems.ifEmpty { getSequenceItems().also { cachedSequenceItems = it } }
+        var currentActiveClipIdx = 0
+        var accumStartMs = 0L
+        for ((idx, item) in sequenceItems.withIndex()) {
+            if (globalPos >= accumStartMs && globalPos < accumStartMs + item.trimmedDurationMs) {
+                currentActiveClipIdx = idx
+                break
+            }
+            accumStartMs += item.trimmedDurationMs
+        }
+
+        val crossedClipBoundary = (currentActiveClipIdx != lastActiveAudioClipIndex && lastActiveAudioClipIndex != -1)
+        val playbackJustStarted = (isPlaying && !wasAudioPlaying)
+        val playheadJumped = (lastAudioSyncGlobalPos != -1L && kotlin.math.abs(globalPos - lastAudioSyncGlobalPos) > 400L)
+
+        lastActiveAudioClipIndex = currentActiveClipIdx
+        lastAudioSyncGlobalPos = globalPos
+        wasAudioPlaying = isPlaying
+
+        val requiresSeek = isSeek || crossedClipBoundary || playbackJustStarted || playheadJumped
+
         val now = System.currentTimeMillis()
-        val dt = if (lastDuckingUpdateTimeMs > 0L) (now - lastDuckingUpdateTimeMs).coerceIn(1L, 200L) else 50L
-        lastDuckingUpdateTimeMs = now
-        val maxDuckingStep = dt.toFloat() / 100f // 100ms smooth attack/release ramp
+        val dt = if (lastAudioVolumeUpdateTimeMs > 0L) (now - lastAudioVolumeUpdateTimeMs).coerceIn(1L, 200L) else 50L
+        lastAudioVolumeUpdateTimeMs = now
 
         for (op in audioOps) {
             val bgPlayer = bgAudioPlayerMap.getOrPut(op.id) {
+                Log.d(TAG, "AudioPlayerLifecycle: Initializing single ExoPlayer for ${op.id}")
                 com.google.android.exoplayer2.ExoPlayer.Builder(this).build().apply {
                     val mediaItem = com.google.android.exoplayer2.MediaItem.fromUri(op.audioUri)
                     setMediaItem(mediaItem)
                     prepare()
                 }
             }
+
             val activeEditingId = editingAudioOpId ?: viewModel.selectedOperationId.value
             val isBeingEdited = (op.id == activeEditingId)
             val tempOverride = if (isBeingEdited) {
@@ -7566,10 +7624,8 @@ class VideoEditingActivity : AppCompatActivity() {
             } else {
                 1.0f
             }
-            val fadeFactor = (fadeInMult * fadeOutMult).coerceIn(0f, 1f)
 
             // Audio Ducking preview calculation:
-            // Check if main video player or other non-ducked audio track is active and playing
             val isMainAudioPlaying = isPlaying && (
                 (::player.isInitialized && player.isPlaying && player.volume > 0f && !isMainVideoMuted) ||
                 audioOps.any { other ->
@@ -7578,20 +7634,29 @@ class VideoEditingActivity : AppCompatActivity() {
                     (bgAudioPlayerMap[other.id]?.volume ?: 0f) > 0f
                 }
             )
-            val targetDucking = if (op.ducking && isMainAudioPlaying) 0.2f else 1.0f
-            val currentDucking = currentDuckingFactors.getOrPut(op.id) { 1.0f }
-            val smoothedDucking = if (currentDucking < targetDucking) {
-                (currentDucking + maxDuckingStep).coerceAtMost(targetDucking)
-            } else if (currentDucking > targetDucking) {
-                (currentDucking - maxDuckingStep).coerceAtLeast(targetDucking)
-            } else {
-                targetDucking
-            }
-            currentDuckingFactors[op.id] = smoothedDucking
+            val duckingTarget = if (op.ducking && isMainAudioPlaying) com.boostlyte.vydra.utils.AudioVolumeRamp.DUCKING_TARGET_MULTIPLIER else 1.0f
 
-            val effectiveVol = if (isMasterMuted) 0f else (rawVol * fadeFactor * smoothedDucking).coerceIn(0f, 1f)
-            if (kotlin.math.abs(bgPlayer.volume - effectiveVol) > 0.005f) {
-                bgPlayer.volume = effectiveVol
+            // Target volume combines raw volume, fade curves, ducking, and master mute
+            val targetVol = com.boostlyte.vydra.utils.AudioVolumeRamp.computeTargetVolume(
+                rawVolume = rawVol,
+                fadeInMult = fadeInMult,
+                fadeOutMult = fadeOutMult,
+                duckingTarget = duckingTarget,
+                isMasterMuted = isMasterMuted
+            )
+
+            // Linear ramp over 80-120ms (100ms default) toward target
+            val currentVol = currentRampedVolumes.getOrPut(op.id) { targetVol }
+            val nextVol = com.boostlyte.vydra.utils.AudioVolumeRamp.computeNextVolume(
+                currentVolume = currentVol,
+                targetVolume = targetVol,
+                dtMs = dt,
+                rampDurationMs = com.boostlyte.vydra.utils.AudioVolumeRamp.DEFAULT_RAMP_DURATION_MS
+            )
+            currentRampedVolumes[op.id] = nextVol
+
+            if (com.boostlyte.vydra.utils.AudioVolumeRamp.isAudibleChange(bgPlayer.volume, nextVol)) {
+                bgPlayer.volume = nextVol
             }
 
             if (globalPos in aStart..aEnd) {
@@ -7599,16 +7664,20 @@ class VideoEditingActivity : AppCompatActivity() {
                 val maxAudioMs = if (op.internalEndMs > 0) op.internalEndMs else (if (op.originalDurationMs > 0) op.originalDurationMs else Long.MAX_VALUE)
                 if (targetAudioMs < maxAudioMs) {
                     if (isPlaying) {
-                        val currentAudioPos = bgPlayer.currentPosition
-                        if (kotlin.math.abs(currentAudioPos - targetAudioMs) > 120) {
+                        if (requiresSeek) {
                             bgPlayer.seekTo(targetAudioMs)
                         }
-                        if (!bgPlayer.isPlaying && effectiveVol > 0f) {
+                        if (!bgPlayer.isPlaying && nextVol > 0f) {
+                            if (!requiresSeek) {
+                                bgPlayer.seekTo(targetAudioMs)
+                            }
                             bgPlayer.play()
                         }
                     } else {
-                        if (bgPlayer.isPlaying) bgPlayer.pause()
-                        if (kotlin.math.abs(bgPlayer.currentPosition - targetAudioMs) > 120) {
+                        if (bgPlayer.isPlaying) {
+                            bgPlayer.pause()
+                        }
+                        if (isSeek || requiresSeek) {
                             bgPlayer.seekTo(targetAudioMs)
                         }
                     }
@@ -7628,9 +7697,17 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private fun releaseAllBgAudio() {
-        bgAudioPlayerMap.values.forEach { it.release() }
+        Log.d(TAG, "AudioPlayerLifecycle: Releasing all ${bgAudioPlayerMap.size} background audio players")
+        bgAudioPlayerMap.values.forEach { p ->
+            p.stop()
+            p.release()
+        }
         bgAudioPlayerMap.clear()
+        currentRampedVolumes.clear()
         currentDuckingFactors.clear()
+        lastActiveAudioClipIndex = -1
+        lastAudioSyncGlobalPos = -1L
+        wasAudioPlaying = false
     }
 
     private fun decodeSampledBitmapFromUri(uri: Uri, reqWidth: Int = 720, reqHeight: Int = 1280): Bitmap? {
@@ -8272,8 +8349,6 @@ class VideoEditingActivity : AppCompatActivity() {
 
         val mediaSourceFactory = com.google.android.exoplayer2.source.DefaultMediaSourceFactory(this)
         
-        val exoAudioOps = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.AddBackgroundAudio>() ?: emptyList()
-        
         val boundaries = mutableSetOf<Long>()
         boundaries.add(0L)
         boundaries.add(totalSequenceDuration)
@@ -8283,11 +8358,6 @@ class VideoEditingActivity : AppCompatActivity() {
             boundaries.add(currentGlobalPosMs)
             currentGlobalPosMs += item.trimmedDurationMs
             boundaries.add(currentGlobalPosMs)
-        }
-        
-        exoAudioOps.forEach { op ->
-            boundaries.add(op.startTimeMs ?: 0L)
-            boundaries.add(op.endTimeMs ?: totalSequenceDuration)
         }
         
         val sortedBoundaries = boundaries.filter { it in 0..totalSequenceDuration }.sorted()
@@ -8356,55 +8426,7 @@ class VideoEditingActivity : AppCompatActivity() {
                 videoSourceForChunk = com.google.android.exoplayer2.source.SilenceMediaSource(chunkDurationMs * 1000L)
             }
             
-            val chunkSourcesToMerge = mutableListOf<com.google.android.exoplayer2.source.MediaSource>(videoSourceForChunk)
-            
-            exoAudioOps.forEach { op ->
-                val aStart = op.startTimeMs ?: 0L
-                val aEnd = op.endTimeMs ?: totalSequenceDuration
-                
-                if (chunkStartMs >= aStart && chunkEndMs <= aEnd) {
-                    val offsetInAudioMs = chunkStartMs - aStart
-                    val clipStartUs = (op.internalStartMs + offsetInAudioMs) * 1000L
-                    val clipEndUs = clipStartUs + (chunkDurationMs * 1000L)
-                    
-                    val actualAudioDurationUs = if (op.internalEndMs > 0) op.internalEndMs * 1000L else Long.MAX_VALUE
-                    if (clipStartUs >= actualAudioDurationUs && actualAudioDurationUs != Long.MAX_VALUE) {
-                        chunkSourcesToMerge.add(com.google.android.exoplayer2.source.SilenceMediaSource(chunkDurationMs * 1000L))
-                    } else {
-                        var safeClipEndUs = clipEndUs
-                        if (actualAudioDurationUs != Long.MAX_VALUE && safeClipEndUs > actualAudioDurationUs) {
-                            safeClipEndUs = actualAudioDurationUs
-                        }
-                        
-                        if (clipStartUs < safeClipEndUs) {
-                            val audioMediaItem = com.google.android.exoplayer2.MediaItem.Builder()
-                                .setUri(op.audioUri)
-                                .build()
-                            val baseAudioSource = mediaSourceFactory.createMediaSource(audioMediaItem)
-                            
-                            try {
-                                val audioSlice = com.google.android.exoplayer2.source.ClippingMediaSource(
-                                    baseAudioSource, clipStartUs, safeClipEndUs, false, false, true
-                                )
-                                chunkSourcesToMerge.add(audioSlice)
-                            } catch (e: Exception) {
-                                chunkSourcesToMerge.add(com.google.android.exoplayer2.source.SilenceMediaSource(chunkDurationMs * 1000L))
-                            }
-                        } else {
-                            chunkSourcesToMerge.add(com.google.android.exoplayer2.source.SilenceMediaSource(chunkDurationMs * 1000L))
-                        }
-                    }
-                } else {
-                    chunkSourcesToMerge.add(com.google.android.exoplayer2.source.SilenceMediaSource(chunkDurationMs * 1000L))
-                }
-            }
-            
-            val mergedChunk = if (chunkSourcesToMerge.size == 1) {
-                chunkSourcesToMerge[0]
-            } else {
-                com.google.android.exoplayer2.source.MergingMediaSource(true, false, *chunkSourcesToMerge.toTypedArray())
-            }
-            chunkedSources.add(mergedChunk)
+            chunkedSources.add(videoSourceForChunk)
             newChunkDurations.add(chunkDurationMs)
         }
         

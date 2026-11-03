@@ -32,10 +32,10 @@
 | 19 | Text Overlays | Duplicate Text | **BROKEN** | M | `VideoEditingActivity.kt:duplicateSelectedOverlay()`, `DraggableTextOverlayView.kt:commitText()` |
 | 20 | Text Overlays | Keyframes | **WORKS** | M | `VideoEditingActivity.kt:enterKeyframeEditingMode()`, `VideoEditingViewModel.kt:buildFFmpegInterpolationExpr()` |
 | 21 | Text Overlays | Delete Text | **WORKS** | S | `VideoEditingActivity.kt:btnTextDelete`, `VideoEditingViewModel.kt:removeOperation()` |
-| 22 | **Audio Tracks** | Volume Slider | **BROKEN** | M | `VideoEditingActivity.kt:1741-1766`, `VideoEditingActivity.kt:6715-6718`, `VideoEditingActivity.kt:4401-4416` |
+| 22 | **Audio Tracks** | Volume Slider | **FIXED** | M | `VideoEditingActivity.kt:audioVolumeSlider`, `AudioVolumeRamp.kt` |
 | 23 | Audio Tracks | Trim Track | **WORKS** | S | `audio_editing_toolbar.xml:audioTrimTrack`, `VideoEditingActivity.kt:4353-4373` |
-| 24 | Audio Tracks | Fade In / Fade Out | **UNSTABLE** | M | `VideoEditingActivity.kt:showFadeDialog()`, `VideoEditingViewModel.kt:1250-1265` |
-| 25 | Audio Tracks | Audio Ducking | **UNSTABLE** | M | `VideoEditingActivity.kt:btnAudioDucking`, `VideoEditingViewModel.kt:1284-1305` |
+| 24 | Audio Tracks | Fade In / Fade Out | **FIXED** | M | `VideoEditingActivity.kt:showFadeDialog()`, `AudioVolumeRamp.kt`, `VideoEditingViewModel.kt:1250-1265` |
+| 25 | Audio Tracks | Audio Ducking | **FIXED** | M | `VideoEditingActivity.kt:btnAudioDucking`, `AudioVolumeRamp.kt`, `VideoEditingViewModel.kt:1284-1305` |
 | 26 | Audio Tracks | Beats Detection | **WORKS** | S | `AudioAnalyzer.kt:detectBeats()`, `TrackTrimView.kt` |
 | 27 | Audio Tracks | Delete Audio | **WORKS** | S | `VideoEditingActivity.kt:btnAudioDelete`, `VideoEditingViewModel.kt:deleteOperation()` |
 | 28 | Audio Tracks | Voice Recording | **WORKS** | S | `VideoEditingActivity.kt:showVoiceOverDialog()`, `MediaRecorder` |
@@ -238,22 +238,20 @@
 - **Fix Effort:** N/A (`S`).
 
 #### 3.3 Fade In / Fade Out
-- **Status:** `UNSTABLE`
-- **Evidence:** 
-  1. In `VideoEditingActivity.kt:4430-4485`, `showFadeDialog()` sets `fadeInDurationMs` and `fadeOutDurationMs` via dual sliders.
+- **Status:** `FIXED`
+- **Evidence & Resolution:** 
+  1. In `VideoEditingActivity.kt`, `showFadeDialog()` sets `fadeInDurationMs` and `fadeOutDurationMs` via dual sliders.
   2. In export (`VideoEditingViewModel.kt:1250-1265`), `afade=t=in:st=0:d=...` and `afade=t=out:st=...:d=...` are accurately added to the FFmpeg filter chain.
-  3. In preview playback (`VideoEditingActivity.kt:6690-6740`), ExoPlayer does not apply fade curves; `bgPlayer` plays at static volume throughout the entire duration.
-- **Root-Cause Hypothesis:** Missing preview simulation. Fades are exported correctly to FFmpeg, but are completely silent/unrendered in real-time timeline playback.
-- **Fix Effort:** `M`
+  3. In preview playback (`syncBgAudio`), dynamic fade curves are calculated using `AudioVolumeRamp.computeFadeMultiplier(offsetInOpMs, remainingInOpMs, fadeInDurationMs, fadeOutDurationMs)`. The calculated multiplier feeds into `AudioVolumeRamp.computeTargetVolume(...)` and is smoothly ramped (80–120ms) to ensure gradual, click-free audio swells and dips during real-time timeline playback.
+- **Fix Effort:** Completed (`M`).
 
 #### 3.4 Audio Ducking
-- **Status:** `UNSTABLE`
-- **Evidence:** 
+- **Status:** `FIXED`
+- **Evidence & Resolution:** 
   1. `btnAudioDucking` toggles `op.ducking` boolean.
   2. In export (`VideoEditingViewModel.kt:1284-1305` and `1517-1536`), sidechain compression (`sidechaincompress=threshold=0.03:ratio=4:attack=5:release=500`) is configured between the main video audio stream and background music.
-  3. In preview playback (`syncBgAudio`), no volume ducking is implemented between `player` and `bgPlayer`.
-- **Root-Cause Hypothesis:** Preview player lacks real-time sidechain volume attenuation. Works exclusively upon export.
-- **Fix Effort:** `M`
+  3. In preview playback (`syncBgAudio`), real-time ducking detects when foreground video audio or voiceover audio is actively playing, attenuating background audio to `AudioVolumeRamp.DUCKING_TARGET_MULTIPLIER` (0.2f). Ducking transitions feed into the same 80–120ms linear volume ramp (`AudioVolumeRamp.computeNextVolume`) to eliminate abrupt volume jumps, pops, or crackling.
+- **Fix Effort:** Completed (`M`).
 
 #### 3.5 Beats Detection
 - **Status:** `WORKS`
@@ -263,7 +261,7 @@
 
 #### 3.6 Delete Audio
 - **Status:** `WORKS`
-- **Evidence:** `btnAudioDelete` prompts user confirmation and calls `viewModel.deleteOperation(id)`, removing the track from the project and timeline view.
+- **Evidence:** `btnAudioDelete` prompts user confirmation, releases the corresponding `ExoPlayer` instance in `bgAudioPlayerMap`, and calls `viewModel.deleteOperation(id)`, removing the track from the project and timeline view.
 - **Root-Cause Hypothesis:** Working as intended.
 - **Fix Effort:** N/A (`S`).
 
@@ -272,6 +270,15 @@
 - **Evidence:** `voiceOverAction()` checks `RECORD_AUDIO` permission, opens `dialog_voice_over`, records AAC/M4A audio via `MediaRecorder` while simultaneously playing the video timeline, and inserts the recorded file as an `AddBackgroundAudio` operation aligned with `voiceOverStartTimeMs`.
 - **Root-Cause Hypothesis:** Working as intended.
 - **Fix Effort:** N/A (`S`).
+
+#### 3.8 Audio Player Lifecycle & Preview Synchronization
+- **Status:** `FIXED`
+- **Evidence & Resolution:**
+  1. **Single Instance Invariant:** Enforced exactly ONE `ExoPlayer` instance per `AddBackgroundAudio` operation in `bgAudioPlayerMap`. Created lazily on demand; cleaned up and released immediately upon track deletion, project load, clear, or editor exit.
+  2. **Elimination of Echo Sources:** Removed background audio slicing (`ClippingMediaSource`) and merging (`MergingMediaSource`) from `performRenderTracks` in the main video player. Previously, background audio was playing simultaneously in both the main `player` (via `ConcatenatingMediaSource`) and in `bgAudioPlayerMap`, creating duplicate playback with phase drift (echo). Background audio is now exclusively previewed and controlled through `bgAudioPlayerMap`.
+  3. **Boundary-Gated Seeking:** In `syncBgAudio`, seeks on playing `ExoPlayer` instances are restricted to clip boundary crossings, manual seeks, playhead jumps, and playback startup. Continuous playback within a clip avoids calling `seekTo()`, preventing audio sink flushes, pops, and crackles.
+  4. **Smooth Linear Volume Ramp:** Replaced instantaneous per-tick volume writes with an 80–120ms linear ramp via `AudioVolumeRamp.kt`, eliminating zipper noise and slider crackle.
+- **Fix Effort:** Completed (`M`).
 
 ---
 
