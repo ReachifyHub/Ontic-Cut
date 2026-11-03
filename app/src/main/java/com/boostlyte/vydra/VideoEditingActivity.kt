@@ -2304,24 +2304,38 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<Button>(R.id.btnDoneAutoCaptions)?.setBounceClickListener {
                     exitSubtitlesEditingMode()
                 }
-                toolbar.findViewById<Slider>(R.id.subtitleFontSizeSlider)?.addOnChangeListener { _, value, fromUser ->
+                val subSlider = toolbar.findViewById<Slider>(R.id.subtitleFontSizeSlider)
+                subSlider?.addOnChangeListener { _, value, fromUser ->
                     if (fromUser) {
+                        toolbar.findViewById<TextView>(R.id.tvSubtitleFontSizeValue)?.text = "${value.toInt()}"
+                    }
+                }
+                subSlider?.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: Slider) {}
+                    override fun onStopTrackingTouch(slider: Slider) {
                         val project = viewModel.project.value
                         val subOp = project?.operations?.find { it is EditOperation.AddSubtitles } as? EditOperation.AddSubtitles
                         if (subOp != null) {
-                            val newSize = value.toInt()
+                            val newSize = slider.value.toInt()
                             updateSubtitleOp(subOp.copy(fontSize = newSize))
-                            toolbar.findViewById<TextView>(R.id.tvSubtitleFontSizeValue)?.text = "$newSize"
                         }
                     }
-                }
-                toolbar.findViewById<Slider>(R.id.autoCaptionFontSizeSlider)?.addOnChangeListener { _, value, fromUser ->
+                })
+
+                val autoCaptionSlider = toolbar.findViewById<Slider>(R.id.autoCaptionFontSizeSlider)
+                autoCaptionSlider?.addOnChangeListener { _, value, fromUser ->
                     if (fromUser) {
                         val newSize = value.toInt()
                         toolbar.findViewById<TextView>(R.id.tvAutoCaptionFontSizeValue)?.text = "$newSize"
-                        updateAutoCaptionGroupStyle(fontSize = newSize, updateSize = true)
                     }
                 }
+                autoCaptionSlider?.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: Slider) {}
+                    override fun onStopTrackingTouch(slider: Slider) {
+                        val newSize = slider.value.toInt()
+                        updateAutoCaptionGroupStyle(fontSize = newSize, updateSize = true)
+                    }
+                })
             }
         } catch (e: Exception) {
             Log.w(TAG, "Subtitles editing toolbar not found: ${e.message}")
@@ -2378,11 +2392,18 @@ class VideoEditingActivity : AppCompatActivity() {
                 toolbar.findViewById<ImageButton>(R.id.btnKeyframeAction)?.setBounceClickListener {
                     handleKeyframeActionClick()
                 }
-                toolbar.findViewById<com.google.android.material.slider.Slider>(R.id.sliderKeyframeValue)?.addOnChangeListener { _, value, fromUser ->
+                val keyframeSlider = toolbar.findViewById<com.google.android.material.slider.Slider>(R.id.sliderKeyframeValue)
+                keyframeSlider?.addOnChangeListener { _, value, fromUser ->
                     if (fromUser) {
-                        handleKeyframeSliderChange(value)
+                        toolbar.findViewById<TextView>(R.id.tvSliderValue)?.text = "${value.toInt()}%"
                     }
                 }
+                keyframeSlider?.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
+                    override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                        handleKeyframeSliderChange(slider.value)
+                    }
+                })
             }
         } catch (e: Exception) {
             Log.w(TAG, "Keyframe editing toolbar not found: ${e.message}")
@@ -6364,14 +6385,17 @@ class VideoEditingActivity : AppCompatActivity() {
                     "Check that assets/fonts/Roboto-Regular.ttf exists.")
         }
 
+        // Immediately transition UI to export state synchronously before launching preparation
+        viewModel.startExport()
+        exportScreen.visibility = View.VISIBLE
+        exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = "Preparing export..."
+        exportScreen.findViewById<TextView>(R.id.tvExportPercentage)?.text = "0%"
+        exportScreen.findViewById<android.widget.ProgressBar>(R.id.exportProgressBar)?.progress = 0
+
         lifecycleScope.launch(Dispatchers.Main) {
             var tempOutputFile: File? = null
             var concatFile: File? = null
             try {
-                viewModel.startExport()
-                exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = "Preparing export..."
-                exportScreen.findViewById<TextView>(R.id.tvExportPercentage)?.text = "0%"
-
                 val isAudioOnly = viewModel.exportAudioOnly.value
                 val ext = if (isAudioOnly) ".mp3" else ".mp4"
                 tempOutputFile = File(cacheDir, "temp_video_${System.currentTimeMillis()}$ext")
@@ -6430,7 +6454,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         return@withContext null
                     }
 
-                    if (chunkPlan.isChunked) {
+                    if (!VideoEditingViewModel.FORCE_LEGACY_EXPORT && chunkPlan.isChunked) {
                         val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.bin")
                         java.io.ObjectOutputStream(java.io.FileOutputStream(planFile)).use {
                             it.writeObject(chunkPlan)
@@ -10486,23 +10510,30 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
 
                 valueLabel.text = "${selectedOptionId.replaceFirstChar { it.uppercase() }}: $intVal"
-                
-                viewModel.setAdjust(
-                    index = clipIndex,
-                    brightness = localAdjust.brightness,
-                    contrast = localAdjust.contrast,
-                    warmth = localAdjust.warmth,
-                    shadow = localAdjust.shadow,
-                    highlights = localAdjust.highlights,
-                    saturation = localAdjust.saturation,
-                    exposure = localAdjust.exposure,
-                    sharpen = localAdjust.sharpen,
-                    vignette = localAdjust.vignette
-                )
                 applyColorFilterAndAdjustToPlayer(activeFilterName, localAdjust)
-                refreshSelectionStates()
             }
         }
+
+        slider.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(s: com.google.android.material.slider.Slider) {}
+            override fun onStopTrackingTouch(s: com.google.android.material.slider.Slider) {
+                if (selectedOptionId != "reset_all") {
+                    viewModel.setAdjust(
+                        index = clipIndex,
+                        brightness = localAdjust.brightness,
+                        contrast = localAdjust.contrast,
+                        warmth = localAdjust.warmth,
+                        shadow = localAdjust.shadow,
+                        highlights = localAdjust.highlights,
+                        saturation = localAdjust.saturation,
+                        exposure = localAdjust.exposure,
+                        sharpen = localAdjust.sharpen,
+                        vignette = localAdjust.vignette
+                    )
+                    refreshSelectionStates()
+                }
+            }
+        })
 
         refreshSelectionStates()
         updateSliderForSelection()

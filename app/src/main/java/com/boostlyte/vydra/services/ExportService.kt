@@ -36,6 +36,7 @@ class ExportService : Service() {
     private lateinit var ffmpegEngine: FFmpegRenderEngine
 
     companion object {
+        const val FORCE_LEGACY_EXPORT = true
         const val ACTION_EXPORT_PROGRESS = "com.boostlyte.vydra.ACTION_EXPORT_PROGRESS"
         const val ACTION_EXPORT_SUCCESS = "com.boostlyte.vydra.ACTION_EXPORT_SUCCESS"
         const val ACTION_EXPORT_FAILURE = "com.boostlyte.vydra.ACTION_EXPORT_FAILURE"
@@ -90,7 +91,7 @@ class ExportService : Service() {
         val isAudioOnly = intent.getBooleanExtra(EXTRA_IS_AUDIO_ONLY, false)
 
         val chunkPlanFilePath = intent.getStringExtra(EXTRA_CHUNK_PLAN_FILE)
-        if (chunkPlanFilePath != null) {
+        if (!FORCE_LEGACY_EXPORT && chunkPlanFilePath != null) {
             val planFile = File(chunkPlanFilePath)
             if (planFile.exists()) {
                 val chunkPlan = try {

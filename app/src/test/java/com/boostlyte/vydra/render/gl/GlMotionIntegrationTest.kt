@@ -128,12 +128,18 @@ class GlMotionIntegrationTest {
         )
 
         assertNotNull(plan)
-        assertTrue(plan!!.isChunked)
-        assertNotNull(plan.renderPath)
-        assertTrue(plan.chunkCommands.isNotEmpty())
-        for (chunkCmd in plan.chunkCommands) {
-            assertNotNull(chunkCmd.renderPath)
-            assertTrue(listOf("gl_hw", "gl_sw", "legacy").contains(chunkCmd.renderPath))
+        if (VideoEditingViewModel.FORCE_LEGACY_EXPORT) {
+            assertFalse(plan!!.isChunked)
+            assertEquals("legacy", plan.renderPath)
+            assertNotNull(plan.singlePassCommand)
+        } else {
+            assertTrue(plan!!.isChunked)
+            assertNotNull(plan.renderPath)
+            assertTrue(plan.chunkCommands.isNotEmpty())
+            for (chunkCmd in plan.chunkCommands) {
+                assertNotNull(chunkCmd.renderPath)
+                assertTrue(listOf("gl_hw", "gl_sw", "legacy").contains(chunkCmd.renderPath))
+            }
         }
     }
 }

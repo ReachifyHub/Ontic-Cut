@@ -28,8 +28,9 @@ import com.boostlyte.vydra.services.ChunkExportPlan
 
 class VideoEditingViewModel : ViewModel() {
 
-    private companion object {
-        const val TAG = "VideoEditingViewModel"
+    companion object {
+        const val FORCE_LEGACY_EXPORT = true
+        private const val TAG = "VideoEditingViewModel"
         const val MAX_UNDO_STACK_SIZE = 30
     }
 
@@ -2397,6 +2398,22 @@ class VideoEditingViewModel : ViewModel() {
         context: Context? = null
     ): ChunkExportPlan? {
         val currentProject = _project.value ?: return null
+
+        if (FORCE_LEGACY_EXPORT) {
+            val singlePassCmd = buildConsolidatedFFmpegCommand(
+                sourceFilePath = sourceFilePath,
+                outputFilePath = outputFilePath,
+                fontFilePath = fontFilePath,
+                context = context,
+                operationsOverride = currentProject.operations
+            ) ?: return null
+            return ChunkExportPlan(
+                isChunked = false,
+                singlePassCommand = singlePassCmd,
+                renderPath = "legacy"
+            )
+        }
+
         val mergeOp = currentProject.operations.filterIsInstance<EditOperation.Merge>().firstOrNull()
         val transitions = currentProject.operations.filterIsInstance<EditOperation.Transition>()
 
@@ -2607,6 +2624,9 @@ class VideoEditingViewModel : ViewModel() {
         fps: Int,
         preferredEncoder: String = "hardware"
     ): Pair<List<EditOperation.MergeItem>, String> {
+        if (FORCE_LEGACY_EXPORT) {
+            return Pair(items, "legacy")
+        }
         val updatedItems = mutableListOf<EditOperation.MergeItem>()
         var anyGlSuccess = false
         var anyGlSw = false
