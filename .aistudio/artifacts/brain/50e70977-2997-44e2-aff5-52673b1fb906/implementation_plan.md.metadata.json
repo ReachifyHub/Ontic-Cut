@@ -1,0 +1,6 @@
+{
+  "summary": "Comprehensive performance and export stabilization plan for Vydra video editor. Diagnoses and outlines solutions for: (1) Editor lag on large projects (timeline layout recreation, 50ms polling redraws), (2) Export crashes on large projects via a CapCut-style bounded-memory chunked rendering pipeline, (3) Ken Burns stutter on exported videos (input framerate quantization fix) and stray black transcript text burned at the top of the video (EditOperation.AddText deduplication fix), and (4) Editor preview transition stutter (frame pre-caching and hardware-accelerated playback decoupling).",
+  "updatedAt": "2026-11-04T15:35:21.699766131Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
