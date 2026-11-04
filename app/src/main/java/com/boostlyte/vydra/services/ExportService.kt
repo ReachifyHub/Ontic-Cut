@@ -36,7 +36,7 @@ class ExportService : Service() {
     private lateinit var ffmpegEngine: FFmpegRenderEngine
 
     companion object {
-        const val FORCE_LEGACY_EXPORT = true
+        const val FORCE_LEGACY_EXPORT = false
         const val ACTION_EXPORT_PROGRESS = "com.boostlyte.vydra.ACTION_EXPORT_PROGRESS"
         const val ACTION_EXPORT_SUCCESS = "com.boostlyte.vydra.ACTION_EXPORT_SUCCESS"
         const val ACTION_EXPORT_FAILURE = "com.boostlyte.vydra.ACTION_EXPORT_FAILURE"

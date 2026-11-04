@@ -29,7 +29,7 @@ import com.boostlyte.vydra.services.ChunkExportPlan
 class VideoEditingViewModel : ViewModel() {
 
     companion object {
-        const val FORCE_LEGACY_EXPORT = true
+        const val FORCE_LEGACY_EXPORT = false
         private const val TAG = "VideoEditingViewModel"
         const val MAX_UNDO_STACK_SIZE = 30
     }
@@ -2054,7 +2054,7 @@ class VideoEditingViewModel : ViewModel() {
                 val vOut = "[ccat${concatCounter}v]"
                 val inputs = clips.joinToString("") { "[norm$it]" }
                 filterParts.add("${inputs}concat=n=${clips.size}:v=1:a=0${vOut}")
-                filterParts.add("${vOut}settb=1/30,setpts=N,fps=30,format=yuv420p[norm${concatCounter}v]")
+                filterParts.add("${vOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p[norm${concatCounter}v]")
                 val totalDur = clips.sumOf { durationsArray[it] }
                 concatCounter++
                 LocalStreamInfo("[norm${concatCounter - 1}v]", totalDur)
@@ -2076,7 +2076,7 @@ class VideoEditingViewModel : ViewModel() {
                     } else {
                         val vOut = "[ccat${concatCounter}v]"
                         filterParts.add("${currentStream.vLabel}${leftStream.vLabel}concat=n=2:v=1:a=0${vOut}")
-                        filterParts.add("${vOut}settb=1/30,setpts=N,fps=30,format=yuv420p[norm${concatCounter}v]")
+                        filterParts.add("${vOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p[norm${concatCounter}v]")
                         concatCounter++
                         LocalStreamInfo("[norm${concatCounter - 1}v]", currentStream.durationSec + leftStream.durationSec)
                     }
@@ -2111,7 +2111,7 @@ class VideoEditingViewModel : ViewModel() {
                 val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
 
                 filterParts.add("${baseStream.vLabel}${nextVLabel}xfade=transition=${sanitizedType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
-                filterParts.add("${rawXfvOut}settb=1/30,setpts=N,fps=30,format=yuv420p${normXfvOut}")
+                filterParts.add("${rawXfvOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normXfvOut}")
 
                 val newDuration = offset + durationsArray[gapIdx + 1]
                 currentStream = LocalStreamInfo(normXfvOut, newDuration)
@@ -2126,7 +2126,7 @@ class VideoEditingViewModel : ViewModel() {
             currentStream != null && remainingStream != null -> {
                 val vOut = "[ccat${concatCounter}v]"
                 filterParts.add("${currentStream.vLabel}${remainingStream.vLabel}concat=n=2:v=1:a=0${vOut}")
-                filterParts.add("${vOut}settb=1/30,setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[norm${concatCounter}v]")
+                filterParts.add("${vOut}settb=1/${_exportFps.value},setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm${concatCounter}v]")
                 concatCounter++
                 LocalStreamInfo("[norm${concatCounter - 1}v]", currentStream.durationSec + remainingStream.durationSec)
             }
@@ -2288,7 +2288,7 @@ class VideoEditingViewModel : ViewModel() {
                 val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
 
                 filterParts.add("${currentV}${nextChunkInput}xfade=transition=${sanitizedType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
-                filterParts.add("${rawXfvOut}settb=1/30,setpts=N,fps=30,format=yuv420p${normXfvOut}")
+                filterParts.add("${rawXfvOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normXfvOut}")
 
                 currentV = normXfvOut
                 currentStreamDurationSec = offset + nextChunkDurationSec
@@ -2297,7 +2297,7 @@ class VideoEditingViewModel : ViewModel() {
                 val normCcatOut = "[norm_ccat$bIdx]"
 
                 filterParts.add("${currentV}${nextChunkInput}concat=n=2:v=1:a=0${rawCcatOut}")
-                filterParts.add("${rawCcatOut}settb=1/30,setpts=N,fps=30,format=yuv420p${normCcatOut}")
+                filterParts.add("${rawCcatOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normCcatOut}")
 
                 currentV = normCcatOut
                 currentStreamDurationSec += nextChunkDurationSec
@@ -2305,6 +2305,7 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         var currentAudioLabel: String? = null
+        var maxAudioEndSec = 0.0
         if (audioInputIndices.isNotEmpty()) {
             val mixInputLabels = mutableListOf<String>()
             for ((idx, pair) in audioInputIndices.withIndex()) {
@@ -2352,6 +2353,18 @@ class VideoEditingViewModel : ViewModel() {
                 val safeVol = audioOp.volume.coerceIn(0f, 2f)
                 filters.add("volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}")
 
+                val effectiveAudioDur = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
+                    (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+                } else if (audioOp.internalEndMs > 0L) {
+                    (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
+                } else {
+                    audioOp.originalDurationMs / 1000.0
+                }
+                val totalAudioTrackEnd = (delayMs / 1000.0) + effectiveAudioDur
+                if (totalAudioTrackEnd > maxAudioEndSec) {
+                    maxAudioEndSec = totalAudioTrackEnd
+                }
+
                 if (filters.isNotEmpty()) {
                     filterParts.add("[$inputIdx:a]${filters.joinToString(",")}$trackLabel")
                     mixInputLabels.add(trackLabel)
@@ -2369,6 +2382,16 @@ class VideoEditingViewModel : ViewModel() {
                 filterParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
                 currentAudioLabel = "[outa]"
             }
+        }
+
+        // If audio extends past total video duration, pad video with frozen last frame (tpad)
+        val finalEffectiveDurationSec = if (maxAudioEndSec > currentStreamDurationSec && maxAudioEndSec > 0.0) {
+            val padSec = maxAudioEndSec - currentStreamDurationSec
+            filterParts.add("${currentV}tpad=stop_mode=clone:stop_duration=$padSec[pad_v]")
+            currentV = "[pad_v]"
+            maxAudioEndSec
+        } else {
+            currentStreamDurationSec
         }
 
         val filterComplexStr = filterParts.joinToString(";\n")
@@ -2402,8 +2425,7 @@ class VideoEditingViewModel : ViewModel() {
         }
         cmd.append(" $videoCodec")
 
-        val totalDurationSecs = chunkPlan.totalDurationMs / 1000.0
-        val formattedTotalDur = String.format(java.util.Locale.US, "%.3f", totalDurationSecs).trimEnd('0').trimEnd('.')
+        val formattedTotalDur = String.format(java.util.Locale.US, "%.3f", finalEffectiveDurationSec).trimEnd('0').trimEnd('.')
         cmd.append(" -t $formattedTotalDur \"$outputFilePath\"")
 
         val commandStr = cmd.toString()
@@ -2412,7 +2434,7 @@ class VideoEditingViewModel : ViewModel() {
             chunkIndex = -1,
             command = commandStr,
             outputPath = outputFilePath,
-            durationSecs = totalDurationSecs,
+            durationSecs = finalEffectiveDurationSec,
             scriptFilePath = scriptFile?.absolutePath
         )
     }
@@ -2636,7 +2658,7 @@ class VideoEditingViewModel : ViewModel() {
             chunkCommands = chunkCommands,
             finalPassCommand = finalPassCmd.command,
             chunkTempPaths = chunkTempPaths,
-            totalDurationSecs = plan.totalDurationMs / 1000.0,
+            totalDurationSecs = finalPassCmd.durationSecs,
             chunkDurationsSecs = plan.chunks.map { it.durationMs / 1000.0 },
             renderPath = overallRenderPath
         )

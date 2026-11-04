@@ -33,10 +33,16 @@ The plan resolves four critical defects:
   2. Updated `zoompan` filter progression formula to dynamically compute total frame count using `(${_exportFps.value}*$duration)` and explicitly output `fps=${_exportFps.value}`.
   3. Verified with unit tests in `ExportFilterStabilizationTest.kt`.
 
-### C. Large Project Export Crashes & Extreme Slowness
-- **File:** `VideoEditingViewModel.kt`, `ExportService.kt`
-- **Cause:** Monolithic single-pass export creates a filtergraph with $N$ inputs, $N$ zoompan filters, and $N-1$ `xfade` filters. For a 30–50 clip project, this opens 50 file descriptors simultaneously and demands enormous memory buffers for concurrent software scalers, triggering Android's Low Memory Killer (OOM) or SIGSEGV.
-- **Solution:** CapCut-style bounded chunking. Projects with $> 16$ clips are split into sequential batches of 8–10 clips, rendered to intermediate MP4 chunks (`-preset ultrafast`), and then stitched together via FFmpeg's concat demuxer (`-c copy`) in under 2 seconds. Memory usage is bounded regardless of total project length.
+### C. Large Project Export Crashes & Extreme Slowness [FIXED]
+- **File:** `VideoEditingViewModel.kt`, `ExportService.kt`, `ChunkPlanner.kt`
+- **Status:** **FIXED** (Unit tested & Verified)
+- **Cause:** Monolithic single-pass export creates a filtergraph with $N$ inputs, $N$ zoompan filters, and $N-1$ `xfade` filters. For a 30–50 clip project, this opens 50 file descriptors simultaneously and demands enormous memory buffers for concurrent software scalers, triggering Android's Low Memory Killer (OOM) or SIGSEGV. Furthermore, hardcoded 30 fps in filter concatenations and unpadded video when audio exceeded video duration caused frame rate mismatch stutter and audio/video length drift.
+- **Resolution:**
+  1. **CapCut-Style Bounded Chunking Activated:** Disabled `FORCE_LEGACY_EXPORT = false` across `VideoEditingViewModel.kt` and `ExportService.kt`. Projects with $> 24$ clips are automatically split into sequential batches of at most 16 clips (`ChunkPlanner.MAX_CHUNK_SIZE`).
+  2. **Interleaved Memory Cleanup:** In `ExportService.kt`, each intermediate chunk is rendered into a temporary `.mp4` slice, after which `FFmpegKitConfig.clearSessions()` is explicitly invoked to free Linux process memory buffers before starting the next chunk.
+  3. **FPS & Timestamp Synchronization:** Replaced hardcoded `settb=1/30` and `fps=30` with dynamic `settb=1/${_exportFps.value}` and `fps=${_exportFps.value}` across all chunk passes and the final assembly pass to prevent frame-rate judder.
+  4. **Audio Extension Video Padding (`tpad`):** In `buildFinalPassCommand`, audio track end boundaries are computed against video sequence length. If audio extends past the video duration, `tpad=stop_mode=clone:stop_duration=$padSec` is applied so the final video freezes the last frame smoothly for the remaining audio instead of cutting the video short.
+  5. **Unit Tested & Verified:** Added `testChunkExportPlan_largeProjectActivatesChunkingAndPadsDuration` in `ExportFilterStabilizationTest.kt` verifying chunk partition activation, duration preservation, and tpad injection. All unit tests pass.
 
 ### D. Editor Timeline Playback & Transition Lag [FIXED]
 - **File:** `VideoEditingActivity.kt`, `AudioWaveformExtractor.kt`

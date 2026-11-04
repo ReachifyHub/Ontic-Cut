@@ -158,4 +158,51 @@ class ExportFilterStabilizationTest {
         assertTrue("zoompan formula must use export fps 60", cmd.contains("(60*"))
         assertTrue("zoompan output must specify fps=60", cmd.contains("fps=60"))
     }
+
+    @Test
+    fun testChunkExportPlan_largeProjectActivatesChunkingAndPadsDuration() {
+        val viewModel = VideoEditingViewModel()
+        viewModel.setExportSettings(resolution = 1080, fps = 30, audioOnly = false)
+
+        // 30 clips (triggers chunking because 30 > 24)
+        val clips = (1..30).map {
+            EditOperation.MergeItem(uri = DummyUri.fromPath("/tmp/clip_$it.mp4"), durationMs = 2000L)
+        }
+        val mergeOp = EditOperation.Merge(
+            items = clips
+        )
+
+        // Add background audio that extends beyond video (e.g. 70 seconds total, while 30 clips * 2s = 60s)
+        val bgAudio = EditOperation.AddBackgroundAudio(
+            audioUri = DummyUri.fromPath("/tmp/audio.mp3"),
+            startTimeMs = 0L,
+            endTimeMs = 70000L,
+            originalDurationMs = 70000L
+        )
+
+        val project = VideoProject(
+            sourceUri = DummyUri.fromPath("/tmp/source.mp4"),
+            sourceName = "source.mp4",
+            operations = listOf(mergeOp, bgAudio)
+        )
+        viewModel.loadProject(project)
+
+        val plan = viewModel.buildChunkExportPlan(
+            sourceFilePath = "/tmp/source.mp4",
+            outputFilePath = "/tmp/final_export.mp4"
+        )
+
+        assertNotNull("Chunk export plan must be built", plan)
+        assertTrue("Large project must be marked chunked", plan!!.isChunked)
+        assertTrue("Chunk commands must not be empty", plan.chunkCommands.isNotEmpty())
+        assertNotNull("Final pass command must be present", plan.finalPassCommand)
+
+        // Verify total duration includes audio extension (padded to 70s, not cut short at 60s)
+        assertEquals("Total export duration must match audio duration (70s)", 70.0, plan.totalDurationSecs, 0.5)
+
+        // Verify final pass includes video padding for audio
+        assertTrue("Final pass filtergraph must contain tpad to freeze last frame", plan.finalPassCommand!!.contains("tpad=stop_mode=clone"))
+        assertTrue("Final pass must output to /tmp/final_export.mp4", plan.finalPassCommand!!.contains("/tmp/final_export.mp4"))
+    }
 }
+
