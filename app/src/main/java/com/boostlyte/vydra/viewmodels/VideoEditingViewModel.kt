@@ -206,6 +206,8 @@ class VideoEditingViewModel : ViewModel() {
     private fun buildDrawtextExpr(op: EditOperation.AddText, fontFilePath: String?, timeOffsetMs: Long = 0L): String {
         val fontToUse = op.fontPath ?: fontFilePath
 
+        val isAutoCaption = op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+
         // Use WYSIWYG fractional coordinates if available, else fall back to explicit coordinates
         val (posX, posY) = if (op.positionKeyframes.isNotEmpty()) {
             val xExpr = buildFFmpegInterpolationExpr(op.positionKeyframes, useValueY = false, defaultValue = op.relativeX ?: 0.5f, startTimeMs = op.startTimeMs ?: 0L, timeOffsetMs = timeOffsetMs)
@@ -213,6 +215,8 @@ class VideoEditingViewModel : ViewModel() {
             Pair("'(w*($xExpr))-(tw/2)'", "'(h*($yExpr))-(th/2)'")
         } else if (op.hasCustomPosition()) {
             Pair("'(w*${op.relativeX})-(tw/2)'", "'(h*${op.relativeY})-(th/2)'")
+        } else if (isAutoCaption) {
+            Pair("(w-tw)/2", "h-th-40")
         } else {
             when (op.position) {
                 TextPosition.TOP_LEFT -> Pair("24", "24")
@@ -234,9 +238,13 @@ class VideoEditingViewModel : ViewModel() {
         } else null
 
         val safeStartMs = op.startTimeMs?.let { maxOf(0L, it - timeOffsetMs) }
-        val safeEndMs = op.endTimeMs?.let { maxOf(0L, it - timeOffsetMs) }
+        val rawEndMs = op.endTimeMs?.let { maxOf(0L, it - timeOffsetMs) }
+        val safeEndMs = if (safeStartMs != null && rawEndMs != null && rawEndMs <= safeStartMs) {
+            safeStartMs + 1000L
+        } else {
+            rawEndMs
+        }
 
-        val isAutoCaption = op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
         val boxColor = if (isAutoCaption) "black@0.5" else null
         val boxBorderW = if (isAutoCaption) 4 else 0
 
@@ -457,21 +465,43 @@ class VideoEditingViewModel : ViewModel() {
         var stageIndex = 0
 
         // Process overlays first so their relative coordinates align with the uncropped original video, matching the UI.
-        // Deduplicate: If explicit AddSubtitles cues are present, suppress duplicate auto-caption AddText overlays.
+        // Deduplicate: If explicit AddSubtitles cues are present, suppress duplicate auto-caption AddText overlays and matching transcript overlays.
         // Also deduplicate auto-caption cues that share the same start/end time windows.
-        val hasExplicitSubtitles = operations.any { it is EditOperation.AddSubtitles && it.cues.isNotEmpty() }
+        val subtitleOps = operations.filterIsInstance<EditOperation.AddSubtitles>()
+        val hasExplicitSubtitles = subtitleOps.any { it.cues.isNotEmpty() }
+        val subtitleCueTexts = subtitleOps.flatMap { it.cues.map { cue -> cue.text.trim().lowercase() } }.toSet()
         val seenAutoCaptionTimes = mutableSetOf<Pair<Long?, Long?>>()
         val overlayOps = operations.filterNot { op ->
             if (op is EditOperation.Crop) return@filterNot true
-            if (hasExplicitSubtitles && op is EditOperation.AddText && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
-                return@filterNot true
-            }
-            if (op is EditOperation.AddText && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
-                val key = Pair(op.startTimeMs, op.endTimeMs)
-                if (seenAutoCaptionTimes.contains(key)) {
-                    return@filterNot true
+            if (op is EditOperation.AddText) {
+                if (op.text.isBlank()) return@filterNot true
+                val cleanText = op.text.trim().lowercase()
+
+                if (hasExplicitSubtitles) {
+                    if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                        return@filterNot true
+                    }
+                    if (cleanText in subtitleCueTexts) {
+                        return@filterNot true
+                    }
                 }
-                seenAutoCaptionTimes.add(key)
+
+                if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                    val key = Pair(op.startTimeMs, op.endTimeMs)
+                    if (seenAutoCaptionTimes.contains(key)) {
+                        return@filterNot true
+                    }
+                    seenAutoCaptionTimes.add(key)
+                }
+
+                // Suppress stray unpositioned script / transcript text with unbounded duration at default top position
+                if (!op.hasCustomPosition() && op.positionKeyframes.isEmpty()) {
+                    if (op.position == TextPosition.TOP_CENTER || op.position == TextPosition.CENTER_TOP || op.position == TextPosition.TOP_LEFT) {
+                        if (op.startTimeMs == null && op.endTimeMs == null && op.text.length > 50) {
+                            return@filterNot true
+                        }
+                    }
+                }
             }
             false
         }
@@ -829,6 +859,7 @@ class VideoEditingViewModel : ViewModel() {
         val speedOp = operations.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()
         val finalProxyUri = reverseOp?.proxyUri ?: speedOp?.proxyUri
         
+        val exportFpsVal = _exportFps.value
         if (finalProxyUri != null) {
             val proxyPath = resolveUriToPath(finalProxyUri) ?: finalProxyUri.toString()
             val baseDuration = if (trimOp != null) {
@@ -861,7 +892,7 @@ class VideoEditingViewModel : ViewModel() {
                 if (mergeOp == null) {
                     outputDuration = duration
                 }
-                cmd.append(" -framerate 30 -loop 1 -t $duration -i \"$sourceFilePath\"")
+                cmd.append(" -framerate $exportFpsVal -loop 1 -t $duration -i \"$sourceFilePath\"")
             } else if (trimOp != null) {
                 val startSecs = trimOp.startMs / 1000.0
                 val duration = (trimOp.endMs - trimOp.startMs) / 1000.0
@@ -903,7 +934,7 @@ class VideoEditingViewModel : ViewModel() {
                                   videoPath.endsWith(".webp", ignoreCase = true)
                     
                     if (isImage) {
-                        cmd.append(" -framerate 30 -loop 1 -t $itemDurSec -i \"$videoPath\"")
+                        cmd.append(" -framerate $exportFpsVal -loop 1 -t $itemDurSec -i \"$videoPath\"")
                     } else {
                         cmd.append(" -ss $startSecs -t $itemDurSec -i \"$videoPath\"")
                     }
@@ -954,7 +985,7 @@ class VideoEditingViewModel : ViewModel() {
         if (bgOp != null && bgOp.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgOp.imageUri != null) {
             val bgPath = resolveUriToPath(bgOp.imageUri)
             if (bgPath != null) {
-                cmd.append(" -framerate 30 -loop 1 -i \"$bgPath\"")
+                cmd.append(" -framerate $exportFpsVal -loop 1 -i \"$bgPath\"")
                 bgImageIndex = inputIndex
                 inputIndex++
             }
@@ -1098,8 +1129,8 @@ class VideoEditingViewModel : ViewModel() {
                 val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
 
                 val motionFilter = when (clipMotionType) {
-                    "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=${_exportFps.value}"
-                    "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/(30*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=${_exportFps.value}"
+                    "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/($exportFpsVal*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
+                    "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/($exportFpsVal*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
                     "pan_left" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'"
                     "pan_right" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'"
                     "pan_up" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'"
@@ -1825,7 +1856,7 @@ class VideoEditingViewModel : ViewModel() {
                     val proxyPath = resolveUriToPath(context, clip.item.proxyUri) ?: clip.item.proxyUri.path ?: clip.item.proxyUri.toString()
                     cmd.append(" -t $duration -i \"$proxyPath\"")
                 } else if (isMainImage) {
-                    cmd.append(" -framerate 30 -loop 1 -t $duration -i \"$sourceFilePath\"")
+                    cmd.append(" -framerate ${_exportFps.value} -loop 1 -t $duration -i \"$sourceFilePath\"")
                 } else if (trimOp != null) {
                     val startSecs = trimOp.startMs / 1000.0
                     cmd.append(" -ss $startSecs -t $duration -i \"$sourceFilePath\"")
@@ -1856,7 +1887,7 @@ class VideoEditingViewModel : ViewModel() {
                                   videoPath.endsWith(".jpeg", ignoreCase = true) ||
                                   videoPath.endsWith(".webp", ignoreCase = true)
                     if (isImage) {
-                        cmd.append(" -framerate 30 -loop 1 -t $itemDurSec -i \"$videoPath\"")
+                        cmd.append(" -framerate ${_exportFps.value} -loop 1 -t $itemDurSec -i \"$videoPath\"")
                     } else {
                         cmd.append(" -ss $startSecs -t $itemDurSec -i \"$videoPath\"")
                     }
@@ -1901,7 +1932,7 @@ class VideoEditingViewModel : ViewModel() {
         if (bgOp != null && bgOp.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgOp.imageUri != null) {
             val bgPath = resolveUriToPath(context, bgOp.imageUri)
             if (bgPath != null) {
-                cmd.append(" -framerate 30 -loop 1 -i \"$bgPath\"")
+                cmd.append(" -framerate ${_exportFps.value} -loop 1 -i \"$bgPath\"")
                 bgImageIndex = inputIndex
                 inputIndex++
             }
@@ -1971,8 +2002,8 @@ class VideoEditingViewModel : ViewModel() {
             val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
 
             val motionFilter = when (clipMotionType) {
-                "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/(30*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
-                "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/(30*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
+                "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/(${_exportFps.value}*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
+                "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/(${_exportFps.value}*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
                 "pan_left" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(1-(t/$safeD))':y='(in_h-out_h)/2'"
                 "pan_right" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)/2'"
                 "pan_up" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$safeD))'"

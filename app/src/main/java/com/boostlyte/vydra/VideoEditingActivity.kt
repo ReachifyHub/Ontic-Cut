@@ -191,6 +191,7 @@ class VideoEditingActivity : AppCompatActivity() {
     private var currentCaptionTrackView: com.boostlyte.vydra.customviews.CaptionTrackView? = null
     private var cachedSequenceItems: List<com.boostlyte.vydra.models.EditOperation.MergeItem> = emptyList()
     private var cachedSequenceDurationMs: Long = 0L
+    private var lastRenderedSequenceSignature: String? = null
     private var lastActiveClipIndexForPlayer: Int = -1
     private var lastSplitButtonEnabledState: Boolean? = null
     private val scrollIdleRunnable = Runnable {
@@ -5821,6 +5822,7 @@ class VideoEditingActivity : AppCompatActivity() {
         currentCaptionTrackView = null
         cachedSequenceItems = emptyList()
         cachedSequenceDurationMs = 0L
+        lastRenderedSequenceSignature = null
         lastActiveClipIndexForPlayer = -1
         viewModel.clearAllOperations() // wait, no initialize is better
         
@@ -7179,9 +7181,14 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private fun getTotalSequenceDuration(): Long {
-        val items = getSequenceItems()
+        if (cachedSequenceDurationMs > 0L) return cachedSequenceDurationMs
+        val items = cachedSequenceItems.ifEmpty { getSequenceItems().also { cachedSequenceItems = it } }
         val transitions = viewModel.project.value?.operations?.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>() ?: emptyList()
-        return com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(items, transitions).totalDurationMs
+        val total = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(items, transitions).totalDurationMs
+        if (total > 0L) {
+            cachedSequenceDurationMs = total
+        }
+        return total
     }
 
     private var pendingInsertIndex: Int? = null
@@ -7371,9 +7378,11 @@ class VideoEditingActivity : AppCompatActivity() {
             
             if (!isUserScrollingTimeline && !isTrackDragging) {
                 val targetScrollX = (currentGlobalPos * pixelsPerMs).toInt()
-                isProgrammaticScroll = true
-                timelineHorizontalScroll.scrollTo(targetScrollX, 0)
-                isProgrammaticScroll = false
+                if (timelineHorizontalScroll.scrollX != targetScrollX) {
+                    isProgrammaticScroll = true
+                    timelineHorizontalScroll.scrollTo(targetScrollX, 0)
+                    isProgrammaticScroll = false
+                }
             }
 
             // Update active caption highlight (invalidates ONLY when crossing a cue boundary)
@@ -7564,18 +7573,20 @@ class VideoEditingActivity : AppCompatActivity() {
                                 transitionPreviewOverlayView?.visibility = View.VISIBLE
                                 transitionPreviewOverlayView?.updateTransition(transOp.type, prog, cached.first, cached.second)
                             } else {
-                                if (!transitionFramesLoading.contains(i)) {
-                                    transitionFramesLoading.add(i)
+                                if (transitionFramesLoading.add(i)) {
                                     lifecycleScope.launch(Dispatchers.IO) {
-                                        val bmpA = extractClipFrame(clipA, isEnd = true)
-                                        val bmpB = extractClipFrame(clipB, isEnd = false)
-                                        withContext(Dispatchers.Main) {
-                                            transitionFramesCache[i] = Pair(bmpA, bmpB)
-                                            transitionFramesLoading.remove(i)
-                                            if (activeTransitionIndex == i) {
-                                                transitionPreviewOverlayView?.visibility = View.VISIBLE
-                                                transitionPreviewOverlayView?.updateTransition(transOp.type, prog, bmpA, bmpB)
+                                        try {
+                                            val bmpA = extractClipFrame(clipA, isEnd = true)
+                                            val bmpB = extractClipFrame(clipB, isEnd = false)
+                                            withContext(Dispatchers.Main) {
+                                                transitionFramesCache[i] = Pair(bmpA, bmpB)
+                                                if (activeTransitionIndex == i) {
+                                                    transitionPreviewOverlayView?.visibility = View.VISIBLE
+                                                    transitionPreviewOverlayView?.updateTransition(transOp.type, prog, bmpA, bmpB)
+                                                }
                                             }
+                                        } finally {
+                                            transitionFramesLoading.remove(i)
                                         }
                                     }
                                 }
@@ -7680,8 +7691,7 @@ class VideoEditingActivity : AppCompatActivity() {
             }
         }
 
-        // Debug assertion logging instance count
-        Log.d(TAG, "AudioPlayerLifecycle Assertion: bgAudioPlayerMap.size=${bgAudioPlayerMap.size}, activeAudioOps=${audioOps.size}")
+        // Debug assertion logging instance count (warning only if anomalous)
         if (bgAudioPlayerMap.size > audioOps.size) {
             Log.w(TAG, "AudioPlayerLifecycle Invariant Warning: ${bgAudioPlayerMap.size} players exceeds ${audioOps.size} active operations!")
         }
@@ -7892,7 +7902,8 @@ class VideoEditingActivity : AppCompatActivity() {
     private fun extractClipFrame(item: com.boostlyte.vydra.models.EditOperation.MergeItem, isEnd: Boolean): Bitmap? {
         val isImg = item.isImage || isImageUri(item.uri)
         return if (isImg) {
-            decodeSampledBitmapFromUri(item.uri)
+            com.boostlyte.vydra.utils.ImagePreviewCache.getPreviewBitmap(this, item.uri)
+                ?: decodeSampledBitmapFromUri(item.uri, reqWidth = 480, reqHeight = 854)
         } else {
             val targetMs = if (isEnd) {
                 (item.trimEndMs.coerceAtLeast(60L) - 40L).coerceAtLeast(item.trimStartMs)
@@ -7900,32 +7911,39 @@ class VideoEditingActivity : AppCompatActivity() {
                 item.trimStartMs.coerceAtLeast(0L)
             }
             val targetUri = item.proxyUri ?: item.uri
-            extractVideoFrame(targetUri, targetMs)
+            extractVideoFrame(targetUri, targetMs, reqWidth = 480, reqHeight = 854)
         }
     }
 
     private fun invalidateTransitionCache() {
         transitionFramesCache.clear()
         transitionFramesLoading.clear()
+        lastRenderedSequenceSignature = null
     }
 
     private fun preloadTransitionFrames() {
         val project = viewModel.project.value ?: return
         val transitionOps = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>()
         if (transitionOps.isEmpty()) return
-        val sequenceItems = getSequenceItems()
+        val sequenceItems = cachedSequenceItems.ifEmpty { getSequenceItems().also { cachedSequenceItems = it } }
         if (sequenceItems.size < 2) return
 
         lifecycleScope.launch(Dispatchers.IO) {
             for (transOp in transitionOps) {
                 val i = transOp.index
                 if (i in 0 until sequenceItems.size - 1 && !transitionFramesCache.containsKey(i)) {
-                    val clipA = sequenceItems[i]
-                    val clipB = sequenceItems[i + 1]
-                    val bmpA = extractClipFrame(clipA, isEnd = true)
-                    val bmpB = extractClipFrame(clipB, isEnd = false)
-                    withContext(Dispatchers.Main) {
-                        transitionFramesCache[i] = Pair(bmpA, bmpB)
+                    if (transitionFramesLoading.add(i)) {
+                        try {
+                            val clipA = sequenceItems[i]
+                            val clipB = sequenceItems[i + 1]
+                            val bmpA = extractClipFrame(clipA, isEnd = true)
+                            val bmpB = extractClipFrame(clipB, isEnd = false)
+                            withContext(Dispatchers.Main) {
+                                transitionFramesCache[i] = Pair(bmpA, bmpB)
+                            }
+                        } finally {
+                            transitionFramesLoading.remove(i)
+                        }
                     }
                 }
             }
@@ -8452,10 +8470,6 @@ class VideoEditingActivity : AppCompatActivity() {
     }
 
     private fun performRenderTracks(project: VideoProject) {
-        activeRenderJobs.forEach { it.cancel() }
-        activeRenderJobs.clear()
-        activeSegmentViews.clear()
-
         val sequenceItems = getSequenceItems()
         cachedSequenceItems = sequenceItems
         val transitions = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>()
@@ -8468,7 +8482,69 @@ class VideoEditingActivity : AppCompatActivity() {
             return
         }
 
-        val mediaSourceFactory = com.google.android.exoplayer2.source.DefaultMediaSourceFactory(this)
+        val timelineWidth = (totalSequenceDuration * pixelsPerMs).toInt()
+
+        // Set explicit widths for ruler and track containers (avoid redundant layout passes)
+        if (timeRulerView.layoutParams.width != timelineWidth) {
+            timeRulerView.layoutParams = timeRulerView.layoutParams.apply {
+                width = timelineWidth
+            }
+        }
+        timeRulerView.setVideoDuration(totalSequenceDuration)
+        customVideoSeeker.setVideoDuration(totalSequenceDuration)
+
+        if (sequenceTrackContainer.layoutParams.width != timelineWidth) {
+            sequenceTrackContainer.layoutParams = sequenceTrackContainer.layoutParams.apply {
+                width = timelineWidth
+            }
+        }
+        if (textTrackContainer.layoutParams.width != timelineWidth) {
+            textTrackContainer.layoutParams = textTrackContainer.layoutParams.apply {
+                width = timelineWidth
+            }
+        }
+        if (imageTrackContainer.layoutParams.width != timelineWidth) {
+            imageTrackContainer.layoutParams = imageTrackContainer.layoutParams.apply {
+                width = timelineWidth
+            }
+        }
+        if (audioTrackContainer.layoutParams.width != timelineWidth) {
+            audioTrackContainer.layoutParams = audioTrackContainer.layoutParams.apply {
+                width = timelineWidth
+            }
+        }
+
+        val mutes = project.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.MuteClip>().associate { it.index to it.isMuted }
+        val currentSequenceSignature = buildString {
+            append("dur=").append(totalSequenceDuration).append(";")
+            append("clips=")
+            for ((idx, item) in sequenceItems.withIndex()) {
+                append(idx).append(":")
+                append(item.uri).append(",")
+                append(item.proxyUri).append(",")
+                append(item.scrubProxyUri).append(",")
+                append(item.trimStartMs).append(",")
+                append(item.trimEndMs).append(",")
+                append(item.durationMs).append(",")
+                append(item.speed).append(",")
+                append(item.isImage).append(",")
+                append(mutes[idx] == true).append("|")
+            }
+            append(";trans=")
+            for (t in transitions) {
+                append(t.index).append(":").append(t.type).append(":").append(t.durationMs).append("|")
+            }
+        }
+
+        val sequenceStructureChanged = (currentSequenceSignature != lastRenderedSequenceSignature) || (sequenceTrackContainer.childCount == 0)
+
+        if (sequenceStructureChanged) {
+            lastRenderedSequenceSignature = currentSequenceSignature
+            activeRenderJobs.forEach { it.cancel() }
+            activeRenderJobs.clear()
+            activeSegmentViews.clear()
+
+            val mediaSourceFactory = com.google.android.exoplayer2.source.DefaultMediaSourceFactory(this)
         
         val boundaries = mutableSetOf<Long>()
         boundaries.add(0L)
@@ -8565,29 +8641,6 @@ class VideoEditingActivity : AppCompatActivity() {
             if (wasPlaying) player.play()
         }
 
-
-        val timelineWidth = (totalSequenceDuration * pixelsPerMs).toInt()
-
-        // Set explicit widths for ruler and track containers
-        timeRulerView.layoutParams = timeRulerView.layoutParams.apply {
-            width = timelineWidth
-        }
-        timeRulerView.setVideoDuration(totalSequenceDuration)
-
-        customVideoSeeker.setVideoDuration(totalSequenceDuration)
-
-        sequenceTrackContainer.layoutParams = sequenceTrackContainer.layoutParams.apply {
-            width = timelineWidth
-        }
-        textTrackContainer.layoutParams = textTrackContainer.layoutParams.apply {
-            width = timelineWidth
-        }
-        imageTrackContainer.layoutParams = imageTrackContainer.layoutParams.apply {
-            width = timelineWidth
-        }
-        audioTrackContainer.layoutParams = audioTrackContainer.layoutParams.apply {
-            width = timelineWidth
-        }
 
         // Render Sequence Track
         sequenceTrackContainer.clipChildren = false
@@ -8853,10 +8906,18 @@ class VideoEditingActivity : AppCompatActivity() {
         for ((view, params) in transitionViewsToLayout) {
             sequenceTrackContainer.addView(view, params)
         }
-        
-        if (activeRenderJobs.isNotEmpty()) {
-            // Keep track if needed but don't block
+    } else {
+        // Sequence structure unchanged: quickly update selection and trim states on existing views
+        for ((index, segmentView) in activeSegmentViews.withIndex()) {
+            val trackTrimView = segmentView.findViewById<com.boostlyte.vydra.customviews.TrackTrimView>(R.id.segmentTrimTrack)
+            val isSelected = (selectedVideoIndex == index)
+            if (trackTrimView != null && (trackTrimView.isSelectedTrack != isSelected || trackTrimView.isTrimEnabled != isSelected)) {
+                trackTrimView.isSelectedTrack = isSelected
+                trackTrimView.isTrimEnabled = isSelected
+                trackTrimView.invalidate()
+            }
         }
+    }
 
         // Combined Text and Image tracks (Overlays) in Z-order stack
         textTrackContainer.removeAllViews()

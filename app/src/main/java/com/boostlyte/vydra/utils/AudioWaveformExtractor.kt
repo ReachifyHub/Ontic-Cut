@@ -57,6 +57,8 @@ object AudioWaveformExtractor {
         }
     }
 
+    private val waveformCache = java.util.concurrent.ConcurrentHashMap<String, FloatArray>()
+
     /**
      * Extracts an audio waveform from a video or audio file using FFmpeg.
      * @param videoPath The absolute path to the media file.
@@ -64,6 +66,13 @@ object AudioWaveformExtractor {
      * @return A FloatArray of normalized amplitudes (0.0 to 1.0), or null if extraction failed.
      */
     suspend fun extractWaveform(context: Context, videoPath: String, targetSamples: Int = 300): FloatArray? = withContext(Dispatchers.IO) {
+        val file = File(videoPath)
+        val cacheKey = "$videoPath:${file.length()}:${file.lastModified()}:$targetSamples"
+        val cached = waveformCache[cacheKey]
+        if (cached != null) {
+            return@withContext cached
+        }
+
         if (!hasAudioStream(videoPath)) {
             Log.d("AudioWaveformExtractor", "File has no audio stream, skipping PCM extraction: $videoPath")
             return@withContext null
@@ -124,6 +133,7 @@ object AudioWaveformExtractor {
                 }
             }
             
+            waveformCache[cacheKey] = result
             return@withContext result
             
         } catch (e: Exception) {
