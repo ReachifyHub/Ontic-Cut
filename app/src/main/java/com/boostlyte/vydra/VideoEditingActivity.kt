@@ -6494,7 +6494,10 @@ class VideoEditingActivity : AppCompatActivity() {
 
                 if (prepResult == null) {
                     tempOutputFile?.let { if (it.exists()) it.delete() }
-                    viewModel.exportError("Cannot access project source media or build command")
+                    exportScreen.visibility = View.GONE
+                    val errMsg = "Cannot access project source media or build export command"
+                    viewModel.exportError(errMsg)
+                    showProErrorDialog(ErrorCode.FILE_NOT_FOUND, errMsg)
                     return@launch
                 }
 
@@ -6529,8 +6532,11 @@ class VideoEditingActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 tempOutputFile?.let { if (it.exists()) it.delete() }
                 concatFile?.let { if (it.exists()) it.delete() }
-                viewModel.exportError(e.message ?: "Unknown error")
-                Log.e(TAG, "Export start exception: ${e.message}", e)
+                exportScreen.visibility = View.GONE
+                val err = e.message ?: "Failed to start export"
+                viewModel.exportError(err)
+                Log.e(TAG, "Export start exception: $err", e)
+                showProErrorDialog(ErrorCode.UNEXPECTED_CRASH, err)
             }
         }
     }

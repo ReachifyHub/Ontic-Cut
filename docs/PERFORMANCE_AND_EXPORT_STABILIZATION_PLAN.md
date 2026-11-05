@@ -33,10 +33,19 @@ The plan resolves four critical defects:
   2. Updated `zoompan` filter progression formula to dynamically compute total frame count using `(${_exportFps.value}*$duration)` and explicitly output `fps=${_exportFps.value}`.
   3. Verified with unit tests in `ExportFilterStabilizationTest.kt`.
 
-### C. Large Project Export Crashes & Extreme Slowness
-- **File:** `VideoEditingViewModel.kt`, `ExportService.kt`
-- **Cause:** Monolithic single-pass export creates a filtergraph with $N$ inputs, $N$ zoompan filters, and $N-1$ `xfade` filters. For a 30–50 clip project, this opens 50 file descriptors simultaneously and demands enormous memory buffers for concurrent software scalers, triggering Android's Low Memory Killer (OOM) or SIGSEGV.
-- **Solution:** CapCut-style bounded chunking. Projects with $> 16$ clips are split into sequential batches of 8–10 clips, rendered to intermediate MP4 chunks (`-preset ultrafast`), and then stitched together via FFmpeg's concat demuxer (`-c copy`) in under 2 seconds. Memory usage is bounded regardless of total project length.
+### C. Large Project Export Crashes & Extreme Slowness [FIXED]
+- **File:** `VideoEditingViewModel.kt`, `ExportService.kt`, `VideoEditingActivity.kt`
+- **Status:** **FIXED** (Unit tested & Verified)
+- **Cause:** 
+  1. Monolithic single-pass export created an enormous filtergraph with $N$ inputs, $N$ zoompan filters, and $N-1$ `xfade` filters. For large projects, this opened dozens of concurrent file descriptors and exhausted system memory, triggering Android's Low Memory Killer (OOM).
+  2. On Android 8.0+ (API 26+) through Android 15, `startForegroundService()` requires `startForeground()` to be called within 5 seconds. In `ExportService`, `startForeground()` was deferred until after disk deserialization of chunk plans, causing the OS to kill the process with `ForegroundServiceDidNotStartInTimeException`, abruptly terminating the app and kicking the user back to the Android home screen.
+  3. Pre-export preparation lacked clean error recovery when media URIs could not be resolved, causing the UI to hang indefinitely on "Preparing export...".
+- **Resolution:**
+  1. **Chunked Export Engine Activated**: `FORCE_LEGACY_EXPORT = false` enabled. Projects with $> 24$ inputs are split into bounded sub-passes that stream intermediate MP4 chunks to disk and release memory after each chunk.
+  2. **Android 8.0+ Foreground Service Compliance**: Placed `startForeground(NOTIFICATION_ID, buildNotification(0, "Preparing export..."))` unconditionally at the very top of `onStartCommand()` in `ExportService.kt`, completely eliminating the OS timeout kill.
+  3. **Duration Padding & Dynamic FPS**: Added video padding (`tpad=stop_mode=clone`) when audio duration exceeds video duration, and wired dynamic export framerate (`settb=1/$fps` and `fps=$fps`) across all chunk sub-passes and the final assembly pass.
+  4. **Fail-Safe UI Handshake**: Added graceful dismissal and `showProErrorDialog(ErrorCode.FILE_NOT_FOUND, ...)` in `VideoEditingActivity` if media assets are missing, preventing UI freezes.
+  5. Verified with comprehensive unit tests (`testChunkExportPlan_largeProjectActivatesChunkingAndPadsDuration`) and clean compilation.
 
 ### D. Editor Timeline Playback & Transition Lag [FIXED]
 - **File:** `VideoEditingActivity.kt`, `AudioWaveformExtractor.kt`

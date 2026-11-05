@@ -87,7 +87,16 @@ class ExportService : Service() {
             return START_NOT_STICKY
         }
 
-        val tempOutputPath = intent.getStringExtra(EXTRA_TEMP_OUTPUT_PATH) ?: return START_NOT_STICKY
+        // Immediately attach foreground notification as required by Android 8.0+ (API 26+)
+        // within 5 seconds of startForegroundService().
+        startForeground(NOTIFICATION_ID, buildNotification(0, "Preparing export..."))
+
+        val tempOutputPath = intent.getStringExtra(EXTRA_TEMP_OUTPUT_PATH)
+        if (tempOutputPath == null) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val isAudioOnly = intent.getBooleanExtra(EXTRA_IS_AUDIO_ONLY, false)
 
         val chunkPlanFilePath = intent.getStringExtra(EXTRA_CHUNK_PLAN_FILE)
@@ -110,7 +119,12 @@ class ExportService : Service() {
             }
         }
 
-        val command = intent.getStringExtra(EXTRA_COMMAND) ?: return START_NOT_STICKY
+        val command = intent.getStringExtra(EXTRA_COMMAND)
+        if (command == null) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         val concatFilePath = intent.getStringExtra(EXTRA_CONCAT_FILE_PATH)
         val durationSecs = intent.getDoubleExtra(EXTRA_TOTAL_DURATION_SECS, 0.0)
 
@@ -121,7 +135,7 @@ class ExportService : Service() {
         val projectStats = "durationSecs=$durationSecs isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath script=$scriptFilePath RENDER_PATH=$renderPath"
         com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
 
-        startForeground(NOTIFICATION_ID, buildNotification(0, "Exporting..."))
+        updateNotification(0, "Exporting...")
 
         serviceScope.launch {
             try {
@@ -516,7 +530,7 @@ class ExportService : Service() {
         val projectStats = "mode=chunked numChunks=$numChunks totalDurationSecs=${plan.totalDurationSecs} isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath"
         com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
 
-        startForeground(NOTIFICATION_ID, buildNotification(0, "Exporting part 1/$numChunks..."))
+        updateNotification(0, "Exporting part 1/$numChunks...")
 
         serviceScope.launch {
             val tempFile = File(tempOutputPath)
