@@ -11,35 +11,35 @@ class ChunkPlannerTest {
 
     @Test
     fun testChunkTriggerThreshold() {
-        val items24 = (1..24).map {
+        val items16 = (1..16).map {
             EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$it.jpg"), durationMs = 5000L)
         }
-        val plan24 = ChunkPlanner.plan(items24, emptyList())
-        assertFalse("24 clips must NOT trigger chunked export", plan24.isChunked)
-        assertEquals(1, plan24.chunks.size)
-        assertEquals(24, plan24.chunks[0].clips.size)
+        val plan16 = ChunkPlanner.plan(items16, emptyList())
+        assertFalse("16 clips must NOT trigger chunked export", plan16.isChunked)
+        assertEquals(1, plan16.chunks.size)
+        assertEquals(16, plan16.chunks[0].clips.size)
 
-        val items25 = (1..25).map {
+        val items17 = (1..17).map {
             EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$it.jpg"), durationMs = 5000L)
         }
-        val plan25 = ChunkPlanner.plan(items25, emptyList())
-        assertTrue("25 clips MUST trigger chunked export", plan25.isChunked)
-        assertEquals(2, plan25.chunks.size)
-        assertEquals(16, plan25.chunks[0].clips.size)
-        assertEquals(9, plan25.chunks[1].clips.size)
+        val plan17 = ChunkPlanner.plan(items17, emptyList())
+        assertTrue("17 clips MUST trigger chunked export", plan17.isChunked)
+        assertEquals(2, plan17.chunks.size)
+        assertEquals(10, plan17.chunks[0].clips.size)
+        assertEquals(7, plan17.chunks[1].clips.size)
     }
 
     @Test
     fun testChunkPlanning_sixtyClipsChunkSizes() {
-        // 60 clips: should partition into [16, 16, 16, 12]
+        // 60 clips: with MAX_CHUNK_SIZE = 10, should partition into [10, 10, 10, 10, 10, 10]
         val items60 = (1..60).map {
             EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$it.jpg"), durationMs = 5000L)
         }
         val plan60 = ChunkPlanner.plan(items60, emptyList())
         assertTrue(plan60.isChunked)
-        assertEquals(4, plan60.chunks.size)
-        assertEquals(listOf(16, 16, 16, 12), plan60.chunks.map { it.clips.size })
-        assertEquals(3, plan60.boundaryTransitions.size)
+        assertEquals(6, plan60.chunks.size)
+        assertEquals(listOf(10, 10, 10, 10, 10, 10), plan60.chunks.map { it.clips.size })
+        assertEquals(5, plan60.boundaryTransitions.size)
     }
 
     @Test
@@ -110,7 +110,7 @@ class ChunkPlannerTest {
 
     @Test
     fun testDurationInvariant_64And120Clips() {
-        // Test 64 clips (exact multiple of 16 -> 4 chunks of 16)
+        // Test 64 clips (with MAX_CHUNK_SIZE = 10 -> 6 chunks of 10 + 1 chunk of 4)
         val items64 = (0 until 64).map { idx ->
             val dur = 3000L + (idx % 7) * 400L
             EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$idx.jpg"), durationMs = dur)
@@ -123,13 +123,13 @@ class ChunkPlannerTest {
         val plan64 = ChunkPlanner.plan(items64, transitions64)
 
         assertTrue(plan64.isChunked)
-        assertEquals(4, plan64.chunks.size)
-        assertEquals(listOf(16, 16, 16, 16), plan64.chunks.map { it.clips.size })
+        assertEquals(7, plan64.chunks.size)
+        assertEquals(listOf(10, 10, 10, 10, 10, 10, 4), plan64.chunks.map { it.clips.size })
         val sumChunk64 = plan64.chunks.sumOf { it.durationMs }
         val sumBoundary64 = plan64.boundaryTransitions.sumOf { it.transition?.durationMs ?: 0L }
         assertEquals(layout64.totalDurationMs, sumChunk64 - sumBoundary64)
 
-        // Test 120 clips (stress test: 7 chunks of 16 + 1 chunk of 8)
+        // Test 120 clips (stress test: 12 chunks of 10)
         val items120 = (0 until 120).map { idx ->
             val dur = 2500L + (idx % 9) * 300L
             EditOperation.MergeItem(uri = DummyUri.fromPath("file:///item_$idx.jpg"), durationMs = dur)
@@ -142,8 +142,8 @@ class ChunkPlannerTest {
         val plan120 = ChunkPlanner.plan(items120, transitions120)
 
         assertTrue(plan120.isChunked)
-        assertEquals(8, plan120.chunks.size)
-        assertEquals(listOf(16, 16, 16, 16, 16, 16, 16, 8), plan120.chunks.map { it.clips.size })
+        assertEquals(12, plan120.chunks.size)
+        assertEquals(List(12) { 10 }, plan120.chunks.map { it.clips.size })
         val sumChunk120 = plan120.chunks.sumOf { it.durationMs }
         val sumBoundary120 = plan120.boundaryTransitions.sumOf { it.transition?.durationMs ?: 0L }
         assertEquals(layout120.totalDurationMs, sumChunk120 - sumBoundary120)
@@ -160,13 +160,14 @@ class ChunkPlannerTest {
         val plan40 = ChunkPlanner.plan(items40, transitions40)
 
         assertTrue(plan40.isChunked)
-        // 40 clips -> [16, 16, 8]
-        assertEquals(3, plan40.chunks.size)
-        assertEquals(2, plan40.boundaryTransitions.size)
+        // 40 clips -> [10, 10, 10, 10]
+        assertEquals(4, plan40.chunks.size)
+        assertEquals(3, plan40.boundaryTransitions.size)
 
-        // Boundary transitions must be gap 15 and gap 31
-        assertEquals(15, plan40.boundaryTransitions[0].globalGapIndex)
-        assertEquals(31, plan40.boundaryTransitions[1].globalGapIndex)
+        // Boundary transitions must be gap 9, 19, and 29
+        assertEquals(9, plan40.boundaryTransitions[0].globalGapIndex)
+        assertEquals(19, plan40.boundaryTransitions[1].globalGapIndex)
+        assertEquals(29, plan40.boundaryTransitions[2].globalGapIndex)
 
         // Internal transitions inside each chunk must be remapped to 0 until (size - 1)
         for (chunk in plan40.chunks) {

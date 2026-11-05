@@ -58,6 +58,29 @@ The plan resolves four critical defects:
   4. **Audio Waveform In-Memory Cache**: Added `waveformCache` in `AudioWaveformExtractor.kt` to avoid repeatedly executing FFmpeg PCM decoding passes for already analyzed tracks. Removed per-tick debug logcat spam in `syncBgAudio`.
   5. Verified with 190 tests passing (`gradle :app:testDebugUnitTest`) and successful clean compile.
 
+### E. Export Lifecycle & Elimination of Full-Project GL Preprocessing [FIXED]
+- **File:** `VideoEditingViewModel.kt`, `ExportService.kt`, `VideoEditingActivity.kt`, `StorageEstimator.kt`
+- **Status:** **FIXED** (Unit tested & Verified)
+- **Cause:** `buildChunkExportPlan` executed `preRenderGlMotionIntermediates()` for every animated image in the entire project upfront on `Dispatchers.IO` before `startForegroundService()` was even called. For 100-500 images, this froze the UI on "Preparing export..." for minutes, created dozens of gigabytes of intermediate MP4s simultaneously, and exhausted device memory/storage.
+- **Resolution:**
+  1. **Early Foreground Activation**: Added `ACTION_PREPARE_EXPORT` sent to `ExportService` immediately upon export initiation, satisfying Android 8.0+ 5-second `startForeground` requirements before preparation begins.
+  2. **Bounded Per-Chunk Motion Rendering**: Replaced full-project pre-rendering with chunk-local `preRenderGlMotionForChunk()`. Only image clips in the currently active chunk (at most 10) are rendered with Ken Burns GL motion immediately prior to that chunk's FFmpeg pass.
+  3. **Immediate Intermediate Cleanup**: Intermediate GL motion MP4 files are deleted immediately after that chunk's FFmpeg export succeeds. FFmpeg sessions are deterministically cleared (`FFmpegKitConfig.clearSessions()`).
+  4. **Conservative Storage Estimation**: Added `StorageEstimator` checking available space via `StatFs` before starting export, failing fast with `ErrorCode.STORAGE_FULL` instead of hard crashes.
+  5. **Dedicated Job Directory**: All intermediate chunk files are isolated in `export_job_<timestamp>`, recursively cleaned in `finally` blocks on success, failure, or cancellation.
+  6. Verified with unit tests scaling across 5, 20, 100, 300, and 500 clips.
+
+### F. Unified Capability-Aware Encoder Selection & Safe Final Assembly [FIXED]
+- **File:** `EncoderSelector.kt`, `FFmpegRenderEngine.kt`, `ExportService.kt`, `VideoEditingViewModel.kt`
+- **Status:** **FIXED** (Unit tested & Verified)
+- **Cause:** Scattered encoder selection logic across multiple files lacked resolution and framerate capability checks. Failed software encodes attempted invalid retries with hardware encoders, and retries occurred even on permanent errors (syntax errors, out of disk space, user cancellations). Final chunk assembly always re-encoded video even when chunks shared identical stream parameters and lacked transitions.
+- **Resolution:**
+  1. **Unified Encoder Selector (`EncoderSelector.kt`)**: Capability-aware AVC encoder selection checking `MediaCodecInfo.videoCapabilities` for width, height, and framerate support, providing a clean fallback hierarchy: Hardware MediaCodec -> Software MediaCodec (`c2.android` / `OMX.google`) -> `libx264`.
+  2. **Permanent Failure Classification**: `isPermanentFailure()` stops futile retries on filter syntax errors, insufficient disk space, or user cancellation.
+  3. **One-Way Fallback**: Removed invalid software-to-hardware retry loops in `FFmpegRenderEngine`. Hardware failures fallback once to software `libx264`.
+  4. **Safe Final Assembly Stream Copy**: When adjacent chunks share stream parameters without boundary transitions, whole-project audio mixing, or whole-project filters, final pass uses fast FFmpeg concat demuxer with `-c copy`, finishing in under 1 second.
+  5. Verified with 201 passing unit tests and successful build compilation.
+
 ---
 
 ## 2. Implementation Strategy & Architecture

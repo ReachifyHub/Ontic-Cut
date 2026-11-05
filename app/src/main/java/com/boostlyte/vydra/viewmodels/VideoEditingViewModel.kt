@@ -23,6 +23,7 @@ import com.boostlyte.vydra.services.ChunkSpec
 import com.boostlyte.vydra.services.ChunkPlan
 import com.boostlyte.vydra.services.ChunkCommand
 import com.boostlyte.vydra.services.ChunkExportPlan
+import com.boostlyte.vydra.services.ChunkClip
 
 // ExportQuality enum removed in favor of individual parameters
 
@@ -2578,33 +2579,48 @@ class VideoEditingViewModel : ViewModel() {
 
         val preferredEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)?.getString("default_encoder", "hardware") ?: "hardware"
 
-        // Pre-render GL motion intermediates for static image clips with motion effects (Milestone M1 & M2)
-        val (effectiveSequenceItems, overallRenderPath) = preRenderGlMotionIntermediates(
-            items = allSequenceItems,
-            operations = activeOperations,
-            cacheDir = chunkTempDir,
+        // Select capability-aware encoder path
+        val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)?.getString("default_encoder", "hardware") ?: "hardware"
+        val selectedEncoder = com.boostlyte.vydra.export.EncoderSelector.selectEncoder(
+            preference = if (defaultEncoder == "software") com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.SOFTWARE else com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.AUTO,
             targetWidth = targetWidth,
             targetHeight = targetHeight,
-            fps = _exportFps.value,
-            preferredEncoder = preferredEncoder
+            fps = _exportFps.value
         )
-
-        val effectiveSourcePath = if (effectiveSequenceItems.isNotEmpty() && !effectiveSequenceItems[0].isImage) {
-            effectiveSequenceItems[0].uri.path ?: sourceFilePath
+        val overallRenderPath = if (FORCE_LEGACY_EXPORT) {
+            "legacy"
+        } else if (selectedEncoder.isHardware) {
+            "gl_hw"
         } else {
-            sourceFilePath
+            "gl_sw"
         }
 
-        val updatedOperations = if (effectiveSequenceItems.size > 1 && mergeOp != null) {
-            activeOperations.map { op ->
-                if (op is EditOperation.Merge) op.copy(items = effectiveSequenceItems.drop(1)) else op
-            }
-        } else {
-            activeOperations
-        }
-
-        // TRIGGER CHECK: If <= 24, execute single-pass export using GL intermediates if available (Milestone M3)
+        // TRIGGER CHECK: If <= 16, execute single-pass export using GL intermediates if available
         if (allSequenceItems.size <= ChunkPlanner.CHUNK_TRIGGER_THRESHOLD) {
+            val (effectiveSequenceItems, singlePassRenderPath) = preRenderGlMotionIntermediates(
+                items = allSequenceItems,
+                operations = activeOperations,
+                cacheDir = chunkTempDir,
+                targetWidth = targetWidth,
+                targetHeight = targetHeight,
+                fps = _exportFps.value,
+                preferredEncoder = preferredEncoder
+            )
+
+            val effectiveSourcePath = if (effectiveSequenceItems.isNotEmpty() && !effectiveSequenceItems[0].isImage) {
+                effectiveSequenceItems[0].uri.path ?: sourceFilePath
+            } else {
+                sourceFilePath
+            }
+
+            val updatedOperations = if (effectiveSequenceItems.size > 1 && mergeOp != null) {
+                activeOperations.map { op ->
+                    if (op is EditOperation.Merge) op.copy(items = effectiveSequenceItems.drop(1)) else op
+                }
+            } else {
+                activeOperations
+            }
+
             val singlePassCmd = buildConsolidatedFFmpegCommand(
                 sourceFilePath = effectiveSourcePath,
                 outputFilePath = outputFilePath,
@@ -2612,15 +2628,24 @@ class VideoEditingViewModel : ViewModel() {
                 context = context,
                 operationsOverride = updatedOperations
             ) ?: return null
+
             return ChunkExportPlan(
                 isChunked = false,
                 singlePassCommand = singlePassCmd,
-                renderPath = overallRenderPath
+                renderPath = singlePassRenderPath,
+                targetWidth = targetWidth,
+                targetHeight = targetHeight,
+                fps = _exportFps.value,
+                resolution = _exportResolution.value,
+                density = context?.resources?.displayMetrics?.density ?: 1.0f,
+                fontFilePath = fontFilePath,
+                operations = activeOperations
             )
         }
 
-        // Large sequence (> 24 inputs) -> Execute Chunked Export consuming GL intermediates
-        val plan = ChunkPlanner.plan(effectiveSequenceItems, transitions)
+        // Large sequence (> 16 inputs) -> Plan Chunks purely without full-project GL pre-processing upfront.
+        // Bounded per-chunk GL motion is rendered on-demand inside ExportService per chunk.
+        val plan = ChunkPlanner.plan(allSequenceItems, transitions)
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
 
         val chunkCommands = mutableListOf<ChunkCommand>()
@@ -2632,7 +2657,7 @@ class VideoEditingViewModel : ViewModel() {
 
             val chunkCmd = buildChunkPassCommand(
                 chunkSpec = chunk,
-                sourceFilePath = effectiveSourcePath,
+                sourceFilePath = sourceFilePath,
                 chunkOutputPath = chunkTempFile.absolutePath,
                 fontFilePath = fontFilePath,
                 context = context,
@@ -2640,7 +2665,7 @@ class VideoEditingViewModel : ViewModel() {
                 density = density,
                 targetWidth = targetWidth,
                 targetHeight = targetHeight,
-                operations = updatedOperations
+                operations = activeOperations
             )
             chunkCommands.add(chunkCmd.copy(renderPath = overallRenderPath))
         }
@@ -2652,8 +2677,14 @@ class VideoEditingViewModel : ViewModel() {
             context = context,
             targetWidth = targetWidth,
             targetHeight = targetHeight,
-            operations = updatedOperations
+            operations = activeOperations
         )
+
+        // Determine if final pass can safely use fast stream copy (-c copy concat demuxer)
+        val hasBoundaryTransitions = plan.boundaryTransitions.any { it.transition != null && it.transition.type != "none" }
+        val hasAudioOperations = activeOperations.any { it is EditOperation.AddBackgroundAudio }
+        val hasWholeProjectFilters = activeOperations.any { it is EditOperation.AddSubtitles || it is EditOperation.AddText }
+        val canStreamCopy = !hasBoundaryTransitions && !hasAudioOperations && !hasWholeProjectFilters
 
         return ChunkExportPlan(
             isChunked = true,
@@ -2662,8 +2693,91 @@ class VideoEditingViewModel : ViewModel() {
             chunkTempPaths = chunkTempPaths,
             totalDurationSecs = finalPassCmd.durationSecs,
             chunkDurationsSecs = plan.chunks.map { it.durationMs / 1000.0 },
-            renderPath = overallRenderPath
+            renderPath = overallRenderPath,
+            chunkSpecs = plan.chunks,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+            fps = _exportFps.value,
+            resolution = _exportResolution.value,
+            density = density,
+            fontFilePath = fontFilePath,
+            operations = activeOperations,
+            canStreamCopyFinalPass = canStreamCopy
         )
+    }
+
+    /**
+     * Bounded per-chunk GL motion pre-rendering.
+     * Renders motion MP4 clips only for image items in the active chunk with motion effects.
+     * Intermediate files are deleted immediately after that chunk completes.
+     */
+    fun preRenderGlMotionForChunk(
+        chunkSpec: ChunkSpec,
+        operations: List<EditOperation>,
+        cacheDir: File,
+        targetWidth: Int,
+        targetHeight: Int,
+        fps: Int,
+        preferredEncoder: String = "hardware"
+    ): Pair<ChunkSpec, List<File>> {
+        if (FORCE_LEGACY_EXPORT) {
+            return Pair(chunkSpec, emptyList())
+        }
+        val createdFiles = mutableListOf<File>()
+        val updatedClips = mutableListOf<ChunkClip>()
+        val timestamp = System.currentTimeMillis()
+
+        for (clip in chunkSpec.clips) {
+            val item = clip.item
+            val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == clip.globalIndex }
+            val clipMotionType = motionOp?.motionType ?: item.motionEffect
+
+            if (item.isImage && clipMotionType != null && clipMotionType != "none") {
+                val imagePath = item.uri.path ?: ""
+                val intermediateFile = File(cacheDir, "gl_chunk_${chunkSpec.chunkIndex}_clip_${clip.localIndex}_${timestamp}.mp4")
+                val durationSec = if (item.trimmedDurationMs > 0L) {
+                    item.trimmedDurationMs / 1000.0
+                } else if (item.trimEndMs > item.trimStartMs) {
+                    (item.trimEndMs - item.trimStartMs) / 1000.0
+                } else if (item.durationMs > 0L) {
+                    item.durationMs / 1000.0
+                } else {
+                    5.0
+                }
+
+                val glResult = com.boostlyte.vydra.render.gl.GlMotionRenderer.renderMotionClip(
+                    imagePath = imagePath,
+                    outputPath = intermediateFile.absolutePath,
+                    targetWidth = targetWidth,
+                    targetHeight = targetHeight,
+                    durationSecs = durationSec,
+                    fps = fps,
+                    motionType = clipMotionType,
+                    preferredEncoder = preferredEncoder
+                )
+
+                if (glResult is com.boostlyte.vydra.render.gl.GlMotionRenderer.GlRenderResult.Success && File(glResult.outputPath).exists()) {
+                    Log.d(TAG, "Chunk ${chunkSpec.chunkIndex} GL motion render succeeded for local clip ${clip.localIndex} (${glResult.renderPath}) -> ${glResult.outputPath}")
+                    createdFiles.add(intermediateFile)
+                    updatedClips.add(
+                        clip.copy(
+                            item = item.copy(
+                                uri = android.net.Uri.fromFile(intermediateFile),
+                                isImage = false,
+                                motionEffect = null
+                            )
+                        )
+                    )
+                } else {
+                    Log.w(TAG, "Chunk ${chunkSpec.chunkIndex} GL motion render failed for local clip ${clip.localIndex}, falling back to legacy FFmpeg zoompan")
+                    updatedClips.add(clip)
+                }
+            } else {
+                updatedClips.add(clip)
+            }
+        }
+
+        return Pair(chunkSpec.copy(clips = updatedClips), createdFiles)
     }
 
     /**

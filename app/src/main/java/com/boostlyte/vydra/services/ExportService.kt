@@ -18,6 +18,7 @@ import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.boostlyte.vydra.MainActivity
 import com.boostlyte.vydra.R
+import com.boostlyte.vydra.models.EditOperation
 import com.boostlyte.vydra.utils.ErrorCode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +43,7 @@ class ExportService : Service() {
         const val ACTION_EXPORT_FAILURE = "com.boostlyte.vydra.ACTION_EXPORT_FAILURE"
         const val ACTION_EXPORT_CANCELLED = "com.boostlyte.vydra.ACTION_EXPORT_CANCELLED"
         const val ACTION_CANCEL_EXPORT = "com.boostlyte.vydra.ACTION_CANCEL_EXPORT"
+        const val ACTION_PREPARE_EXPORT = "com.boostlyte.vydra.ACTION_PREPARE_EXPORT"
 
         const val EXTRA_PROGRESS = "extra_progress"
         const val EXTRA_SAVED_URI = "extra_saved_uri"
@@ -91,6 +93,11 @@ class ExportService : Service() {
         // within 5 seconds of startForegroundService().
         startForeground(NOTIFICATION_ID, buildNotification(0, "Preparing export..."))
 
+        if (intent.action == ACTION_PREPARE_EXPORT) {
+            Log.d(TAG, "ExportService started in foreground for preparation phase")
+            return START_NOT_STICKY
+        }
+
         val tempOutputPath = intent.getStringExtra(EXTRA_TEMP_OUTPUT_PATH)
         if (tempOutputPath == null) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -127,6 +134,24 @@ class ExportService : Service() {
         }
         val concatFilePath = intent.getStringExtra(EXTRA_CONCAT_FILE_PATH)
         val durationSecs = intent.getDoubleExtra(EXTRA_TOTAL_DURATION_SECS, 0.0)
+
+        // Storage verification for single-pass export
+        val storageResult = com.boostlyte.vydra.export.StorageEstimator.checkStorageAvailable(
+            directory = cacheDir,
+            durationSecs = durationSecs,
+            resolution = 1080,
+            isChunked = false
+        )
+        if (!storageResult.isSufficient) {
+            val msg = storageResult.message ?: "Insufficient storage for export"
+            Log.e(TAG, msg)
+            com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, msg, -1, null)
+            showCompletionNotification("Export Failed", msg, null)
+            broadcastFailure(msg, ErrorCode.STORAGE_FULL.code)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         val scriptRegex = Regex("""-filter_complex_script\s+["']?([^"'\s]+)["']?""")
         val scriptFilePath = scriptRegex.find(command)?.groupValues?.getOrNull(1)
@@ -527,16 +552,56 @@ class ExportService : Service() {
         val totalWeight = totalChunkDurations + finalPassDuration
         val numChunks = plan.chunkCommands.size
 
-        val projectStats = "mode=chunked numChunks=$numChunks totalDurationSecs=${plan.totalDurationSecs} isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath"
+        val projectStats = "mode=chunked numChunks=$numChunks totalDurationSecs=${plan.totalDurationSecs} isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath canStreamCopy=${plan.canStreamCopyFinalPass}"
         com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
+
+        // Storage verification
+        val storageResult = com.boostlyte.vydra.export.StorageEstimator.checkStorageAvailable(
+            directory = cacheDir,
+            durationSecs = plan.totalDurationSecs,
+            resolution = plan.resolution,
+            isChunked = true
+        )
+        if (!storageResult.isSufficient) {
+            val msg = storageResult.message ?: "Insufficient storage for export"
+            Log.e(TAG, msg)
+            cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+            com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, msg, -1, null)
+            showCompletionNotification("Export Failed", msg, null)
+            broadcastFailure(msg, ErrorCode.STORAGE_FULL.code)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return
+        }
+
+        // Encoder capability selection
+        val sharedPrefs = getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
+        val prefEncoder = sharedPrefs.getString("default_encoder", "auto") ?: "auto"
+        val encoderPref = when (prefEncoder) {
+            "hardware" -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.HARDWARE
+            "software" -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.SOFTWARE
+            else -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.AUTO
+        }
+        val selectedEncoder = com.boostlyte.vydra.export.EncoderSelector.selectEncoder(
+            preference = encoderPref,
+            targetWidth = plan.targetWidth,
+            targetHeight = plan.targetHeight,
+            fps = plan.fps
+        )
+        Log.d(TAG, "ExportService active encoder: ${selectedEncoder.backend} (${selectedEncoder.codecName})")
 
         updateNotification(0, "Exporting part 1/$numChunks...")
 
         serviceScope.launch {
             val tempFile = File(tempOutputPath)
             var accumulatedWeight = 0.0
+            val jobDir = File(cacheDir, "export_job_${System.currentTimeMillis()}").apply { mkdirs() }
+            val activeChunkGlFiles = mutableListOf<File>()
 
             try {
+                val vm = com.boostlyte.vydra.viewmodels.VideoEditingViewModel()
+                vm.setExportSettings(resolution = plan.resolution, fps = plan.fps, audioOnly = isAudioOnly)
+
                 // Execute each chunk pass sequentially
                 for ((idx, chunkCmd) in plan.chunkCommands.withIndex()) {
                     val chunkIdx = idx + 1
@@ -550,12 +615,62 @@ class ExportService : Service() {
                     Log.d(TAG, "Starting Chunk $chunkIdx/$numChunks (duration: ${chunkCmd.durationSecs}s)")
                     updateNotification(spanStart.toInt(), "Exporting part $chunkIdx/$numChunks...")
 
-                    val chunkRenderPath = chunkCmd.renderPath.ifEmpty { plan.renderPath }
+                    var activeCommand = chunkCmd.command
+                    var activeScriptFile = chunkCmd.scriptFilePath
+                    val chunkSpec = plan.chunkSpecs.getOrNull(idx)
+
+                    // Bounded per-chunk GL motion pre-rendering: only render for the active chunk
+                    if (chunkSpec != null && !FORCE_LEGACY_EXPORT) {
+                        val hasMotionClips = chunkSpec.clips.any { clip ->
+                            val motionOp = plan.operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == clip.globalIndex }
+                            val mType = motionOp?.motionType ?: clip.item.motionEffect
+                            clip.item.isImage && mType != null && mType != "none"
+                        }
+
+                        if (hasMotionClips) {
+                            updateNotification(spanStart.toInt(), "Preparing part $chunkIdx/$numChunks...")
+                            val (renderedSpec, glFiles) = vm.preRenderGlMotionForChunk(
+                                chunkSpec = chunkSpec,
+                                operations = plan.operations,
+                                cacheDir = jobDir,
+                                targetWidth = plan.targetWidth,
+                                targetHeight = plan.targetHeight,
+                                fps = plan.fps,
+                                preferredEncoder = selectedEncoder.codecName ?: "hardware"
+                            )
+                            activeChunkGlFiles.clear()
+                            activeChunkGlFiles.addAll(glFiles)
+
+                            if (glFiles.isNotEmpty()) {
+                                val updatedCmd = vm.buildChunkPassCommand(
+                                    chunkSpec = renderedSpec,
+                                    sourceFilePath = renderedSpec.clips.firstOrNull()?.item?.uri?.path ?: "",
+                                    chunkOutputPath = chunkCmd.outputPath,
+                                    fontFilePath = plan.fontFilePath,
+                                    context = this@ExportService,
+                                    totalDurationMs = plan.totalDurationSecs.toLong() * 1000L,
+                                    density = plan.density,
+                                    targetWidth = plan.targetWidth,
+                                    targetHeight = plan.targetHeight,
+                                    operations = plan.operations
+                                )
+                                activeCommand = updatedCmd.command
+                                activeScriptFile = updatedCmd.scriptFilePath
+                            }
+                        }
+                    }
+
+                    val chunkRenderPath = if (activeChunkGlFiles.isNotEmpty()) {
+                        if (selectedEncoder.isHardware) "gl_hw" else "gl_sw"
+                    } else {
+                        chunkCmd.renderPath.ifEmpty { plan.renderPath }
+                    }
+
                     val passStartIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
                     val passStartTimeMs = System.currentTimeMillis()
 
                     val result = ffmpegEngine.exportFinal(
-                        ffmpegCommand = chunkCmd.command,
+                        ffmpegCommand = activeCommand,
                         totalDurationSecs = chunkCmd.durationSecs,
                         onProgress = { p ->
                             try {
@@ -576,6 +691,14 @@ class ExportService : Service() {
                     val passEndTimeMs = System.currentTimeMillis()
                     val passEndIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
                     val passDurationSec = (passEndTimeMs - passStartTimeMs) / 1000.0
+
+                    // Clean up active chunk GL intermediates immediately after chunk export
+                    for (f in activeChunkGlFiles) {
+                        try {
+                            if (f.exists()) f.delete()
+                        } catch (_: Exception) {}
+                    }
+                    activeChunkGlFiles.clear()
 
                     // Release FFmpegKit sessions fully before starting next chunk
                     try {
@@ -600,7 +723,8 @@ class ExportService : Service() {
                                 val errorMsg = "Chunk $chunkIdx/$numChunks output file missing or empty"
                                 Log.e(TAG, errorMsg)
                                 cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
-                                com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, errorMsg, -1, chunkCmd.scriptFilePath)
+                                jobDir.deleteRecursively()
+                                com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, errorMsg, -1, activeScriptFile)
                                 showCompletionNotification("Export Failed", errorMsg, null)
                                 broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                                 return@launch
@@ -615,13 +739,14 @@ class ExportService : Service() {
                                 context = this@ExportService,
                                 passName = "chunk_$chunkIdx",
                                 returnCode = returnCode,
-                                scriptPath = chunkCmd.scriptFilePath,
+                                scriptPath = activeScriptFile,
                                 renderPath = chunkRenderPath,
                                 ffmpegLogs = errorLines
                             )
                             Log.e(TAG, "$stageName failed: ${result.error}")
                             cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
-                            com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "$stageName failed: ${result.error}", returnCode, chunkCmd.scriptFilePath)
+                            jobDir.deleteRecursively()
+                            com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "$stageName failed: ${result.error}", returnCode, activeScriptFile)
                             showCompletionNotification("Export Failed", "Error during $stageName", null)
                             broadcastFailure("$stageName failed: ${result.error}", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                             return@launch
@@ -629,6 +754,7 @@ class ExportService : Service() {
                         is FFmpegRenderEngine.RenderResult.Cancelled -> {
                             Log.d(TAG, "Export was cancelled during chunk $chunkIdx/$numChunks")
                             cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                            jobDir.deleteRecursively()
                             com.boostlyte.vydra.utils.AppLogger.logExportCancelled(this@ExportService)
                             val manager = getSystemService(NotificationManager::class.java)
                             manager?.cancel(NOTIFICATION_ID)
@@ -641,14 +767,6 @@ class ExportService : Service() {
                 }
 
                 // All chunks succeeded! Now execute final pass.
-                val finalPassCmd = plan.finalPassCommand
-                if (finalPassCmd == null) {
-                    val errorMsg = "Missing final pass command in chunk plan"
-                    cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
-                    broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
-                    return@launch
-                }
-
                 val finalSpanStart = if (totalWeight > 0.0) (totalChunkDurations / totalWeight) * 100.0 else (numChunks.toDouble() / (numChunks + 1)) * 100.0
                 val finalSpanEnd = 100.0
                 var lastReportedProgress = -1
@@ -661,8 +779,31 @@ class ExportService : Service() {
                 Log.d(TAG, "Starting final pass assembly (total duration: ${plan.totalDurationSecs}s)")
                 updateNotification(finalSpanStart.toInt(), "Assembling final video...")
 
+                val finalPassCmdStr: String
+                var concatListFile: File? = null
+
+                if (plan.canStreamCopyFinalPass) {
+                    Log.d(TAG, "Using fast stream copy concat demuxer for final chunk assembly")
+                    val concatContent = StringBuilder()
+                    for (chunkCmd in plan.chunkCommands) {
+                        val f = File(chunkCmd.outputPath)
+                        concatContent.append("file '${f.absolutePath}'\n")
+                    }
+                    concatListFile = File(jobDir, "final_concat_list.txt")
+                    concatListFile.writeText(concatContent.toString())
+                    finalPassCmdStr = "-y -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -c copy \"$tempOutputPath\""
+                } else {
+                    finalPassCmdStr = plan.finalPassCommand ?: run {
+                        val errorMsg = "Missing final pass command in chunk plan"
+                        cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                        jobDir.deleteRecursively()
+                        broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                        return@launch
+                    }
+                }
+
                 val finalResult = ffmpegEngine.exportFinal(
-                    ffmpegCommand = finalPassCmd,
+                    ffmpegCommand = finalPassCmdStr,
                     totalDurationSecs = plan.totalDurationSecs,
                     onProgress = { p ->
                         try {
@@ -755,6 +896,7 @@ class ExportService : Service() {
 
                 // Guaranteed cleanup of chunk temp files and plan file
                 cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                jobDir.deleteRecursively()
                 try {
                     if (tempFile.exists()) tempFile.delete()
                     cacheDir.listFiles { f -> f.name.startsWith("filter_script_") && f.name.endsWith(".txt") }?.forEach { it.delete() }
@@ -763,11 +905,16 @@ class ExportService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Chunked export exception", e)
                 cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                jobDir.deleteRecursively()
                 com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, e.message ?: "Unknown error", -1, null)
                 showCompletionNotification("Export Failed", e.message ?: "Unknown error", null)
                 broadcastFailure(e.message ?: "Unknown error", ErrorCode.UNEXPECTED_CRASH.code)
             } finally {
                 try {
+                    for (f in activeChunkGlFiles) {
+                        try { if (f.exists()) f.delete() } catch (_: Exception) {}
+                    }
+                    jobDir.deleteRecursively()
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 } catch (e: Exception) {

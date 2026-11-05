@@ -6394,6 +6394,16 @@ class VideoEditingActivity : AppCompatActivity() {
         exportScreen.findViewById<TextView>(R.id.tvExportPercentage)?.text = "0%"
         exportScreen.findViewById<android.widget.ProgressBar>(R.id.exportProgressBar)?.progress = 0
 
+        // Start ExportService in foreground immediately before expensive preparation begins (Android 8.0+ compliance)
+        val earlyIntent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
+            action = com.boostlyte.vydra.services.ExportService.ACTION_PREPARE_EXPORT
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(earlyIntent)
+        } else {
+            startService(earlyIntent)
+        }
+
         lifecycleScope.launch(Dispatchers.Main) {
             var tempOutputFile: File? = null
             var concatFile: File? = null
@@ -6531,6 +6541,10 @@ class VideoEditingActivity : AppCompatActivity() {
                 if (prepResult == null) {
                     tempOutputFile?.let { if (it.exists()) it.delete() }
                     exportScreen.visibility = View.GONE
+                    val cancelIntent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
+                        action = com.boostlyte.vydra.services.ExportService.ACTION_CANCEL_EXPORT
+                    }
+                    startService(cancelIntent)
                     val errMsg = "Cannot access project source media or build export command"
                     viewModel.exportError(errMsg)
                     showProErrorDialog(ErrorCode.FILE_NOT_FOUND, errMsg)
@@ -6569,6 +6583,10 @@ class VideoEditingActivity : AppCompatActivity() {
                 tempOutputFile?.let { if (it.exists()) it.delete() }
                 concatFile?.let { if (it.exists()) it.delete() }
                 exportScreen.visibility = View.GONE
+                val cancelIntent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
+                    action = com.boostlyte.vydra.services.ExportService.ACTION_CANCEL_EXPORT
+                }
+                startService(cancelIntent)
                 val err = e.message ?: "Failed to start export"
                 viewModel.exportError(err)
                 Log.e(TAG, "Export start exception: $err", e)

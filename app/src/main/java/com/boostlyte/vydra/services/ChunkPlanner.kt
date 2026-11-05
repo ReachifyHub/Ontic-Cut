@@ -55,7 +55,16 @@ data class ChunkExportPlan(
     val chunkTempPaths: List<String> = emptyList(),
     val totalDurationSecs: Double = 0.0,
     val chunkDurationsSecs: List<Double> = emptyList(),
-    val renderPath: String = "legacy"
+    val renderPath: String = "legacy",
+    val chunkSpecs: List<ChunkSpec> = emptyList(),
+    val targetWidth: Int = 1280,
+    val targetHeight: Int = 720,
+    val fps: Int = 30,
+    val resolution: Int = 720,
+    val density: Float = 1.0f,
+    val fontFilePath: String? = null,
+    val operations: List<EditOperation> = emptyList(),
+    val canStreamCopyFinalPass: Boolean = false
 ) : Serializable
 
 /**
@@ -65,12 +74,12 @@ data class ChunkExportPlan(
  */
 object ChunkPlanner {
 
-    const val CHUNK_TRIGGER_THRESHOLD = 24
-    const val MAX_CHUNK_SIZE = 16
+    const val CHUNK_TRIGGER_THRESHOLD = 16
+    const val MAX_CHUNK_SIZE = 10
 
     /**
      * Plans chunks for a given sequence of clips and transitions.
-     * If sequenceItems.size <= CHUNK_TRIGGER_THRESHOLD (24), single-pass graph is preserved.
+     * If sequenceItems.size <= CHUNK_TRIGGER_THRESHOLD (16), single-pass graph is preserved.
      */
     fun plan(
         sequenceItems: List<EditOperation.MergeItem>,
