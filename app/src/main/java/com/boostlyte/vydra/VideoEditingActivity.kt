@@ -6445,11 +6445,47 @@ class VideoEditingActivity : AppCompatActivity() {
                         }
                     }
 
+                    // Pre-resolve all sequence items and background audio to ensure local file paths exist
+                    // (Resolves content:// URIs copied to cache, preventing MediaCodec or FFmpeg crash on raw URIs)
+                    val resolvedOperations = project.operations.map { op ->
+                        when (op) {
+                            is EditOperation.Merge -> {
+                                val resolvedItems = op.items.map { item ->
+                                    val itemPath = if (item.uri.scheme == "file") {
+                                        item.uri.path
+                                    } else {
+                                        getFilePathFromUri(item.uri) ?: copyContentUriToTempFile(item.uri, "export_clip", if (item.isImage) ".jpg" else ".mp4")?.absolutePath
+                                    }
+                                    if (itemPath != null && File(itemPath).exists()) {
+                                        item.copy(uri = Uri.fromFile(File(itemPath)))
+                                    } else {
+                                        item
+                                    }
+                                }
+                                op.copy(items = resolvedItems)
+                            }
+                            is EditOperation.AddBackgroundAudio -> {
+                                val audioPath = if (op.audioUri.scheme == "file") {
+                                    op.audioUri.path
+                                } else {
+                                    getFilePathFromUri(op.audioUri) ?: copyContentUriToTempFile(op.audioUri, "export_audio", ".mp3")?.absolutePath
+                                }
+                                if (audioPath != null && File(audioPath).exists()) {
+                                    op.copy(audioUri = Uri.fromFile(File(audioPath)))
+                                } else {
+                                    op
+                                }
+                            }
+                            else -> op
+                        }
+                    }
+
                     val chunkPlan = viewModel.buildChunkExportPlan(
                         sourceFilePath = sourceFilePath,
                         outputFilePath = tempOutputPath,
                         fontFilePath = fontFilePath,
-                        context = this@VideoEditingActivity
+                        context = this@VideoEditingActivity,
+                        operationsOverride = resolvedOperations
                     )
 
                     if (chunkPlan == null) {

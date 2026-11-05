@@ -2448,9 +2448,11 @@ class VideoEditingViewModel : ViewModel() {
         sourceFilePath: String,
         outputFilePath: String,
         fontFilePath: String? = null,
-        context: Context? = null
+        context: Context? = null,
+        operationsOverride: List<EditOperation>? = null
     ): ChunkExportPlan? {
         val currentProject = _project.value ?: return null
+        val activeOperations = operationsOverride ?: currentProject.operations
 
         if (FORCE_LEGACY_EXPORT) {
             val singlePassCmd = buildConsolidatedFFmpegCommand(
@@ -2458,7 +2460,7 @@ class VideoEditingViewModel : ViewModel() {
                 outputFilePath = outputFilePath,
                 fontFilePath = fontFilePath,
                 context = context,
-                operationsOverride = currentProject.operations
+                operationsOverride = activeOperations
             ) ?: return null
             return ChunkExportPlan(
                 isChunked = false,
@@ -2467,14 +2469,14 @@ class VideoEditingViewModel : ViewModel() {
             )
         }
 
-        val mergeOp = currentProject.operations.filterIsInstance<EditOperation.Merge>().firstOrNull()
-        val transitions = currentProject.operations.filterIsInstance<EditOperation.Transition>()
+        val mergeOp = activeOperations.filterIsInstance<EditOperation.Merge>().firstOrNull()
+        val transitions = activeOperations.filterIsInstance<EditOperation.Transition>()
 
-        val trimOp = currentProject.operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
-        val speedOp = currentProject.operations.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()
-        val reverseOp = currentProject.operations.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()
-        val mirrorOp = currentProject.operations.filterIsInstance<EditOperation.MirrorMain>().lastOrNull()
-        val maskMainOp = currentProject.operations.filterIsInstance<EditOperation.MaskMain>().lastOrNull()
+        val trimOp = activeOperations.filterIsInstance<EditOperation.Trim>().lastOrNull()
+        val speedOp = activeOperations.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()
+        val reverseOp = activeOperations.filterIsInstance<EditOperation.ReverseMain>().lastOrNull()
+        val mirrorOp = activeOperations.filterIsInstance<EditOperation.MirrorMain>().lastOrNull()
+        val maskMainOp = activeOperations.filterIsInstance<EditOperation.MaskMain>().lastOrNull()
         val maskConfig = maskMainOp?.maskConfig ?: EditOperation.MaskConfig()
         val isMirrored = mirrorOp?.isMirrored ?: false
         val isReversed = reverseOp?.isReversed ?: false
@@ -2579,7 +2581,7 @@ class VideoEditingViewModel : ViewModel() {
         // Pre-render GL motion intermediates for static image clips with motion effects (Milestone M1 & M2)
         val (effectiveSequenceItems, overallRenderPath) = preRenderGlMotionIntermediates(
             items = allSequenceItems,
-            operations = currentProject.operations,
+            operations = activeOperations,
             cacheDir = chunkTempDir,
             targetWidth = targetWidth,
             targetHeight = targetHeight,
@@ -2594,11 +2596,11 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         val updatedOperations = if (effectiveSequenceItems.size > 1 && mergeOp != null) {
-            currentProject.operations.map { op ->
+            activeOperations.map { op ->
                 if (op is EditOperation.Merge) op.copy(items = effectiveSequenceItems.drop(1)) else op
             }
         } else {
-            currentProject.operations
+            activeOperations
         }
 
         // TRIGGER CHECK: If <= 24, execute single-pass export using GL intermediates if available (Milestone M3)
