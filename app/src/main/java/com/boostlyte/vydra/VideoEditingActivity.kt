@@ -991,11 +991,19 @@ class VideoEditingActivity : AppCompatActivity() {
     private fun showProErrorDialog(errorCode: ErrorCode, technicalLog: String) {
         if (isFinishing || isDestroyed) return
 
-        val plainExplanation = when (errorCode) {
+        var plainExplanation = when (errorCode) {
             ErrorCode.GALLERY_SAVE_FAILED -> "Failed to save the finished video to your device gallery. Check device storage space and permissions."
             ErrorCode.FFMPEG_EXECUTION_FAILED -> "Video processing encountered an error during rendering. Your timeline and cuts are preserved."
             ErrorCode.UNEXPECTED_CRASH -> "An unexpected system issue occurred during export. Your timeline has been saved."
+            ErrorCode.STORAGE_FULL -> "Export aborted because device storage is full. Please free up space and try again."
+            ErrorCode.FILE_NOT_FOUND -> "One or more media files could not be found or read. Please ensure all clips and audio files exist on your device."
             else -> errorCode.description
+        }
+
+        if (technicalLog.contains("StringUri") || technicalLog.contains("android.net.Uri")) {
+            plainExplanation = "Could not access one of the project's media files. Please check that all imported photos, videos, and music files are still accessible on your device."
+        } else if (technicalLog.contains("ENOSPC") || technicalLog.contains("No space left", ignoreCase = true)) {
+            plainExplanation = "Your device storage is full. Please free up storage space and try exporting again."
         }
 
         runOnUiThread {
@@ -6490,6 +6498,17 @@ class VideoEditingActivity : AppCompatActivity() {
                         }
                     }
 
+                    val hasUnreadableClip = resolvedOperations.filterIsInstance<EditOperation.Merge>().any { merge ->
+                        merge.items.any { item ->
+                            val p = item.uri.path
+                            p == null || !File(p).exists() || !File(p).canRead()
+                        }
+                    }
+                    if (hasUnreadableClip) {
+                        Log.e(TAG, "Export aborted: one or more clips in timeline are not readable local files")
+                        return@withContext null
+                    }
+
                     val chunkPlan = viewModel.buildChunkExportPlan(
                         sourceFilePath = sourceFilePath,
                         outputFilePath = tempOutputPath,
@@ -6502,7 +6521,7 @@ class VideoEditingActivity : AppCompatActivity() {
                         return@withContext null
                     }
 
-                    if (!VideoEditingViewModel.FORCE_LEGACY_EXPORT && chunkPlan.isChunked) {
+                    if (chunkPlan.isChunked) {
                         val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.bin")
                         java.io.ObjectOutputStream(java.io.FileOutputStream(planFile)).use {
                             it.writeObject(chunkPlan)

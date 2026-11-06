@@ -30,7 +30,7 @@ import com.boostlyte.vydra.services.ChunkClip
 class VideoEditingViewModel : ViewModel() {
 
     companion object {
-        const val FORCE_LEGACY_EXPORT = false
+        const val FORCE_LEGACY_EXPORT = true
         private const val TAG = "VideoEditingViewModel"
         const val MAX_UNDO_STACK_SIZE = 30
     }
@@ -723,7 +723,8 @@ class VideoEditingViewModel : ViewModel() {
         outputFilePath: String,
         fontFilePath: String? = null,
         context: Context? = null,
-        operationsOverride: List<EditOperation>? = null
+        operationsOverride: List<EditOperation>? = null,
+        encoderOverride: String? = null
     ): String? {
         val currentProject = _project.value ?: return null
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
@@ -1500,9 +1501,10 @@ class VideoEditingViewModel : ViewModel() {
                     480 -> "2M"
                     else -> "1M"
                 }
-                val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
-                    ?.getString("default_encoder", "software") ?: "software"
-                val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
+                val videoCodec = encoderOverride ?: run {
+                    val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+                    enc.ffmpegVideoCodecArgs
+                }
                 cmd.append(" $videoCodec")
                 
                 if (!audioMuted) {
@@ -1784,9 +1786,10 @@ class VideoEditingViewModel : ViewModel() {
                 480 -> "2M"
                 else -> "1M"
             }
-            val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
-                ?.getString("default_encoder", "software") ?: "software"
-            val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
+            val videoCodec = encoderOverride ?: run {
+                val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+                enc.ffmpegVideoCodecArgs
+            }
             // If there are no video filters, we still need to apply the scale and fps output params
             if (!hasVideoFilters) {
                 cmd.append(" $videoCodec -vf scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2:color=black -r ${_exportFps.value}")
@@ -1833,7 +1836,8 @@ class VideoEditingViewModel : ViewModel() {
         density: Float,
         targetWidth: Int,
         targetHeight: Int,
-        operations: List<EditOperation>
+        operations: List<EditOperation>,
+        encoderOverride: String? = null
     ): ChunkCommand {
         val cmd = StringBuilder("-y")
         var inputIndex = 0
@@ -2198,9 +2202,10 @@ class VideoEditingViewModel : ViewModel() {
             480 -> "2M"
             else -> "1M"
         }
-        val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
-            ?.getString("default_encoder", "software") ?: "software"
-        val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
+        val videoCodec = encoderOverride ?: run {
+            val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+            enc.ffmpegVideoCodecArgs
+        }
 
         cmd.append(" -map \"$finalVideoLabel\" -an $videoCodec")
         val formattedDur = String.format(java.util.Locale.US, "%.3f", chunkSpec.durationMs / 1000.0).trimEnd('0').trimEnd('.')
@@ -2227,7 +2232,8 @@ class VideoEditingViewModel : ViewModel() {
         context: Context?,
         targetWidth: Int,
         targetHeight: Int,
-        operations: List<EditOperation>
+        operations: List<EditOperation>,
+        encoderOverride: String? = null
     ): ChunkCommand {
         val cmd = StringBuilder("-y")
         var inputIndex = 0
@@ -2414,9 +2420,10 @@ class VideoEditingViewModel : ViewModel() {
             480 -> "2M"
             else -> "1M"
         }
-        val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
-            ?.getString("default_encoder", "software") ?: "software"
-        val videoCodec = if (defaultEncoder == "hardware") "-c:v h264_mediacodec -pix_fmt yuv420p -b:v $bitrate" else "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
+        val videoCodec = encoderOverride ?: run {
+            val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+            enc.ffmpegVideoCodecArgs
+        }
 
         cmd.append(" -map \"$currentV\"")
         if (currentAudioLabel != null) {
@@ -2455,20 +2462,6 @@ class VideoEditingViewModel : ViewModel() {
         val currentProject = _project.value ?: return null
         val activeOperations = operationsOverride ?: currentProject.operations
 
-        if (FORCE_LEGACY_EXPORT) {
-            val singlePassCmd = buildConsolidatedFFmpegCommand(
-                sourceFilePath = sourceFilePath,
-                outputFilePath = outputFilePath,
-                fontFilePath = fontFilePath,
-                context = context,
-                operationsOverride = activeOperations
-            ) ?: return null
-            return ChunkExportPlan(
-                isChunked = false,
-                singlePassCommand = singlePassCmd,
-                renderPath = "legacy"
-            )
-        }
 
         val mergeOp = activeOperations.filterIsInstance<EditOperation.Merge>().firstOrNull()
         val transitions = activeOperations.filterIsInstance<EditOperation.Transition>()
@@ -2577,62 +2570,40 @@ class VideoEditingViewModel : ViewModel() {
         val chunkTempDir = context?.cacheDir ?: File("/tmp")
         val timestamp = System.currentTimeMillis()
 
-        val preferredEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)?.getString("default_encoder", "hardware") ?: "hardware"
-
-        // Select capability-aware encoder path
-        val defaultEncoder = context?.getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)?.getString("default_encoder", "hardware") ?: "hardware"
-        val selectedEncoder = com.boostlyte.vydra.export.EncoderSelector.selectEncoder(
-            preference = if (defaultEncoder == "software") com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.SOFTWARE else com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.AUTO,
-            targetWidth = targetWidth,
-            targetHeight = targetHeight,
-            fps = _exportFps.value
-        )
-        val overallRenderPath = if (FORCE_LEGACY_EXPORT) {
-            "legacy"
-        } else if (selectedEncoder.isHardware) {
-            "gl_hw"
-        } else {
-            "gl_sw"
+        val bitrate = when (_exportResolution.value) {
+            2160 -> "30M"
+            1440 -> "16M"
+            1080 -> "8M"
+            720 -> "5M"
+            480 -> "2M"
+            else -> "1M"
         }
 
-        // TRIGGER CHECK: If <= 16, execute single-pass export using GL intermediates if available
+        // Select capability-aware encoder path consistently for the entire export
+        val selectedEncoder = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(
+            context = context,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+            fps = _exportFps.value,
+            bitrate = bitrate
+        )
+        val overallRenderPath = "legacy"
+
+        // TRIGGER CHECK: If <= 16, execute single-pass export using legacy FFmpeg directly (no GL intermediates)
         if (allSequenceItems.size <= ChunkPlanner.CHUNK_TRIGGER_THRESHOLD) {
-            val (effectiveSequenceItems, singlePassRenderPath) = preRenderGlMotionIntermediates(
-                items = allSequenceItems,
-                operations = activeOperations,
-                cacheDir = chunkTempDir,
-                targetWidth = targetWidth,
-                targetHeight = targetHeight,
-                fps = _exportFps.value,
-                preferredEncoder = preferredEncoder
-            )
-
-            val effectiveSourcePath = if (effectiveSequenceItems.isNotEmpty() && !effectiveSequenceItems[0].isImage) {
-                effectiveSequenceItems[0].uri.path ?: sourceFilePath
-            } else {
-                sourceFilePath
-            }
-
-            val updatedOperations = if (effectiveSequenceItems.size > 1 && mergeOp != null) {
-                activeOperations.map { op ->
-                    if (op is EditOperation.Merge) op.copy(items = effectiveSequenceItems.drop(1)) else op
-                }
-            } else {
-                activeOperations
-            }
-
             val singlePassCmd = buildConsolidatedFFmpegCommand(
-                sourceFilePath = effectiveSourcePath,
+                sourceFilePath = sourceFilePath,
                 outputFilePath = outputFilePath,
                 fontFilePath = fontFilePath,
                 context = context,
-                operationsOverride = updatedOperations
+                operationsOverride = activeOperations,
+                encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
             ) ?: return null
 
             return ChunkExportPlan(
                 isChunked = false,
                 singlePassCommand = singlePassCmd,
-                renderPath = singlePassRenderPath,
+                renderPath = overallRenderPath,
                 targetWidth = targetWidth,
                 targetHeight = targetHeight,
                 fps = _exportFps.value,
@@ -2643,8 +2614,7 @@ class VideoEditingViewModel : ViewModel() {
             )
         }
 
-        // Large sequence (> 16 inputs) -> Plan Chunks purely without full-project GL pre-processing upfront.
-        // Bounded per-chunk GL motion is rendered on-demand inside ExportService per chunk.
+        // Large sequence (> 16 inputs) -> Plan Chunks purely with legacy FFmpeg without GL pre-processing upfront.
         val plan = ChunkPlanner.plan(allSequenceItems, transitions)
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
 
@@ -2665,7 +2635,8 @@ class VideoEditingViewModel : ViewModel() {
                 density = density,
                 targetWidth = targetWidth,
                 targetHeight = targetHeight,
-                operations = activeOperations
+                operations = activeOperations,
+                encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
             )
             chunkCommands.add(chunkCmd.copy(renderPath = overallRenderPath))
         }
@@ -2677,7 +2648,8 @@ class VideoEditingViewModel : ViewModel() {
             context = context,
             targetWidth = targetWidth,
             targetHeight = targetHeight,
-            operations = activeOperations
+            operations = activeOperations,
+            encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
         )
 
         // Determine if final pass can safely use fast stream copy (-c copy concat demuxer)
@@ -2711,6 +2683,10 @@ class VideoEditingViewModel : ViewModel() {
      * Renders motion MP4 clips only for image items in the active chunk with motion effects.
      * Intermediate files are deleted immediately after that chunk completes.
      */
+    /**
+     * Legacy no-op stub: GL motion rendering during export is disabled.
+     */
+    @Deprecated("Legacy FFmpeg is the sole rendering engine. GL motion rendering is disabled.")
     fun preRenderGlMotionForChunk(
         chunkSpec: ChunkSpec,
         operations: List<EditOperation>,
@@ -2720,70 +2696,13 @@ class VideoEditingViewModel : ViewModel() {
         fps: Int,
         preferredEncoder: String = "hardware"
     ): Pair<ChunkSpec, List<File>> {
-        if (FORCE_LEGACY_EXPORT) {
-            return Pair(chunkSpec, emptyList())
-        }
-        val createdFiles = mutableListOf<File>()
-        val updatedClips = mutableListOf<ChunkClip>()
-        val timestamp = System.currentTimeMillis()
-
-        for (clip in chunkSpec.clips) {
-            val item = clip.item
-            val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == clip.globalIndex }
-            val clipMotionType = motionOp?.motionType ?: item.motionEffect
-
-            if (item.isImage && clipMotionType != null && clipMotionType != "none") {
-                val imagePath = item.uri.path ?: ""
-                val intermediateFile = File(cacheDir, "gl_chunk_${chunkSpec.chunkIndex}_clip_${clip.localIndex}_${timestamp}.mp4")
-                val durationSec = if (item.trimmedDurationMs > 0L) {
-                    item.trimmedDurationMs / 1000.0
-                } else if (item.trimEndMs > item.trimStartMs) {
-                    (item.trimEndMs - item.trimStartMs) / 1000.0
-                } else if (item.durationMs > 0L) {
-                    item.durationMs / 1000.0
-                } else {
-                    5.0
-                }
-
-                val glResult = com.boostlyte.vydra.render.gl.GlMotionRenderer.renderMotionClip(
-                    imagePath = imagePath,
-                    outputPath = intermediateFile.absolutePath,
-                    targetWidth = targetWidth,
-                    targetHeight = targetHeight,
-                    durationSecs = durationSec,
-                    fps = fps,
-                    motionType = clipMotionType,
-                    preferredEncoder = preferredEncoder
-                )
-
-                if (glResult is com.boostlyte.vydra.render.gl.GlMotionRenderer.GlRenderResult.Success && File(glResult.outputPath).exists()) {
-                    Log.d(TAG, "Chunk ${chunkSpec.chunkIndex} GL motion render succeeded for local clip ${clip.localIndex} (${glResult.renderPath}) -> ${glResult.outputPath}")
-                    createdFiles.add(intermediateFile)
-                    updatedClips.add(
-                        clip.copy(
-                            item = item.copy(
-                                uri = android.net.Uri.fromFile(intermediateFile),
-                                isImage = false,
-                                motionEffect = null
-                            )
-                        )
-                    )
-                } else {
-                    Log.w(TAG, "Chunk ${chunkSpec.chunkIndex} GL motion render failed for local clip ${clip.localIndex}, falling back to legacy FFmpeg zoompan")
-                    updatedClips.add(clip)
-                }
-            } else {
-                updatedClips.add(clip)
-            }
-        }
-
-        return Pair(chunkSpec.copy(clips = updatedClips), createdFiles)
+        return Pair(chunkSpec, emptyList())
     }
 
     /**
-     * Pre-renders image sequence items with motion effects into intermediate MP4 files using GlMotionRenderer.
-     * Silent fallback chain: gl_hw -> gl_sw -> legacy.
+     * Legacy no-op stub: GL motion rendering during export is disabled.
      */
+    @Deprecated("Legacy FFmpeg is the sole rendering engine. GL motion rendering is disabled.")
     fun preRenderGlMotionIntermediates(
         items: List<EditOperation.MergeItem>,
         operations: List<EditOperation>,
@@ -2793,63 +2712,7 @@ class VideoEditingViewModel : ViewModel() {
         fps: Int,
         preferredEncoder: String = "hardware"
     ): Pair<List<EditOperation.MergeItem>, String> {
-        if (FORCE_LEGACY_EXPORT) {
-            return Pair(items, "legacy")
-        }
-        val updatedItems = mutableListOf<EditOperation.MergeItem>()
-        var anyGlSuccess = false
-        var anyGlSw = false
-        val timestamp = System.currentTimeMillis()
-
-        for ((idx, item) in items.withIndex()) {
-            val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == idx }
-            val clipMotionType = motionOp?.motionType ?: item.motionEffect
-
-            if (item.isImage && clipMotionType != null && clipMotionType != "none") {
-                val imagePath = item.uri.path ?: ""
-                val intermediateFile = File(cacheDir, "gl_motion_${idx}_${timestamp}.mp4")
-                val durationSec = (item.trimEndMs - item.trimStartMs).coerceAtLeast(100L) / 1000.0
-
-                val glResult = com.boostlyte.vydra.render.gl.GlMotionRenderer.renderMotionClip(
-                    imagePath = imagePath,
-                    outputPath = intermediateFile.absolutePath,
-                    targetWidth = targetWidth,
-                    targetHeight = targetHeight,
-                    durationSecs = durationSec,
-                    fps = fps,
-                    motionType = clipMotionType,
-                    preferredEncoder = preferredEncoder
-                )
-
-                if (glResult is com.boostlyte.vydra.render.gl.GlMotionRenderer.GlRenderResult.Success && File(glResult.outputPath).exists()) {
-                    Log.d(TAG, "GL motion render succeeded for item $idx (${glResult.renderPath}) -> ${glResult.outputPath}")
-                    anyGlSuccess = true
-                    if (glResult.renderPath == "gl_sw") {
-                        anyGlSw = true
-                    }
-                    updatedItems.add(
-                        item.copy(
-                            uri = android.net.Uri.fromFile(intermediateFile),
-                            isImage = false,
-                            motionEffect = null
-                        )
-                    )
-                } else {
-                    Log.w(TAG, "GL motion render failed for item $idx, using legacy FFmpeg zoompan")
-                    updatedItems.add(item)
-                }
-            } else {
-                updatedItems.add(item)
-            }
-        }
-
-        val overallRenderPath = if (anyGlSuccess) {
-            if (anyGlSw) "gl_sw" else "gl_hw"
-        } else {
-            "legacy"
-        }
-
-        return Pair(updatedItems, overallRenderPath)
+        return Pair(items, "legacy")
     }
 
     /**

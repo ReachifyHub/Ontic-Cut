@@ -51,24 +51,14 @@ object EncoderSelector {
         val safeH = ((targetHeight + 1) / 2) * 2
 
         if (preference == EncoderPreference.SOFTWARE) {
-            val swCodec = findSoftwareMediaCodec(safeW, safeH, fps)
-            return if (swCodec != null) {
-                SelectedEncoder(
-                    backend = EncoderBackend.SOFTWARE_MEDIACODEC,
-                    codecName = swCodec,
-                    ffmpegVideoCodecArgs = "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p",
-                    isHardware = false,
-                    isSupportedForTarget = true
-                )
-            } else {
-                SelectedEncoder(
-                    backend = EncoderBackend.SOFTWARE_LIBX264,
-                    codecName = null,
-                    ffmpegVideoCodecArgs = "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p",
-                    isHardware = false,
-                    isSupportedForTarget = true
-                )
-            }
+            Log.d(TAG, "Software encoder explicitly requested, using libx264")
+            return SelectedEncoder(
+                backend = EncoderBackend.SOFTWARE_LIBX264,
+                codecName = null,
+                ffmpegVideoCodecArgs = "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p",
+                isHardware = false,
+                isSupportedForTarget = true
+            )
         }
 
         // Try Hardware first if AUTO or HARDWARE
@@ -84,31 +74,41 @@ object EncoderSelector {
             )
         }
 
-        if (preference == EncoderPreference.HARDWARE) {
-            Log.w(TAG, "Hardware encoder requested but not supported for ${safeW}x${safeH}@${fps}fps, falling back to software")
-        }
+        // Hardware unavailable or unsupported for target parameters -> log exact reason and fall back to libx264
+        Log.w(TAG, "Hardware encoder unavailable/unsupported for ${safeW}x${safeH}@${fps}fps, falling back to software libx264")
 
-        // Fallback to Software MediaCodec
-        val swCodec = findSoftwareMediaCodec(safeW, safeH, fps)
-        if (swCodec != null) {
-            Log.d(TAG, "Selected software MediaCodec encoder: $swCodec")
-            return SelectedEncoder(
-                backend = EncoderBackend.SOFTWARE_MEDIACODEC,
-                codecName = swCodec,
-                ffmpegVideoCodecArgs = "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p",
-                isHardware = false,
-                isSupportedForTarget = true
-            )
-        }
-
-        // Default to libx264
-        Log.d(TAG, "Selected software libx264 encoder fallback")
         return SelectedEncoder(
             backend = EncoderBackend.SOFTWARE_LIBX264,
             codecName = null,
             ffmpegVideoCodecArgs = "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p",
             isHardware = false,
             isSupportedForTarget = true
+        )
+    }
+
+    /**
+     * Resolves user preference from vydra_prefs ('default_encoder') and returns a validated encoder.
+     */
+    fun getEffectiveEncoder(
+        context: android.content.Context?,
+        targetWidth: Int = 1280,
+        targetHeight: Int = 720,
+        fps: Int = 30,
+        bitrate: String = "8M"
+    ): SelectedEncoder {
+        val prefs = context?.getSharedPreferences("vydra_prefs", android.content.Context.MODE_PRIVATE)
+        val defaultEncoder = prefs?.getString("default_encoder", "hardware") ?: "hardware"
+        val pref = if (defaultEncoder.equals("software", ignoreCase = true)) {
+            EncoderPreference.SOFTWARE
+        } else {
+            EncoderPreference.HARDWARE
+        }
+        return selectEncoder(
+            preference = pref,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+            fps = fps,
+            bitrate = bitrate
         )
     }
 
