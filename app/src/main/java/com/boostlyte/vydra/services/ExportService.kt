@@ -110,11 +110,25 @@ class ExportService : Service() {
             val planFile = File(chunkPlanFilePath)
             if (planFile.exists()) {
                 val chunkPlan = try {
-                    java.io.ObjectInputStream(java.io.FileInputStream(planFile)).use {
-                        it.readObject() as? ChunkExportPlan
+                    if (planFile.name.endsWith(".json")) {
+                        com.boostlyte.vydra.utils.ProjectSerializer.gson.fromJson(
+                            planFile.readText(),
+                            ChunkExportPlan::class.java
+                        )
+                    } else {
+                        try {
+                            java.io.ObjectInputStream(java.io.FileInputStream(planFile)).use {
+                                it.readObject() as? ChunkExportPlan
+                            }
+                        } catch (eBin: Exception) {
+                            com.boostlyte.vydra.utils.ProjectSerializer.gson.fromJson(
+                                planFile.readText(),
+                                ChunkExportPlan::class.java
+                            )
+                        }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error deserializing chunk plan: ${e.message}", e)
+                    Log.e(TAG, "Error deserializing chunk plan from ${planFile.absolutePath}: ${e.message}", e)
                     null
                 }
 
@@ -622,6 +636,31 @@ class ExportService : Service() {
 
                         Log.d(TAG, "Starting Chunk $chunkIdx/$numChunks (duration: ${chunkCmd.durationSecs}s, encoder: ${if (currentEncoderIsHardware) "hardware" else "software"})")
                         updateNotification(spanStart.toInt(), "Exporting part $chunkIdx/$numChunks...")
+
+                        // Internal logging for every clip entering this chunk
+                        val chunkSpec = plan.chunkSpecs.getOrNull(idx)
+                        if (chunkSpec != null) {
+                            for (clip in chunkSpec.clips) {
+                                val origUriStr = clip.originalUriString ?: clip.item.uri.toString()
+                                val scheme = try { clip.item.uri.scheme } catch (e: Exception) { null }
+                                val resolvedPath = clip.resolvedLocalPath ?: clip.item.uri.path
+                                val file = resolvedPath?.let { File(it) }
+                                val exists = file?.exists() == true
+                                val length = if (exists) file?.length() ?: 0L else 0L
+                                Log.i(
+                                    TAG,
+                                    "Chunk media resolution: chunk=$chunkIdx, clipIndex=${clip.localIndex} (globalIndex=${clip.globalIndex}), " +
+                                    "origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', exists=$exists, size=$length bytes"
+                                )
+                                if (!exists || length == 0L) {
+                                    Log.e(
+                                        TAG,
+                                        "Chunk media resolution failure at chunk=$chunkIdx, clipIndex=${clip.localIndex}: " +
+                                        "origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', stage='handleChunkedExport'"
+                                    )
+                                }
+                            }
+                        }
 
                         val activeCommand = chunkCmd.command
                         val activeScriptFile = chunkCmd.scriptFilePath

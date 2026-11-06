@@ -4268,6 +4268,7 @@ class VideoEditingActivity : AppCompatActivity() {
         val toolbar = subtitlesEditingToolbar ?: return
         val project = viewModel.project.value
         val subOp = project?.operations?.find { it is EditOperation.AddSubtitles } as? EditOperation.AddSubtitles
+        val isAutoCaptionsSub = subOp != null && (subOp.fileName == "Auto Captions" || subOp.subtitlesUri.toString().startsWith("vydra://auto_captions"))
         val autoCaptionOps = project?.operations?.filterIsInstance<EditOperation.AddText>()?.filter {
             it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
         } ?: emptyList()
@@ -4278,7 +4279,7 @@ class VideoEditingActivity : AppCompatActivity() {
         val tvAutoStatus = toolbar.findViewById<TextView>(R.id.tvAutoCaptionsStatus)
         val tvFileName = toolbar.findViewById<TextView>(R.id.tvSubtitleFileName)
 
-        if (subOp != null) {
+        if (subOp != null && !isAutoCaptionsSub) {
             layoutHas?.visibility = View.VISIBLE
             tvFileName?.text = subOp.fileName
 
@@ -4292,13 +4293,14 @@ class VideoEditingActivity : AppCompatActivity() {
             layoutHas?.visibility = View.GONE
         }
 
-        if (autoCaptionOps.isNotEmpty()) {
+        if (isAutoCaptionsSub || autoCaptionOps.isNotEmpty()) {
             layoutAuto?.visibility = View.VISIBLE
-            tvAutoStatus?.text = "Auto Captions: ${autoCaptionOps.size} cues"
+            val count = if (isAutoCaptionsSub) (subOp?.cues?.size ?: 0) else autoCaptionOps.size
+            tvAutoStatus?.text = "Auto Captions: $count cues"
 
             val sliderAuto = toolbar.findViewById<Slider>(R.id.autoCaptionFontSizeSlider)
             val tvAutoValue = toolbar.findViewById<TextView>(R.id.tvAutoCaptionFontSizeValue)
-            val currentSize = autoCaptionOps.firstOrNull()?.fontSize ?: com.boostlyte.vydra.captions.CaptionCueBuilder.DEFAULT_FONT_SIZE
+            val currentSize = if (isAutoCaptionsSub) subOp!!.fontSize else (autoCaptionOps.firstOrNull()?.fontSize ?: com.boostlyte.vydra.captions.CaptionCueBuilder.DEFAULT_FONT_SIZE)
             sliderAuto?.value = currentSize.toFloat().coerceIn(10f, 80f)
             tvAutoValue?.text = "$currentSize"
 
@@ -4453,31 +4455,25 @@ class VideoEditingActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch(Dispatchers.Default) {
-            val newTextOps = com.boostlyte.vydra.captions.CaptionCueBuilder.cuesToEditOperations(cues)
-            val prevAutoOps = viewModel.project.value?.operations?.filterIsInstance<EditOperation.AddText>()?.filter {
-                it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
-            }
-            val existingFont = prevAutoOps?.firstOrNull()?.fontPath
-            val existingSize = prevAutoOps?.firstOrNull()?.fontSize
-            val styledOps = if (existingFont != null || existingSize != null) {
-                newTextOps.map {
-                    it.copy(
-                        fontPath = existingFont ?: it.fontPath,
-                        fontSize = existingSize ?: it.fontSize
-                    )
-                }
-            } else {
-                newTextOps
-            }
+            val prevSubOp = viewModel.project.value?.operations?.filterIsInstance<EditOperation.AddSubtitles>()?.firstOrNull()
+            val existingFont = prevSubOp?.fontPath
+            val existingSize = prevSubOp?.fontSize ?: com.boostlyte.vydra.captions.CaptionCueBuilder.DEFAULT_FONT_SIZE
+            val subOp = com.boostlyte.vydra.captions.CaptionCueBuilder.cuesToAddSubtitles(
+                cues = cues,
+                fontSize = existingSize,
+                fontPath = existingFont,
+                position = prevSubOp?.position ?: com.boostlyte.vydra.captions.CaptionCueBuilder.DEFAULT_POSITION
+            )
 
             viewModel.executeCommand(
                 com.boostlyte.vydra.commands.MutateProjectCommand("Generate Auto Captions") { proj ->
-                    // Idempotent: replace previous auto-captions, keep manual AddText & AddSubtitles untouched
+                    // Idempotent: replace previous auto-captions and subtitles, purge legacy AddText captions
                     val cleanOps = proj.operations.filterNot {
-                        it is EditOperation.AddText && it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+                        (it is EditOperation.AddText && it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) ||
+                        it is EditOperation.AddSubtitles
                     }
                     proj.copy(
-                        operations = cleanOps + styledOps,
+                        operations = cleanOps + subOp,
                         lastModifiedAt = System.currentTimeMillis()
                     )
                 }
@@ -4485,7 +4481,8 @@ class VideoEditingActivity : AppCompatActivity() {
 
             withContext(Dispatchers.Main) {
                 progressDialog.dismiss()
-                Toast.makeText(this@VideoEditingActivity, "Generated ${newTextOps.size} caption overlays", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@VideoEditingActivity, "Generated ${cues.size} caption subtitles", Toast.LENGTH_SHORT).show()
+                textOverlayView?.setSubtitleCues(subOp.cues)
                 updateSubtitlesUi()
                 updateUIInteractionState()
             }
@@ -4500,7 +4497,8 @@ class VideoEditingActivity : AppCompatActivity() {
                 viewModel.executeCommand(
                     com.boostlyte.vydra.commands.MutateProjectCommand("Remove Auto Captions") { proj ->
                         val cleanOps = proj.operations.filterNot {
-                            it is EditOperation.AddText && it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+                            (it is EditOperation.AddText && it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) ||
+                            (it is EditOperation.AddSubtitles && (it.fileName == "Auto Captions" || it.subtitlesUri.toString().startsWith("vydra://auto_captions")))
                         }
                         proj.copy(
                             operations = cleanOps,
@@ -4509,6 +4507,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     }
                 )
                 Toast.makeText(this, "Auto-captions removed", Toast.LENGTH_SHORT).show()
+                textOverlayView?.setSubtitleCues(emptyList())
                 updateSubtitlesUi()
                 updateUIInteractionState()
             }
@@ -4525,7 +4524,16 @@ class VideoEditingActivity : AppCompatActivity() {
         viewModel.executeCommand(
             com.boostlyte.vydra.commands.MutateProjectCommand("Update Auto Captions Style") { proj ->
                 val updatedOps = proj.operations.map { op ->
-                    if (op is EditOperation.AddText && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                    if (op is EditOperation.AddSubtitles && (op.fileName == "Auto Captions" || op.subtitlesUri.toString().startsWith("vydra://auto_captions"))) {
+                        var updated = op
+                        if (updateFont) {
+                            updated = updated.copy(fontPath = fontPath)
+                        }
+                        if (updateSize && fontSize != null) {
+                            updated = updated.copy(fontSize = fontSize)
+                        }
+                        updated
+                    } else if (op is EditOperation.AddText && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
                         var updated = op
                         if (updateFont) {
                             updated = updated.copy(fontPath = fontPath)
@@ -6463,19 +6471,42 @@ class VideoEditingActivity : AppCompatActivity() {
                         }
                     }
 
-                    // Pre-resolve all sequence items and background audio to ensure local file paths exist
-                    // (Resolves content:// URIs copied to cache, preventing MediaCodec or FFmpeg crash on raw URIs)
+                    val exportJobDir = File(cacheDir, "export_job_${System.currentTimeMillis()}").apply { mkdirs() }
+
+                    // Pre-resolve all sequence items and background audio to ensure stable local files exist
                     val resolvedOperations = project.operations.map { op ->
                         when (op) {
                             is EditOperation.Merge -> {
-                                val resolvedItems = op.items.map { item ->
-                                    val itemPath = if (item.uri.scheme == "file") {
-                                        item.uri.path
+                                val resolvedItems = op.items.mapIndexed { idx, item ->
+                                    val origUri = item.uri
+                                    val origUriStr = origUri.toString()
+                                    val scheme = origUri.scheme ?: "none"
+                                    val itemPath = if (scheme == "file") {
+                                        origUri.path
+                                    } else if (scheme == "content") {
+                                        val ext = if (item.isImage) ".jpg" else ".mp4"
+                                        val targetFile = File(exportJobDir, "clip_${idx}_${System.currentTimeMillis()}$ext")
+                                        try {
+                                            contentResolver.openInputStream(origUri)?.use { input ->
+                                                targetFile.outputStream().use { output -> input.copyTo(output) }
+                                            }
+                                            if (targetFile.exists() && targetFile.length() > 0L) targetFile.absolutePath else null
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "Failed copying content URI $origUri: ${e.message}")
+                                            null
+                                        } ?: getFilePathFromUri(origUri)
                                     } else {
-                                        getFilePathFromUri(item.uri) ?: copyContentUriToTempFile(item.uri, "export_clip", if (item.isImage) ".jpg" else ".mp4")?.absolutePath
+                                        val p = origUri.path ?: origUriStr
+                                        if (File(p).exists()) p else getFilePathFromUri(origUri)
                                     }
-                                    if (itemPath != null && File(itemPath).exists()) {
-                                        item.copy(uri = Uri.fromFile(File(itemPath)))
+
+                                    val f = itemPath?.let { File(it) }
+                                    val exists = f?.exists() == true
+                                    val size = if (exists) f!!.length() else -1L
+                                    Log.i(TAG, "Pre-resolve Merge clip $idx: origUri='$origUriStr', scheme='$scheme', path='$itemPath', exists=$exists, size=$size bytes")
+
+                                    if (f != null && exists && size > 0L) {
+                                        item.copy(uri = Uri.fromFile(f))
                                     } else {
                                         item
                                     }
@@ -6483,13 +6514,34 @@ class VideoEditingActivity : AppCompatActivity() {
                                 op.copy(items = resolvedItems)
                             }
                             is EditOperation.AddBackgroundAudio -> {
-                                val audioPath = if (op.audioUri.scheme == "file") {
-                                    op.audioUri.path
+                                val origUri = op.audioUri
+                                val origUriStr = origUri.toString()
+                                val scheme = origUri.scheme ?: "none"
+                                val audioPath = if (scheme == "file") {
+                                    origUri.path
+                                } else if (scheme == "content") {
+                                    val targetFile = File(exportJobDir, "audio_${System.currentTimeMillis()}.mp3")
+                                    try {
+                                        contentResolver.openInputStream(origUri)?.use { input ->
+                                            targetFile.outputStream().use { output -> input.copyTo(output) }
+                                        }
+                                        if (targetFile.exists() && targetFile.length() > 0L) targetFile.absolutePath else null
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Failed copying audio content URI $origUri: ${e.message}")
+                                        null
+                                    } ?: getFilePathFromUri(origUri)
                                 } else {
-                                    getFilePathFromUri(op.audioUri) ?: copyContentUriToTempFile(op.audioUri, "export_audio", ".mp3")?.absolutePath
+                                    val p = origUri.path ?: origUriStr
+                                    if (File(p).exists()) p else getFilePathFromUri(origUri)
                                 }
-                                if (audioPath != null && File(audioPath).exists()) {
-                                    op.copy(audioUri = Uri.fromFile(File(audioPath)))
+
+                                val f = audioPath?.let { File(it) }
+                                val exists = f?.exists() == true
+                                val size = if (exists) f!!.length() else -1L
+                                Log.i(TAG, "Pre-resolve BackgroundAudio: origUri='$origUriStr', scheme='$scheme', path='$audioPath', exists=$exists, size=$size bytes")
+
+                                if (f != null && exists && size > 0L) {
+                                    op.copy(audioUri = Uri.fromFile(f))
                                 } else {
                                     op
                                 }
@@ -6498,14 +6550,12 @@ class VideoEditingActivity : AppCompatActivity() {
                         }
                     }
 
-                    val hasUnreadableClip = resolvedOperations.filterIsInstance<EditOperation.Merge>().any { merge ->
-                        merge.items.any { item ->
-                            val p = item.uri.path
-                            p == null || !File(p).exists() || !File(p).canRead()
-                        }
+                    val unreadableClip = resolvedOperations.filterIsInstance<EditOperation.Merge>().flatMap { it.items }.firstOrNull { item ->
+                        val p = item.uri.path
+                        p == null || !File(p).exists() || !File(p).canRead()
                     }
-                    if (hasUnreadableClip) {
-                        Log.e(TAG, "Export aborted: one or more clips in timeline are not readable local files")
+                    if (unreadableClip != null) {
+                        Log.e(TAG, "Export aborted: clip with URI '${unreadableClip.uri}' (scheme='${unreadableClip.uri.scheme}', path='${unreadableClip.uri.path}') is not readable on disk")
                         return@withContext null
                     }
 
@@ -6518,14 +6568,14 @@ class VideoEditingActivity : AppCompatActivity() {
                     )
 
                     if (chunkPlan == null) {
+                        Log.e(TAG, "Failed to build chunk export plan for source: $sourceFilePath")
                         return@withContext null
                     }
 
                     if (chunkPlan.isChunked) {
-                        val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.bin")
-                        java.io.ObjectOutputStream(java.io.FileOutputStream(planFile)).use {
-                            it.writeObject(chunkPlan)
-                        }
+                        val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.json")
+                        planFile.writeText(com.boostlyte.vydra.utils.ProjectSerializer.gson.toJson(chunkPlan))
+                        Log.i(TAG, "Saved chunk plan JSON (${planFile.length()} bytes) to: ${planFile.absolutePath}")
                         ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath)
                     } else {
                         var ffmpegCommand = chunkPlan.singlePassCommand ?: return@withContext null
@@ -8412,7 +8462,11 @@ class VideoEditingActivity : AppCompatActivity() {
                 }
             }
             "file" -> filePath = uri.path
-            else -> Log.e("PathError", "Unsupported URI scheme: ${uri.scheme}")
+            null -> {
+                val p = uri.path ?: uri.toString()
+                if (File(p).exists()) filePath = p else Log.e("PathError", "Local path does not exist: $p")
+            }
+            else -> Log.e("PathError", "Unsupported URI scheme: ${uri.scheme} for URI: $uri")
         }
         Log.d("PathInfo", "File path: $filePath")
         if (filePath != null) {

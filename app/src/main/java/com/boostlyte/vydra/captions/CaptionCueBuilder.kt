@@ -81,7 +81,7 @@ object CaptionCueBuilder {
     }
 
     /**
-     * Converts CaptionCue objects to native EditOperation.AddText overlays.
+     * Converts CaptionCue objects to native EditOperation.AddText overlays (legacy).
      */
     fun cuesToEditOperations(cues: List<CaptionCue>): List<EditOperation.AddText> {
         return cues.map { cue ->
@@ -100,6 +100,56 @@ object CaptionCueBuilder {
                 groupId = CAPTION_GROUP_ID
             )
         }
+    }
+
+    /**
+     * Converts CaptionCue objects directly into a unified EditOperation.AddSubtitles operation.
+     * Merges auto-subtitles with the .srt subtitle pipeline so all subtitle features,
+     * styling, and positioning apply uniformly without duplicate overlays.
+     */
+    fun cuesToAddSubtitles(
+        cues: List<CaptionCue>,
+        fontSize: Int = DEFAULT_FONT_SIZE,
+        fontPath: String? = null,
+        position: TextPosition = DEFAULT_POSITION
+    ): EditOperation.AddSubtitles {
+        val subCues = cues.map { cue ->
+            com.boostlyte.vydra.models.SubtitleCue(
+                startTimeMs = cue.startMs,
+                endTimeMs = cue.endMs,
+                text = cue.text
+            )
+        }
+        val srtText = buildSrtString(subCues)
+        return EditOperation.AddSubtitles(
+            subtitlesUri = android.net.Uri.parse("vydra://auto_captions"),
+            srtContent = srtText,
+            fileName = "Auto Captions",
+            cues = subCues,
+            fontSize = fontSize,
+            fontPath = fontPath,
+            position = position
+        )
+    }
+
+    fun buildSrtString(cues: List<com.boostlyte.vydra.models.SubtitleCue>): String {
+        val sb = StringBuilder()
+        for ((idx, cue) in cues.withIndex()) {
+            sb.append("${idx + 1}\n")
+            sb.append("${formatSrtTime(cue.startTimeMs)} --> ${formatSrtTime(cue.endTimeMs)}\n")
+            sb.append("${cue.text}\n\n")
+        }
+        return sb.toString()
+    }
+
+    private fun formatSrtTime(ms: Long): String {
+        val safeMs = maxOf(0L, ms)
+        val totalSec = safeMs / 1000
+        val millis = safeMs % 1000
+        val sec = totalSec % 60
+        val min = (totalSec / 60) % 60
+        val hours = totalSec / 3600
+        return String.format(java.util.Locale.US, "%02d:%02d:%02d,%03d", hours, min, sec, millis)
     }
 
     private fun extractAllValidWords(transcription: TranscriptionResponse): List<TranscriptionWord> {

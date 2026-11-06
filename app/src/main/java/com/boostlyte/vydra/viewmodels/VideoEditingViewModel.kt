@@ -478,6 +478,7 @@ class VideoEditingViewModel : ViewModel() {
                 if (op.text.isBlank()) return@filterNot true
                 val cleanText = op.text.trim().lowercase()
 
+                // If explicit AddSubtitles are active, suppress ALL auto-caption AddText cards and matching text
                 if (hasExplicitSubtitles) {
                     if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
                         return@filterNot true
@@ -495,10 +496,13 @@ class VideoEditingViewModel : ViewModel() {
                     seenAutoCaptionTimes.add(key)
                 }
 
-                // Suppress stray unpositioned script / transcript text with unbounded duration at default top position
+                // Suppress stray unpositioned script / transcript text at default top position
                 if (!op.hasCustomPosition() && op.positionKeyframes.isEmpty()) {
                     if (op.position == TextPosition.TOP_CENTER || op.position == TextPosition.CENTER_TOP || op.position == TextPosition.TOP_LEFT) {
-                        if (op.startTimeMs == null && op.endTimeMs == null && op.text.length > 50) {
+                        if (op.startTimeMs == null && op.endTimeMs == null) {
+                            return@filterNot true
+                        }
+                        if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
                             return@filterNot true
                         }
                     }
@@ -1131,8 +1135,8 @@ class VideoEditingViewModel : ViewModel() {
                 val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
 
                 val motionFilter = when (clipMotionType) {
-                    "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/($exportFpsVal*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
-                    "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/($exportFpsVal*$d))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
+                    "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*(on/($exportFpsVal*$d))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
+                    "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*(on/($exportFpsVal*$d))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
                     "pan_left" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'"
                     "pan_right" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'"
                     "pan_up" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'"
@@ -1169,7 +1173,7 @@ class VideoEditingViewModel : ViewModel() {
                 }
 
                 // Explicit normalization stage for clip i: guarantees exact resolution, padding, SAR, fps, and pixel format before xfade/transitions
-                filterParts.add("[raw_stage$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
+                filterParts.add("[raw_stage$i]settb=1/${_exportFps.value},setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
 
                 val isClipMuted = operations.filterIsInstance<EditOperation.MuteClip>().find { it.index == i }?.isMuted ?: false
                 if (hasAudioArray[i] && !isClipMuted) {
@@ -1845,6 +1849,15 @@ class VideoEditingViewModel : ViewModel() {
         // 1. Inputs for this chunk's clips
         for ((localIdx, clip) in chunkSpec.clips.withIndex()) {
             if (clip.globalIndex == 0) {
+                val origUri = clip.item.uri
+                val origUriStr = origUri.toString()
+                val scheme = origUri.scheme ?: "file"
+                val resolvedPath = sourceFilePath
+                val f = File(resolvedPath)
+                val exists = f.exists()
+                val size = if (exists) f.length() else -1L
+                Log.i(TAG, "ChunkClip: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex} (global 0), origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', exists=$exists, size=$size bytes")
+
                 val isMainImage = sourceFilePath.endsWith(".png", ignoreCase = true) ||
                                   sourceFilePath.endsWith(".jpg", ignoreCase = true) ||
                                   sourceFilePath.endsWith(".jpeg", ignoreCase = true) ||
@@ -1870,12 +1883,24 @@ class VideoEditingViewModel : ViewModel() {
                 }
             } else {
                 val item = clip.item
+                val origUri = item.uri
+                val origUriStr = origUri.toString()
+                val scheme = origUri.scheme ?: (if (origUriStr.startsWith("/")) "file" else "none")
+                val resolvedPath = clip.resolvedLocalPath ?: resolveUriToPath(context, item.uri) ?: item.uri.path ?: origUriStr
+                val f = File(resolvedPath)
+                val exists = f.exists()
+                val size = if (exists) f.length() else -1L
+                Log.i(TAG, "ChunkClip: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex} (global ${clip.globalIndex}), origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', exists=$exists, size=$size bytes")
+                if (!exists || size <= 0L) {
+                    Log.e(TAG, "ChunkClip missing or empty: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex}, path='$resolvedPath', uri='$origUriStr'")
+                }
+
                 if (item.proxyUri != null) {
                     val proxyPath = resolveUriToPath(context, item.proxyUri) ?: item.proxyUri.path ?: item.proxyUri.toString()
                     val duration = item.trimmedDurationMs / 1000.0
                     cmd.append(" -t $duration -i \"$proxyPath\"")
                 } else {
-                    val videoPath = resolveUriToPath(context, item.uri) ?: item.uri.toString()
+                    val videoPath = resolvedPath
                     val startSecs = item.trimStartMs / 1000.0
                     val itemDurSec = if (item.trimmedDurationMs > 0L) {
                         item.trimmedDurationMs / 1000.0
@@ -2007,8 +2032,8 @@ class VideoEditingViewModel : ViewModel() {
             val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
 
             val motionFilter = when (clipMotionType) {
-                "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='1.0+0.12*(on/(${_exportFps.value}*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
-                "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='1.12-0.12*(on/(${_exportFps.value}*$safeD))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
+                "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*(on/(${_exportFps.value}*$safeD))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
+                "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*(on/(${_exportFps.value}*$safeD))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
                 "pan_left" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(1-(t/$safeD))':y='(in_h-out_h)/2'"
                 "pan_right" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)/2'"
                 "pan_up" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$safeD))'"
@@ -2041,7 +2066,7 @@ class VideoEditingViewModel : ViewModel() {
                 filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$localIdx]")
             }
 
-            filterParts.add("[raw_stage$localIdx]scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$localIdx]")
+            filterParts.add("[raw_stage$localIdx]settb=1/${_exportFps.value},setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$localIdx]")
         }
 
         // Chain internal transitions for this chunk

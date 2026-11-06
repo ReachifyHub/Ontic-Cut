@@ -7,7 +7,9 @@ import java.io.Serializable
 data class ChunkClip(
     val globalIndex: Int,
     val localIndex: Int,
-    val item: EditOperation.MergeItem
+    val item: EditOperation.MergeItem,
+    val resolvedLocalPath: String? = null,
+    val originalUriString: String? = null
 ) : Serializable
 
 data class ChunkBoundaryTransition(
@@ -90,7 +92,13 @@ object ChunkPlanner {
 
         if (sequenceItems.size <= CHUNK_TRIGGER_THRESHOLD) {
             val singleChunkClips = sequenceItems.mapIndexed { idx, item ->
-                ChunkClip(globalIndex = idx, localIndex = idx, item = item)
+                ChunkClip(
+                    globalIndex = idx,
+                    localIndex = idx,
+                    item = item,
+                    resolvedLocalPath = item.uri.path ?: item.uri.toString(),
+                    originalUriString = item.uri.toString()
+                )
             }
             val singleChunk = ChunkSpec(
                 chunkIndex = 0,
@@ -123,7 +131,9 @@ object ChunkPlanner {
                 ChunkClip(
                     globalIndex = currentGlobalIdx + localIdx,
                     localIndex = localIdx,
-                    item = item
+                    item = item,
+                    resolvedLocalPath = item.uri.path ?: item.uri.toString(),
+                    originalUriString = item.uri.toString()
                 )
             }
 
