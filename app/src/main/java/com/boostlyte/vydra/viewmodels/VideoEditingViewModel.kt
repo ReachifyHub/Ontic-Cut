@@ -204,10 +204,21 @@ class VideoEditingViewModel : ViewModel() {
     }
 
     /** Build a drawtext filter expression for a text operation. */
-    private fun buildDrawtextExpr(op: EditOperation.AddText, fontFilePath: String?, timeOffsetMs: Long = 0L): String {
+    private fun buildDrawtextExpr(
+        op: EditOperation.AddText,
+        fontFilePath: String?,
+        timeOffsetMs: Long = 0L,
+        sourceVideoHeight: Int = 1080,
+        density: Float = 1.0f
+    ): String {
         val fontToUse = op.fontPath ?: fontFilePath
 
         val isAutoCaption = op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID
+        val heightScale = (sourceVideoHeight.toFloat() / 1080f).coerceIn(0.25f, 3.0f)
+        val effectiveDensity = if (density > 0.5f) density else 2.75f
+        val marginX = (24f * heightScale).toInt().coerceAtLeast(8)
+        val marginY = (24f * heightScale).toInt().coerceAtLeast(8)
+        val bottomMargin = (40f * heightScale).toInt().coerceAtLeast(14)
 
         // Use WYSIWYG fractional coordinates if available, else fall back to explicit coordinates
         val (posX, posY) = if (op.positionKeyframes.isNotEmpty()) {
@@ -217,18 +228,18 @@ class VideoEditingViewModel : ViewModel() {
         } else if (op.hasCustomPosition()) {
             Pair("'(w*${op.relativeX})-(tw/2)'", "'(h*${op.relativeY})-(th/2)'")
         } else if (isAutoCaption) {
-            Pair("(w-tw)/2", "h-th-40")
+            Pair("(w-tw)/2", "h-th-$bottomMargin")
         } else {
             when (op.position) {
-                TextPosition.TOP_LEFT -> Pair("24", "24")
-                TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "24")
-                TextPosition.TOP_RIGHT -> Pair("w-tw-24", "24")
-                TextPosition.CENTER_LEFT -> Pair("24", "(h-th)/2")
+                TextPosition.TOP_LEFT -> Pair("$marginX", "$marginY")
+                TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "$marginY")
+                TextPosition.TOP_RIGHT -> Pair("w-tw-$marginX", "$marginY")
+                TextPosition.CENTER_LEFT -> Pair("$marginX", "(h-th)/2")
                 TextPosition.CENTER -> Pair("(w-tw)/2", "(h-th)/2")
-                TextPosition.CENTER_RIGHT -> Pair("w-tw-24", "(h-th)/2")
-                TextPosition.BOTTOM_LEFT -> Pair("24", "h-th-40")
-                TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> Pair("(w-tw)/2", "h-th-40")
-                TextPosition.BOTTOM_RIGHT -> Pair("w-tw-24", "h-th-40")
+                TextPosition.CENTER_RIGHT -> Pair("w-tw-$marginX", "(h-th)/2")
+                TextPosition.BOTTOM_LEFT -> Pair("$marginX", "h-th-$bottomMargin")
+                TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> Pair("(w-tw)/2", "h-th-$bottomMargin")
+                TextPosition.BOTTOM_RIGHT -> Pair("w-tw-$marginX", "h-th-$bottomMargin")
             }
         }
 
@@ -247,20 +258,27 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         val boxColor = if (isAutoCaption) "black@0.5" else null
-        val boxBorderW = if (isAutoCaption) 4 else 0
+        val boxBorderW = if (isAutoCaption) (4f * heightScale).toInt().coerceAtLeast(2) else 0
 
         val (shadowColor, shadowOffset) = if (op.borderThickness > 0) {
-            val resScale = (_exportResolution.value.toFloat() / 720f).coerceIn(0.5f, 3.0f)
+            val resScale = (sourceVideoHeight.toFloat() / 720f).coerceIn(0.5f, 3.0f)
             val offset = maxOf(1, Math.round(op.borderThickness * 0.8f * resScale))
             Pair("black@0.75", offset)
         } else Pair(null, 0)
 
         val fontColor = formatColorForFFmpeg(op.color)
 
+        // Scale font size relative to output resolution height so text maintains identical visual proportion across 1080p, 720p, 480p
+        val effectiveFontSize = if (isAutoCaption) {
+            (op.fontSize * effectiveDensity * heightScale).toInt().coerceAtLeast(12)
+        } else {
+            (op.fontSize * heightScale * (effectiveDensity / 2.75f)).toInt().coerceAtLeast(10)
+        }
+
         return com.boostlyte.vydra.utils.FFmpegFilterUtils.buildValidatedDrawtextFilter(
             text = op.text,
             fontFilePath = fontToUse,
-            fontSize = op.fontSize,
+            fontSize = effectiveFontSize,
             fontColor = fontColor,
             x = posX,
             y = posY,
@@ -272,7 +290,7 @@ class VideoEditingViewModel : ViewModel() {
             shadowOffset = shadowOffset,
             alphaExpr = alphaExpr,
             textAlign = if (op.textAlign.isNotEmpty()) op.textAlign else null,
-            lineSpacing = op.lineSpacing.toInt()
+            lineSpacing = (op.lineSpacing * heightScale).toInt()
         )
     }
 
@@ -470,7 +488,7 @@ class VideoEditingViewModel : ViewModel() {
         // Also deduplicate auto-caption cues that share the same start/end time windows.
         val subtitleOps = operations.filterIsInstance<EditOperation.AddSubtitles>()
         val hasExplicitSubtitles = subtitleOps.any { it.cues.isNotEmpty() }
-        val subtitleCueTexts = subtitleOps.flatMap { it.cues.map { cue -> cue.text.trim().lowercase() } }.toSet()
+        val subtitleCueTexts = subtitleOps.flatMap { it.cues.map { cue -> cue.text.trim().lowercase() } }.filter { it.isNotBlank() }.toSet()
         val seenAutoCaptionTimes = mutableSetOf<Pair<Long?, Long?>>()
         val overlayOps = operations.filterNot { op ->
             if (op is EditOperation.Crop) return@filterNot true
@@ -478,12 +496,19 @@ class VideoEditingViewModel : ViewModel() {
                 if (op.text.isBlank()) return@filterNot true
                 val cleanText = op.text.trim().lowercase()
 
-                // If explicit AddSubtitles are active, suppress ALL auto-caption AddText cards and matching text
+                // If explicit AddSubtitles are active, suppress ALL auto-caption AddText cards, matching/overlapping transcripts, and unpositioned text
                 if (hasExplicitSubtitles) {
                     if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
                         return@filterNot true
                     }
                     if (cleanText in subtitleCueTexts) {
+                        return@filterNot true
+                    }
+                    if (subtitleCueTexts.any { it.length >= 3 && (cleanText.contains(it) || it.contains(cleanText)) }) {
+                        return@filterNot true
+                    }
+                    // When explicit subtitles are enabled, suppress any text card not explicitly custom-positioned by the user
+                    if (!op.hasCustomPosition() && op.positionKeyframes.isEmpty()) {
                         return@filterNot true
                     }
                 }
@@ -498,13 +523,8 @@ class VideoEditingViewModel : ViewModel() {
 
                 // Suppress stray unpositioned script / transcript text at default top position
                 if (!op.hasCustomPosition() && op.positionKeyframes.isEmpty()) {
-                    if (op.position == TextPosition.TOP_CENTER || op.position == TextPosition.CENTER_TOP || op.position == TextPosition.TOP_LEFT) {
-                        if (op.startTimeMs == null && op.endTimeMs == null) {
-                            return@filterNot true
-                        }
-                        if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
-                            return@filterNot true
-                        }
+                    if (op.position == TextPosition.TOP_CENTER || op.position == TextPosition.CENTER_TOP || op.position == TextPosition.TOP_LEFT || op.position == TextPosition.TOP_RIGHT) {
+                        return@filterNot true
                     }
                 }
             }
@@ -515,7 +535,7 @@ class VideoEditingViewModel : ViewModel() {
         for (op in overlayOps) {
             when (op) {
                 is EditOperation.AddText -> {
-                    val filterExpr = buildDrawtextExpr(op, fontFilePath, timeOffsetMs)
+                    val filterExpr = buildDrawtextExpr(op, fontFilePath, timeOffsetMs, sourceVideoHeight, density)
                     val nextLabel = "[v$stageIndex]"
                     stages.add("$currentLabel$filterExpr$nextLabel")
                     currentLabel = nextLabel
@@ -639,9 +659,11 @@ class VideoEditingViewModel : ViewModel() {
                 is EditOperation.AddSubtitles -> {
                     val effectiveDensity = if (density > 0.5f) density else 2.75f
                     val refHeight = if (sourceVideoHeight > 0) sourceVideoHeight.toFloat() else 1080f
-                    val scaledFontSize = (op.fontSize * effectiveDensity * (refHeight / 1080f)).toInt().coerceAtLeast(16)
-                    val boxBorderW = (8f * effectiveDensity * (refHeight / 1080f)).toInt().coerceAtLeast(4)
-                    val marginY = (24f * effectiveDensity * (refHeight / 1080f)).toInt()
+                    val heightScale = (refHeight / 1080f).coerceIn(0.25f, 3.0f)
+                    val scaledFontSize = (op.fontSize * effectiveDensity * heightScale).toInt().coerceAtLeast(12)
+                    val boxBorderW = (6f * effectiveDensity * heightScale).toInt().coerceAtLeast(2)
+                    val marginY = (24f * effectiveDensity * heightScale).toInt().coerceAtLeast(8)
+                    val marginX = (24f * heightScale).toInt().coerceAtLeast(8)
                     val lineSpacing = (scaledFontSize * 1.25f).toInt()
                     
                     val fontToUse = if (!op.fontPath.isNullOrBlank() && java.io.File(op.fontPath).exists()) op.fontPath else fontFilePath
@@ -658,15 +680,15 @@ class VideoEditingViewModel : ViewModel() {
                             Pair("'(w*${op.relativeX})-(tw/2)'", "'(h*${op.relativeY})-(th/2)'")
                         } else {
                             when (op.position) {
-                                TextPosition.TOP_LEFT -> Pair("24", "24")
-                                TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "24")
-                                TextPosition.TOP_RIGHT -> Pair("w-tw-24", "24")
-                                TextPosition.CENTER_LEFT -> Pair("24", "(h-th)/2")
+                                TextPosition.TOP_LEFT -> Pair("$marginX", "$marginY")
+                                TextPosition.TOP_CENTER, TextPosition.CENTER_TOP -> Pair("(w-tw)/2", "$marginY")
+                                TextPosition.TOP_RIGHT -> Pair("w-tw-$marginX", "$marginY")
+                                TextPosition.CENTER_LEFT -> Pair("$marginX", "(h-th)/2")
                                 TextPosition.CENTER -> Pair("(w-tw)/2", "(h-th)/2")
-                                TextPosition.CENTER_RIGHT -> Pair("w-tw-24", "(h-th)/2")
-                                TextPosition.BOTTOM_LEFT -> Pair("24", "h-$marginY-th")
+                                TextPosition.CENTER_RIGHT -> Pair("w-tw-$marginX", "(h-th)/2")
+                                TextPosition.BOTTOM_LEFT -> Pair("$marginX", "h-$marginY-th")
                                 TextPosition.BOTTOM_CENTER, TextPosition.CENTER_BOTTOM -> Pair("(w-tw)/2", "h-$marginY-th")
-                                TextPosition.BOTTOM_RIGHT -> Pair("w-tw-24", "h-$marginY-th")
+                                TextPosition.BOTTOM_RIGHT -> Pair("w-tw-$marginX", "h-$marginY-th")
                             }
                         }
 
@@ -1129,19 +1151,25 @@ class VideoEditingViewModel : ViewModel() {
                 val clipMotionType = motionOp?.motionType ?: if (i > 0) mergeOp?.items?.getOrNull(i - 1)?.motionEffect else null
                 val d = durationsArray[i].coerceAtLeast(0.1)
 
-                val motionW = (((mainWidth * 1.15).toInt()) / 2) * 2
-                val motionH = (((mainHeight * 1.15).toInt()) / 2) * 2
+                // High-precision motion coordinate space (anchored at >= 1080p density)
+                // Prevents integer-truncation micro-stutter on 720p and 480p exports
+                val scaleFactor = maxOf(1.0, 1080.0 / minOf(mainWidth, mainHeight))
+                val baseW = (((mainWidth * scaleFactor).toInt()) / 2) * 2
+                val baseH = (((mainHeight * scaleFactor).toInt()) / 2) * 2
+                val motionW = (((baseW * 1.15).toInt()) / 2) * 2
+                val motionH = (((baseH * 1.15).toInt()) / 2) * 2
                 val coverScale = "scale=w=$motionW:h=$motionH:force_original_aspect_ratio=increase"
                 val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
+                val panScaleDown = if (scaleFactor > 1.0) ",scale=${mainWidth}x${mainHeight}" else ""
 
                 val motionFilter = when (clipMotionType) {
                     "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*(on/($exportFpsVal*$d))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
                     "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*(on/($exportFpsVal*$d))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
-                    "pan_left" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'"
-                    "pan_right" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'"
-                    "pan_up" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'"
-                    "pan_down" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$d)'"
-                    "drift_up_right" -> "$coverScale,$coverCrop,crop=$mainWidth:$mainHeight:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)*(1-(t/$d))'"
+                    "pan_left" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'$panScaleDown"
+                    "pan_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'$panScaleDown"
+                    "pan_up" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'$panScaleDown"
+                    "pan_down" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$d)'$panScaleDown"
+                    "drift_up_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)*(1-(t/$d))'$panScaleDown"
                     else -> null
                 }
 
@@ -2026,19 +2054,25 @@ class VideoEditingViewModel : ViewModel() {
             val clipMotionType = motionOp?.motionType ?: clip.item.motionEffect
             val safeD = d.coerceAtLeast(0.1)
 
-            val motionW = (((targetWidth * 1.15).toInt()) / 2) * 2
-            val motionH = (((targetHeight * 1.15).toInt()) / 2) * 2
+            // High-precision motion coordinate space (anchored at >= 1080p density)
+            // Prevents integer-truncation micro-stutter on 720p and 480p exports
+            val scaleFactor = maxOf(1.0, 1080.0 / minOf(targetWidth, targetHeight))
+            val baseW = (((targetWidth * scaleFactor).toInt()) / 2) * 2
+            val baseH = (((targetHeight * scaleFactor).toInt()) / 2) * 2
+            val motionW = (((baseW * 1.15).toInt()) / 2) * 2
+            val motionH = (((baseH * 1.15).toInt()) / 2) * 2
             val coverScale = "scale=w=$motionW:h=$motionH:force_original_aspect_ratio=increase"
             val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
+            val panScaleDown = if (scaleFactor > 1.0) ",scale=${targetWidth}x${targetHeight}" else ""
 
             val motionFilter = when (clipMotionType) {
                 "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*(on/(${_exportFps.value}*$safeD))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
                 "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*(on/(${_exportFps.value}*$safeD))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
-                "pan_left" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(1-(t/$safeD))':y='(in_h-out_h)/2'"
-                "pan_right" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)/2'"
-                "pan_up" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$safeD))'"
-                "pan_down" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$safeD)'"
-                "drift_up_right" -> "$coverScale,$coverCrop,crop=$targetWidth:$targetHeight:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)*(1-(t/$safeD))'"
+                "pan_left" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(1-(t/$safeD))':y='(in_h-out_h)/2'$panScaleDown"
+                "pan_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)/2'$panScaleDown"
+                "pan_up" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$safeD))'$panScaleDown"
+                "pan_down" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$safeD)'$panScaleDown"
+                "drift_up_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)*(1-(t/$safeD))'$panScaleDown"
                 else -> null
             }
 
@@ -2283,56 +2317,72 @@ class VideoEditingViewModel : ViewModel() {
         val numChunks = chunkTempPaths.size
 
         // Chain chunk videos using boundary transitions
-        var currentV = "[0:v]"
-        var currentStreamDurationSec = chunkPlan.chunks[0].durationMs / 1000.0
+        val hasAnyBoundaryTransitions = chunkPlan.boundaryTransitions.any { it.transition != null && it.transition.type != "none" }
+        var currentV: String
+        var currentStreamDurationSec: Double
 
-        for (bIdx in 0 until numChunks - 1) {
-            val nextChunkInput = "[${bIdx + 1}:v]"
-            val nextChunkDurationSec = chunkPlan.chunks[bIdx + 1].durationMs / 1000.0
-            val boundaryTrans = chunkPlan.boundaryTransitions.find { it.boundaryIndex == bIdx }?.transition
+        if (!hasAnyBoundaryTransitions) {
+            // Flat N-way concatenation: drastically reduces decoder count and frame buffer memory in FFmpeg.
+            // Avoids chained concat=n=2 DAGs that overflow queue buffers on 60+ clip projects.
+            val allInputs = (0 until numChunks).joinToString("") { "[$it:v]" }
+            val rawCcatOut = "[raw_ccat]"
+            val normCcatOut = "[norm_ccat]"
+            filterParts.add("${allInputs}concat=n=$numChunks:v=1:a=0${rawCcatOut}")
+            filterParts.add("${rawCcatOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normCcatOut}")
+            currentV = normCcatOut
+            currentStreamDurationSec = chunkPlan.chunks.sumOf { it.durationMs / 1000.0 }
+        } else {
+            currentV = "[0:v]"
+            currentStreamDurationSec = chunkPlan.chunks[0].durationMs / 1000.0
 
-            if (boundaryTrans != null && boundaryTrans.type != "none") {
-                val rawTransDuration = boundaryTrans.durationMs / 1000.0
-                val maxSafeDuration = minOf(currentStreamDurationSec - 0.05, nextChunkDurationSec - 0.05).coerceAtLeast(0.1)
-                val transDuration = rawTransDuration.coerceIn(0.1, maxSafeDuration)
-                val offset = (currentStreamDurationSec - transDuration).coerceAtLeast(0.0)
+            for (bIdx in 0 until numChunks - 1) {
+                val nextChunkInput = "[${bIdx + 1}:v]"
+                val nextChunkDurationSec = chunkPlan.chunks[bIdx + 1].durationMs / 1000.0
+                val boundaryTrans = chunkPlan.boundaryTransitions.find { it.boundaryIndex == bIdx }?.transition
 
-                val rawXfvOut = "[raw_xfv$bIdx]"
-                val normXfvOut = "[norm_xfv$bIdx]"
+                if (boundaryTrans != null && boundaryTrans.type != "none") {
+                    val rawTransDuration = boundaryTrans.durationMs / 1000.0
+                    val maxSafeDuration = minOf(currentStreamDurationSec - 0.05, nextChunkDurationSec - 0.05).coerceAtLeast(0.1)
+                    val transDuration = rawTransDuration.coerceIn(0.1, maxSafeDuration)
+                    val offset = (currentStreamDurationSec - transDuration).coerceAtLeast(0.0)
 
-                val validXfadeTransitions = setOf(
-                    "fade", "fadeblack", "fadewhite", "rectcrop", "circlecrop", "circleclose", "circleopen",
-                    "horzclose", "horzopen", "vertclose", "vertopen", "diagbl", "diagbr", "diagtl", "diagtr",
-                    "hlslice", "hrslice", "vuslice", "vdslice", "dissolve", "pixelize", "slidedown", "slideleft",
-                    "slideright", "slideup", "wipedown", "wipeleft", "wiperight", "wipeup", "zoomin", "squeezeh",
-                    "squeezev", "coverleft", "coverright", "coverup", "coverdown", "revealleft", "revealright",
-                    "revealup", "revealdown"
-                )
-                val rawType = boundaryTrans.type.lowercase()
-                val sanitizedType = when (rawType) {
-                    "smoothleft" -> "coverleft"
-                    "smoothright" -> "coverright"
-                    "distance" -> "zoomin"
-                    else -> if (validXfadeTransitions.contains(rawType)) rawType else "fade"
+                    val rawXfvOut = "[raw_xfv$bIdx]"
+                    val normXfvOut = "[norm_xfv$bIdx]"
+
+                    val validXfadeTransitions = setOf(
+                        "fade", "fadeblack", "fadewhite", "rectcrop", "circlecrop", "circleclose", "circleopen",
+                        "horzclose", "horzopen", "vertclose", "vertopen", "diagbl", "diagbr", "diagtl", "diagtr",
+                        "hlslice", "hrslice", "vuslice", "vdslice", "dissolve", "pixelize", "slidedown", "slideleft",
+                        "slideright", "slideup", "wipedown", "wipeleft", "wiperight", "wipeup", "zoomin", "squeezeh",
+                        "squeezev", "coverleft", "coverright", "coverup", "coverdown", "revealleft", "revealright",
+                        "revealup", "revealdown"
+                    )
+                    val rawType = boundaryTrans.type.lowercase()
+                    val sanitizedType = when (rawType) {
+                        "smoothleft" -> "coverleft"
+                        "smoothright" -> "coverright"
+                        "distance" -> "zoomin"
+                        else -> if (validXfadeTransitions.contains(rawType)) rawType else "fade"
+                    }
+
+                    val formattedDuration = String.format(java.util.Locale.US, "%.3f", transDuration)
+                    val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
+
+                    filterParts.add("${currentV}${nextChunkInput}xfade=transition=${sanitizedType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
+                    filterParts.add("${rawXfvOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normXfvOut}")
+
+                    currentV = normXfvOut
+                    currentStreamDurationSec = offset + nextChunkDurationSec
+                } else {
+                    val rawCcatOut = "[raw_ccat$bIdx]"
+                    val normCcatOut = "[norm_ccat$bIdx]"
+
+                    filterParts.add("${currentV}${nextChunkInput}concat=n=2:v=1:a=0${rawCcatOut}")
+                    filterParts.add("${rawCcatOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normCcatOut}")
+
+                    currentV = normCcatOut
+                    currentStreamDurationSec += nextChunkDurationSec
                 }
-
-                val formattedDuration = String.format(java.util.Locale.US, "%.3f", transDuration)
-                val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
-
-                filterParts.add("${currentV}${nextChunkInput}xfade=transition=${sanitizedType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
-                filterParts.add("${rawXfvOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normXfvOut}")
-
-                currentV = normXfvOut
-                currentStreamDurationSec = offset + nextChunkDurationSec
-            } else {
-                val rawCcatOut = "[raw_ccat$bIdx]"
-                val normCcatOut = "[norm_ccat$bIdx]"
-
-                filterParts.add("${currentV}${nextChunkInput}concat=n=2:v=1:a=0${rawCcatOut}")
-                filterParts.add("${rawCcatOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normCcatOut}")
-
-                currentV = normCcatOut
-                currentStreamDurationSec += nextChunkDurationSec
             }
         }
 
@@ -2678,10 +2728,11 @@ class VideoEditingViewModel : ViewModel() {
         )
 
         // Determine if final pass can safely use fast stream copy (-c copy concat demuxer)
+        // Subtitles and text overlays are clamped and burned directly into each chunk MP4,
+        // so they do not require re-encoding during final assembly.
         val hasBoundaryTransitions = plan.boundaryTransitions.any { it.transition != null && it.transition.type != "none" }
         val hasAudioOperations = activeOperations.any { it is EditOperation.AddBackgroundAudio }
-        val hasWholeProjectFilters = activeOperations.any { it is EditOperation.AddSubtitles || it is EditOperation.AddText }
-        val canStreamCopy = !hasBoundaryTransitions && !hasAudioOperations && !hasWholeProjectFilters
+        val canStreamCopy = !hasBoundaryTransitions && !hasAudioOperations
 
         return ChunkExportPlan(
             isChunked = true,

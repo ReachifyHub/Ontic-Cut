@@ -820,24 +820,38 @@ class ExportService : Service() {
                 val finalPassStartTimeMs = System.currentTimeMillis()
                 val finalRenderPath = plan.renderPath
 
-                Log.d(TAG, "Starting final pass assembly (total duration: ${plan.totalDurationSecs}s)")
+                // Pre-assembly chunk verification
+                Log.d(TAG, "Starting final pass assembly verification for ${plan.chunkCommands.size} chunks (total duration: ${plan.totalDurationSecs}s)")
+                for ((idx, chunkCmd) in plan.chunkCommands.withIndex()) {
+                    val f = File(chunkCmd.outputPath)
+                    val exists = f.exists()
+                    val length = if (exists) f.length() else 0L
+                    Log.d(TAG, "Chunk verification [$idx/${plan.chunkCommands.size}]: path=${f.absolutePath}, exists=$exists, sizeBytes=$length, plannedDur=${chunkCmd.durationSecs}s")
+                    if (!exists || length == 0L) {
+                        val errorMsg = "Chunk $idx intermediate file is missing or empty (${f.absolutePath})"
+                        Log.e(TAG, errorMsg)
+                        cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                        jobDir.deleteRecursively()
+                        broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
+                        return@launch
+                    }
+                }
                 updateNotification(finalSpanStart.toInt(), "Assembling final video...")
 
-                val finalPassCmdStr: String
-                var concatListFile: File? = null
-
-                if (plan.canStreamCopyFinalPass) {
+                var usedStreamCopy = false
+                var finalPassCmdStr = if (plan.canStreamCopyFinalPass) {
                     Log.d(TAG, "Using fast stream copy concat demuxer for final chunk assembly")
                     val concatContent = StringBuilder()
                     for (chunkCmd in plan.chunkCommands) {
                         val f = File(chunkCmd.outputPath)
                         concatContent.append("file '${f.absolutePath}'\n")
                     }
-                    concatListFile = File(jobDir, "final_concat_list.txt")
+                    val concatListFile = File(jobDir, "final_concat_list.txt")
                     concatListFile.writeText(concatContent.toString())
-                    finalPassCmdStr = "-y -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -c copy \"$tempOutputPath\""
+                    usedStreamCopy = true
+                    "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -c copy \"$tempOutputPath\""
                 } else {
-                    finalPassCmdStr = plan.finalPassCommand ?: run {
+                    plan.finalPassCommand ?: run {
                         val errorMsg = "Missing final pass command in chunk plan"
                         cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
                         jobDir.deleteRecursively()
@@ -846,7 +860,7 @@ class ExportService : Service() {
                     }
                 }
 
-                val finalResult = ffmpegEngine.exportFinal(
+                var finalResult = ffmpegEngine.exportFinal(
                     ffmpegCommand = finalPassCmdStr,
                     totalDurationSecs = plan.totalDurationSecs,
                     onProgress = { p ->
@@ -864,6 +878,33 @@ class ExportService : Service() {
                         }
                     }
                 )
+
+                // Fallback: If fast stream copy failed, seamlessly retry with safe flat re-encoding final pass
+                if (finalResult is FFmpegRenderEngine.RenderResult.Failure && usedStreamCopy && !plan.finalPassCommand.isNullOrBlank()) {
+                    Log.w(TAG, "Stream copy concat failed (${finalResult.error}). Retrying with flat re-encoding fallback pass.")
+                    try {
+                        tempFile.delete()
+                    } catch (_: Exception) {}
+                    finalPassCmdStr = plan.finalPassCommand
+                    finalResult = ffmpegEngine.exportFinal(
+                        ffmpegCommand = finalPassCmdStr,
+                        totalDurationSecs = plan.totalDurationSecs,
+                        onProgress = { p ->
+                            try {
+                                val overallProgress = (finalSpanStart + (p / 100.0) * (finalSpanEnd - finalSpanStart)).toInt().coerceIn(0, 99)
+                                val now = System.currentTimeMillis()
+                                if (overallProgress != lastReportedProgress && (now - lastNotificationTime >= 250L || p >= 100)) {
+                                    lastReportedProgress = overallProgress
+                                    lastNotificationTime = now
+                                    updateNotification(overallProgress, "Assembling final video (fallback)...")
+                                    broadcastProgress(overallProgress)
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error updating fallback final pass progress: ${e.message}")
+                            }
+                        }
+                    )
+                }
 
                 val finalPassEndTimeMs = System.currentTimeMillis()
                 val finalPassEndIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
