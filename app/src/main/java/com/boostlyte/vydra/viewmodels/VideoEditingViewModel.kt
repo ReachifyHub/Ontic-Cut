@@ -489,6 +489,23 @@ class VideoEditingViewModel : ViewModel() {
         val subtitleOps = operations.filterIsInstance<EditOperation.AddSubtitles>()
         val hasExplicitSubtitles = subtitleOps.any { it.cues.isNotEmpty() }
         val subtitleCueTexts = subtitleOps.flatMap { it.cues.map { cue -> cue.text.trim().lowercase() } }.filter { it.isNotBlank() }.toSet()
+        val autoCaptionTexts = operations.filterIsInstance<EditOperation.AddText>()
+            .filter { it.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID }
+            .map { it.text.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toSet()
+        val allCaptionCueTexts = subtitleCueTexts + autoCaptionTexts
+        val hasAnyCaptionsOrSubtitles = allCaptionCueTexts.isNotEmpty()
+
+        Log.i(TAG, "buildVideoFilterStages: total ops=${operations.size}, explicitSubtitles=$hasExplicitSubtitles, anyCaptions=$hasAnyCaptionsOrSubtitles")
+        for ((idx, op) in operations.withIndex()) {
+            when (op) {
+                is EditOperation.AddText -> Log.i(TAG, "  Incoming Op[$idx] AddText: text='${op.text.take(40)}', pos=${op.position}, relX=${op.relativeX}, relY=${op.relativeY}, start=${op.startTimeMs}, end=${op.endTimeMs}, groupId=${op.groupId}")
+                is EditOperation.AddSubtitles -> Log.i(TAG, "  Incoming Op[$idx] AddSubtitles: fileName='${op.fileName}', cues=${op.cues.size}, pos=${op.position}, relX=${op.relativeX}, relY=${op.relativeY}")
+                else -> Log.d(TAG, "  Incoming Op[$idx] ${op::class.simpleName}")
+            }
+        }
+
         val seenAutoCaptionTimes = mutableSetOf<Pair<Long?, Long?>>()
         val overlayOps = operations.filterNot { op ->
             if (op is EditOperation.Crop) return@filterNot true
@@ -496,19 +513,30 @@ class VideoEditingViewModel : ViewModel() {
                 if (op.text.isBlank()) return@filterNot true
                 val cleanText = op.text.trim().lowercase()
 
-                // If explicit AddSubtitles are active, suppress ALL auto-caption AddText cards, matching/overlapping transcripts, and unpositioned text
-                if (hasExplicitSubtitles) {
-                    if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                // If explicit AddSubtitles are active, suppress duplicate AddText auto-caption cards
+                if (hasExplicitSubtitles && op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                    Log.i(TAG, "Filtering out duplicate AddText auto-caption card: '${op.text.take(30)}'")
+                    return@filterNot true
+                }
+
+                // If ANY captions/subtitles are active, suppress matching or overlapping full transcript / spoken text cards
+                if (hasAnyCaptionsOrSubtitles && op.groupId != com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
+                    if (cleanText in allCaptionCueTexts) {
+                        Log.i(TAG, "Filtering out stray transcript text matching caption cue: '${op.text.take(30)}'")
                         return@filterNot true
                     }
-                    if (cleanText in subtitleCueTexts) {
+                    if (allCaptionCueTexts.any { it.length >= 3 && (cleanText.contains(it) || it.contains(cleanText)) }) {
+                        Log.i(TAG, "Filtering out stray transcript text containing caption cue text: '${op.text.take(30)}'")
                         return@filterNot true
                     }
-                    if (subtitleCueTexts.any { it.length >= 3 && (cleanText.contains(it) || it.contains(cleanText)) }) {
+                    // Suppress unbounded or long spoken transcript text cards spanning the video
+                    if ((op.startTimeMs == null || op.endTimeMs == null) && cleanText.length > 40) {
+                        Log.i(TAG, "Filtering out unbounded long narration script text card: '${op.text.take(30)}'")
                         return@filterNot true
                     }
-                    // When explicit subtitles are enabled, suppress any text card not explicitly custom-positioned by the user
-                    if (!op.hasCustomPosition() && op.positionKeyframes.isEmpty()) {
+                    // Suppress any non-custom unpositioned text card when explicit subtitles are active
+                    if (hasExplicitSubtitles && !op.hasCustomPosition() && op.positionKeyframes.isEmpty()) {
+                        Log.i(TAG, "Filtering out unpositioned text card because explicit subtitles are active: '${op.text.take(30)}'")
                         return@filterNot true
                     }
                 }
@@ -516,6 +544,7 @@ class VideoEditingViewModel : ViewModel() {
                 if (op.groupId == com.boostlyte.vydra.captions.CaptionCueBuilder.CAPTION_GROUP_ID) {
                     val key = Pair(op.startTimeMs, op.endTimeMs)
                     if (seenAutoCaptionTimes.contains(key)) {
+                        Log.i(TAG, "Filtering out duplicate auto-caption at same time window: ${op.startTimeMs}..${op.endTimeMs}")
                         return@filterNot true
                     }
                     seenAutoCaptionTimes.add(key)
@@ -524,6 +553,7 @@ class VideoEditingViewModel : ViewModel() {
                 // Suppress stray unpositioned script / transcript text at default top position
                 if (!op.hasCustomPosition() && op.positionKeyframes.isEmpty()) {
                     if (op.position == TextPosition.TOP_CENTER || op.position == TextPosition.CENTER_TOP || op.position == TextPosition.TOP_LEFT || op.position == TextPosition.TOP_RIGHT) {
+                        Log.i(TAG, "Filtering out unpositioned top text card: '${op.text.take(30)}' at ${op.position}")
                         return@filterNot true
                     }
                 }
@@ -536,6 +566,7 @@ class VideoEditingViewModel : ViewModel() {
             when (op) {
                 is EditOperation.AddText -> {
                     val filterExpr = buildDrawtextExpr(op, fontFilePath, timeOffsetMs, sourceVideoHeight, density)
+                    Log.i(TAG, "Export filter stage [$stageIndex] AddText: text='${op.text.take(40)}', expr=$filterExpr")
                     val nextLabel = "[v$stageIndex]"
                     stages.add("$currentLabel$filterExpr$nextLabel")
                     currentLabel = nextLabel
@@ -2317,14 +2348,23 @@ class VideoEditingViewModel : ViewModel() {
         val numChunks = chunkTempPaths.size
 
         // Chain chunk videos using boundary transitions
+        // Up-front normalization of all raw chunk video inputs:
+        // Guarantees that EVERY input link to EVERY xfade or concat has the exact same timebase (1/fps),
+        // monotonic timestamps (PTS-STARTPTS), frame rate, and pixel format.
+        // This permanently eliminates the timebase mismatch crash (e.g. 1/30 vs 1/15360) on Android/Vivo Y85.
+        for (i in 0 until numChunks) {
+            val rawChunk = "[$i:v]"
+            val normChunk = "[norm_in$i]"
+            filterParts.add("${rawChunk}settb=1/${_exportFps.value},setpts=PTS-STARTPTS,fps=${_exportFps.value},format=yuv420p${normChunk}")
+        }
+
         val hasAnyBoundaryTransitions = chunkPlan.boundaryTransitions.any { it.transition != null && it.transition.type != "none" }
         var currentV: String
         var currentStreamDurationSec: Double
 
         if (!hasAnyBoundaryTransitions) {
-            // Flat N-way concatenation: drastically reduces decoder count and frame buffer memory in FFmpeg.
-            // Avoids chained concat=n=2 DAGs that overflow queue buffers on 60+ clip projects.
-            val allInputs = (0 until numChunks).joinToString("") { "[$it:v]" }
+            // Flat N-way concatenation of pre-normalized chunks:
+            val allInputs = (0 until numChunks).joinToString("") { "[norm_in$it]" }
             val rawCcatOut = "[raw_ccat]"
             val normCcatOut = "[norm_ccat]"
             filterParts.add("${allInputs}concat=n=$numChunks:v=1:a=0${rawCcatOut}")
@@ -2332,11 +2372,11 @@ class VideoEditingViewModel : ViewModel() {
             currentV = normCcatOut
             currentStreamDurationSec = chunkPlan.chunks.sumOf { it.durationMs / 1000.0 }
         } else {
-            currentV = "[0:v]"
+            currentV = "[norm_in0]"
             currentStreamDurationSec = chunkPlan.chunks[0].durationMs / 1000.0
 
             for (bIdx in 0 until numChunks - 1) {
-                val nextChunkInput = "[${bIdx + 1}:v]"
+                val nextChunkInput = "[norm_in${bIdx + 1}]"
                 val nextChunkDurationSec = chunkPlan.chunks[bIdx + 1].durationMs / 1000.0
                 val boundaryTrans = chunkPlan.boundaryTransitions.find { it.boundaryIndex == bIdx }?.transition
 

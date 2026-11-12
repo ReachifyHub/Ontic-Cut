@@ -205,4 +205,121 @@ class ResolutionAndAssemblyFixTest {
         assertTrue("Final pass must use single flat concat=n=7", finalCmd.command.contains("concat=n=7:v=1:a=0"))
         assertFalse("Final pass must not contain chained concat=n=2", finalCmd.command.contains("concat=n=2"))
     }
+
+    @Test
+    fun testBoundaryTransitionsAssembly_20Images() {
+        val items20 = (1..20).map {
+            EditOperation.MergeItem(uri = DummyUri.fromPath("file:///clip_$it.jpg"), durationMs = 3000L, isImage = true)
+        }
+        // Transitions at each gap (0 to 18)
+        val transList = (0..18).map {
+            EditOperation.Transition(index = it, type = "fade", durationMs = 500L)
+        }
+        val plan = ChunkPlanner.plan(items20, transList)
+        assertEquals(2, plan.chunks.size)
+        assertEquals(1, plan.boundaryTransitions.size)
+        assertNotNull(plan.boundaryTransitions[0].transition)
+
+        val tempPaths = listOf("/temp/chunk_0.mp4", "/temp/chunk_1.mp4")
+        val finalCmd = viewModel.buildFinalPassCommand(
+            chunkPlan = plan,
+            chunkTempPaths = tempPaths,
+            outputFilePath = "/out/final20.mp4",
+            context = null,
+            targetWidth = 1920,
+            targetHeight = 1080,
+            operations = emptyList()
+        )
+
+        val cmdStr = finalCmd.command
+        // Must normalize chunk 0 and chunk 1 up front
+        assertTrue("Must normalize chunk 0", cmdStr.contains("[0:v]settb=1/30,setpts=PTS-STARTPTS,fps=30,format=yuv420p[norm_in0]"))
+        assertTrue("Must normalize chunk 1", cmdStr.contains("[1:v]settb=1/30,setpts=PTS-STARTPTS,fps=30,format=yuv420p[norm_in1]"))
+        // xfade must connect [norm_in0] and [norm_in1], NEVER raw [0:v] or [1:v]
+        assertTrue("xfade must connect normalized inputs [norm_in0][norm_in1]", cmdStr.contains("[norm_in0][norm_in1]xfade="))
+        assertFalse("xfade must never connect raw [0:v]", cmdStr.contains("[0:v][1:v]xfade="))
+    }
+
+    @Test
+    fun testBoundaryTransitionsAssembly_64Images() {
+        val items64 = (1..64).map {
+            EditOperation.MergeItem(uri = DummyUri.fromPath("file:///clip_$it.jpg"), durationMs = 3000L, isImage = true)
+        }
+        val transList = (0..62).map {
+            EditOperation.Transition(index = it, type = "dissolve", durationMs = 500L)
+        }
+        val plan = ChunkPlanner.plan(items64, transList)
+        assertEquals(7, plan.chunks.size)
+        assertEquals(6, plan.boundaryTransitions.size)
+
+        val tempPaths = (0 until 7).map { "/temp/chunk_$it.mp4" }
+        val finalCmd = viewModel.buildFinalPassCommand(
+            chunkPlan = plan,
+            chunkTempPaths = tempPaths,
+            outputFilePath = "/out/final64.mp4",
+            context = null,
+            targetWidth = 1920,
+            targetHeight = 1080,
+            operations = emptyList()
+        )
+
+        val cmdStr = finalCmd.command
+        // All 7 chunks must have up-front normalization
+        for (i in 0 until 7) {
+            assertTrue("Must normalize chunk $i up-front", cmdStr.contains("[$i:v]settb=1/30,setpts=PTS-STARTPTS,fps=30,format=yuv420p[norm_in$i]"))
+        }
+
+        // xfade 0: [norm_in0][norm_in1]xfade=...[raw_xfv0]
+        // followed by [raw_xfv0]settb=1/30...[norm_xfv0]
+        assertTrue("First xfade connects [norm_in0][norm_in1]", cmdStr.contains("[norm_in0][norm_in1]xfade="))
+        assertTrue("First xfade normalizes output to [norm_xfv0]", cmdStr.contains("[raw_xfv0]settb=1/30,setpts=N,fps=30,format=yuv420p[norm_xfv0]"))
+
+        // Subsequent xfades must connect [norm_xfv(i-1)][norm_in(i+1)]
+        // specifically xfade 5 (which crashed on Vivo Y85!) connects [norm_xfv4][norm_in6]
+        assertTrue("xfade 5 must connect [norm_xfv4][norm_in6]", cmdStr.contains("[norm_xfv4][norm_in6]xfade="))
+        assertFalse("xfade 5 must never use raw [6:v] input", cmdStr.contains("[6:v]xfade=") || cmdStr.contains("[norm_xfv4][6:v]"))
+
+        // All 6 xfades must be present
+        for (b in 0 until 6) {
+            assertTrue("Must contain xfade $b", cmdStr.contains("[raw_xfv$b]"))
+            assertTrue("Must normalize xfade $b", cmdStr.contains("[norm_xfv$b]"))
+        }
+    }
+
+    @Test
+    fun testBoundaryTransitionsAssembly_100Images() {
+        val items100 = (1..100).map {
+            EditOperation.MergeItem(uri = DummyUri.fromPath("file:///clip_$it.jpg"), durationMs = 3000L, isImage = true)
+        }
+        val transList = (0..98).map {
+            EditOperation.Transition(index = it, type = "fade", durationMs = 500L)
+        }
+        val plan = ChunkPlanner.plan(items100, transList)
+        assertEquals(10, plan.chunks.size)
+        assertEquals(9, plan.boundaryTransitions.size)
+
+        val tempPaths = (0 until 10).map { "/temp/chunk_$it.mp4" }
+        val finalCmd = viewModel.buildFinalPassCommand(
+            chunkPlan = plan,
+            chunkTempPaths = tempPaths,
+            outputFilePath = "/out/final100.mp4",
+            context = null,
+            targetWidth = 1920,
+            targetHeight = 1080,
+            operations = emptyList()
+        )
+
+        val cmdStr = finalCmd.command
+        // All 10 chunks must be normalized
+        for (i in 0 until 10) {
+            assertTrue("Must normalize chunk $i up-front", cmdStr.contains("[$i:v]settb=1/30,setpts=PTS-STARTPTS,fps=30,format=yuv420p[norm_in$i]"))
+        }
+        // All 9 boundary transitions must be chained cleanly
+        for (b in 0 until 9) {
+            val secondInput = "[norm_in${b + 1}]"
+            assertTrue("Boundary transition $b must consume normalized $secondInput", cmdStr.contains("${secondInput}xfade="))
+            assertTrue("Boundary transition $b must produce [raw_xfv$b]", cmdStr.contains("[raw_xfv$b]"))
+            assertTrue("Boundary transition $b must normalize to [norm_xfv$b]", cmdStr.contains("[norm_xfv$b]"))
+        }
+    }
 }
