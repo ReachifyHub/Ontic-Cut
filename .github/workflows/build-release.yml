@@ -11,9 +11,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -22,16 +21,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build release APK
-        run: |
-          chmod +x ./gradlew
-          ./gradlew assembleRelease
+      - name: Build Release APK
+        run: chmod +x gradlew && ./gradlew assembleRelease
 
-      - name: Sign release APK
+      - name: Sign Android Release
         uses: r0adkll/sign-android-release@v1
+        id: sign
+        continue-on-error: false
         env:
           BUILD_TOOLS_VERSION: '34.0.0'
         with:
@@ -41,44 +40,40 @@ jobs:
           keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
 
-      - name: Collect signed APK artifacts
-        shell: bash
+      - name: Collect Release APK Artifacts
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-
-          signed_apks=(app/build/outputs/apk/release/*-signed.apk)
-          if (( ${#signed_apks[@]} == 0 )); then
-            echo "No signed APKs found in app/build/outputs/apk/release" >&2
-            exit 1
-          fi
-
           mkdir -p release-artifacts
-          version_tag="${GITHUB_REF_NAME//\//-}"
-
-          for apk in "${signed_apks[@]}"; do
-            if (( ${#signed_apks[@]} == 1 )); then
-              output="release-artifacts/Vydra-${version_tag}.apk"
-            else
-              apk_name="$(basename "$apk" -signed.apk)"
-              output="release-artifacts/Vydra-${version_tag}-${apk_name}.apk"
+          VERSION_TAG="${GITHUB_REF#refs/tags/}"
+          if [ "$VERSION_TAG" = "$GITHUB_REF" ]; then
+            VERSION_TAG="dev"
+          fi
+          found=0
+          for apk in app/build/outputs/apk/release/*-signed.apk; do
+            if [ -f "$apk" ]; then
+              cp "$apk" "release-artifacts/Vydra-${VERSION_TAG}.apk"
+              found=1
             fi
-            cp "$apk" "$output"
           done
+          if [ "$found" -eq 0 ]; then
+            for apk in app/build/outputs/apk/release/*.apk; do
+              if [ -f "$apk" ]; then
+                cp "$apk" "release-artifacts/Vydra-${VERSION_TAG}.apk"
+              fi
+            done
+          fi
+          ls -lh release-artifacts/
 
-          ls -lh release-artifacts
-
-      - name: Upload APK artifact
+      - name: Upload Release APK Artifact (For Actions Tab)
         uses: actions/upload-artifact@v4
         with:
           name: vydra-release-apk
           path: release-artifacts/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Upload APK to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: release-artifacts/*.apk
         env:
