@@ -185,6 +185,63 @@ object AppLogger {
     }
 
     /**
+     * Records fine-grained timing for an individual export stage to Logcat and vydra_export.log.
+     */
+    fun logStageTiming(
+        context: Context,
+        stageName: String,
+        durationSecs: Double,
+        details: String = ""
+    ) {
+        val formattedDur = String.format(Locale.US, "%.3f", durationSecs)
+        val suffix = if (details.isNotBlank()) " ${redact(details)}" else ""
+        val line = "STAGE_TIMING ${getIsoTimestamp()} stage=$stageName duration=${formattedDur}s$suffix"
+        Log.i("ExportProfiler", line)
+        appendToFileCapped(getExportLogFile(context), line)
+    }
+
+    /**
+     * Records an end-to-end export performance summary covering all pipeline stages.
+     */
+    fun logExportProfileSummary(
+        context: Context,
+        mode: String,
+        prepSecs: Double,
+        chunksSecs: Double,
+        audioSecs: Double,
+        finalAssemblySecs: Double,
+        gallerySaveSecs: Double,
+        totalSecs: Double,
+        videoDurationSecs: Double,
+        outputSizeBytes: Long,
+        resolution: Int,
+        fps: Int,
+        encoder: String,
+        numChunks: Int
+    ) {
+        val bitrateKbps = if (videoDurationSecs > 0.0) {
+            ((outputSizeBytes * 8.0) / videoDurationSecs / 1000.0).toLong()
+        } else 0L
+        val sizeMb = String.format(Locale.US, "%.2f", outputSizeBytes / (1024.0 * 1024.0))
+        val line = buildString {
+            append("EXPORT_PROFILE_SUMMARY ${getIsoTimestamp()} ")
+            append("mode=$mode numChunks=$numChunks ")
+            append("prep=${String.format(Locale.US, "%.2f", prepSecs)}s ")
+            append("chunks=${String.format(Locale.US, "%.2f", chunksSecs)}s ")
+            append("audio=${String.format(Locale.US, "%.2f", audioSecs)}s ")
+            append("finalAssembly=${String.format(Locale.US, "%.2f", finalAssemblySecs)}s ")
+            append("gallerySave=${String.format(Locale.US, "%.2f", gallerySaveSecs)}s ")
+            append("total=${String.format(Locale.US, "%.2f", totalSecs)}s ")
+            append("videoDuration=${String.format(Locale.US, "%.2f", videoDurationSecs)}s ")
+            append("outputSizeBytes=$outputSizeBytes (${sizeMb}MB) ")
+            append("avgBitrate=${bitrateKbps}kbps ")
+            append("res=${resolution}p@$fps encoder=$encoder")
+        }
+        Log.i("ExportProfiler", line)
+        appendToFileCapped(getExportLogFile(context), line)
+    }
+
+    /**
      * Records an uncaught crash with full device and memory details.
      */
     fun logCrash(context: Context, thread: Thread, throwable: Throwable) {

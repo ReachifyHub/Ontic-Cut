@@ -6430,7 +6430,9 @@ class VideoEditingActivity : AppCompatActivity() {
                 val tempOutputPath = tempOutputFile.absolutePath
 
                 val prepResult = withContext(Dispatchers.IO) {
+                    val prepStartMs = System.currentTimeMillis()
                     // Autosave project state before export
+                    val autosaveStartMs = System.currentTimeMillis()
                     try {
                         val curProj = viewModel.project.value
                         if (curProj != null) {
@@ -6450,6 +6452,14 @@ class VideoEditingActivity : AppCompatActivity() {
                     } catch (e: Exception) {
                         Log.w(TAG, "Autosave before export failed: ${e.message}")
                     }
+                    val autosaveSecs = (System.currentTimeMillis() - autosaveStartMs) / 1000.0
+                    com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                        this@VideoEditingActivity,
+                        "prep_autosave",
+                        autosaveSecs
+                    )
+
+                    val uriResolveStartMs = System.currentTimeMillis()
 
                     val sourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
                         tempInputFile.absolutePath
@@ -6559,6 +6569,14 @@ class VideoEditingActivity : AppCompatActivity() {
                         return@withContext null
                     }
 
+                    val uriResolveSecs = (System.currentTimeMillis() - uriResolveStartMs) / 1000.0
+                    com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                        this@VideoEditingActivity,
+                        "prep_uri_resolve",
+                        uriResolveSecs
+                    )
+
+                    val planBuildStartMs = System.currentTimeMillis()
                     val chunkPlan = viewModel.buildChunkExportPlan(
                         sourceFilePath = sourceFilePath,
                         outputFilePath = tempOutputPath,
@@ -6566,17 +6584,31 @@ class VideoEditingActivity : AppCompatActivity() {
                         context = this@VideoEditingActivity,
                         operationsOverride = resolvedOperations
                     )
+                    val planBuildSecs = (System.currentTimeMillis() - planBuildStartMs) / 1000.0
 
                     if (chunkPlan == null) {
                         Log.e(TAG, "Failed to build chunk export plan for source: $sourceFilePath")
                         return@withContext null
                     }
+                    com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                        this@VideoEditingActivity,
+                        "prep_plan_build",
+                        planBuildSecs,
+                        "isChunked=${chunkPlan.isChunked} numChunks=${chunkPlan.chunkCommands.size}"
+                    )
 
                     if (chunkPlan.isChunked) {
                         val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.json")
                         planFile.writeText(com.boostlyte.vydra.utils.ProjectSerializer.gson.toJson(chunkPlan))
                         Log.i(TAG, "Saved chunk plan JSON (${planFile.length()} bytes) to: ${planFile.absolutePath}")
-                        ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath)
+                        val prepDurationMs = System.currentTimeMillis() - prepStartMs
+                        com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                            this@VideoEditingActivity,
+                            "prep_total",
+                            prepDurationMs / 1000.0,
+                            "mode=chunked numChunks=${chunkPlan.chunkCommands.size}"
+                        )
+                        ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath, prepDurationMs)
                     } else {
                         var ffmpegCommand = chunkPlan.singlePassCommand ?: return@withContext null
                         Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
@@ -6603,7 +6635,14 @@ class VideoEditingActivity : AppCompatActivity() {
                         Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
                         val calculatedDur = viewModel.getCalculatedExportDurationSec(this@VideoEditingActivity)
                         val totalDurationSecs = if (calculatedDur > 0.0) calculatedDur else (getTotalSequenceDuration() / 1000.0)
-                        ExportPrepResult(ffmpegCommand, generatedConcat, totalDurationSecs, chunkPlan.renderPath)
+                        val prepDurationMs = System.currentTimeMillis() - prepStartMs
+                        com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                            this@VideoEditingActivity,
+                            "prep_total",
+                            prepDurationMs / 1000.0,
+                            "mode=single_pass"
+                        )
+                        ExportPrepResult(ffmpegCommand, generatedConcat, totalDurationSecs, chunkPlan.renderPath, prepDurationMs)
                     }
                 }
 
@@ -6620,7 +6659,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                val (ffmpegCommand, generatedFile, totalDurationSecs, renderPath) = prepResult
+                val (ffmpegCommand, generatedFile, totalDurationSecs, renderPath, prepDurationMs) = prepResult
                 val isChunkedPlan = (ffmpegCommand == null)
 
                 exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = getString(R.string.str_please_don_t_close_the_app)
@@ -6638,6 +6677,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_TEMP_OUTPUT_PATH, tempOutputPath)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_TOTAL_DURATION_SECS, totalDurationSecs)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_IS_AUDIO_ONLY, isAudioOnly)
+                    putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_PREP_DURATION_MS, prepDurationMs)
                 }
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -11826,7 +11866,8 @@ class VideoEditingActivity : AppCompatActivity() {
         val ffmpegCommand: String?,
         val generatedFile: File?,
         val totalDurationSecs: Double,
-        val renderPath: String
+        val renderPath: String,
+        val prepDurationMs: Long = 0L
     )
 
     companion object {

@@ -97,10 +97,14 @@ class FilterEscapeAndExportFidelityTest {
         )
         assertNotNull("Command must be generated", cmd)
 
-        // Verify each clip's -t flag equals the persisted timeline duration
-        assertTrue("Clip 0 must have -t 3.5", cmd!!.contains("-framerate 30 -loop 1 -t 3.5 -i \"/tmp/source_image.jpg\""))
-        assertTrue("Clip 1 must have -t 7.2", cmd.contains("-framerate 30 -loop 1 -t 7.2 -i \"/tmp/image_1.jpg\""))
-        assertTrue("Clip 2 must have -t 4.1", cmd.contains("-framerate 30 -loop 1 -t 4.1 -i \"/tmp/image_2.png\""))
+        // Verify each non-animated-mask image is decoded once (no -loop 1) and uses explicit trim duration
+        assertFalse("Static/Ken Burns images must not use -loop 1", cmd!!.contains("-loop 1"))
+        assertTrue("Clip 0 must be decoded once at 30fps", cmd.contains("-framerate 30 -i \"/tmp/source_image.jpg\""))
+        assertTrue("Clip 1 must be decoded once at 30fps", cmd.contains("-framerate 30 -i \"/tmp/image_1.jpg\""))
+        assertTrue("Clip 2 must be decoded once at 30fps", cmd.contains("-framerate 30 -i \"/tmp/image_2.png\""))
+        assertTrue("Clip 0 must have explicit 3.5s duration", cmd.contains("trim=duration=3.5") || cmd.contains("d=105"))
+        assertTrue("Clip 1 must have explicit 7.2s duration", cmd.contains("trim=duration=7.2") || cmd.contains("d=216"))
+        assertTrue("Clip 2 must have explicit 4.1s duration", cmd.contains("trim=duration=4.1") || cmd.contains("d=123"))
 
         // Total timeline duration: 3.5 + 7.2 + 4.1 = 14.8s
         val expectedTotal = (clip0DurationMs + clip1DurationMs + clip2DurationMs) / 1000.0

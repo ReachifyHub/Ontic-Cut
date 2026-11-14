@@ -3,13 +3,18 @@ package com.boostlyte.vydra.services
 import com.boostlyte.vydra.models.EditOperation
 import com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator
 import java.io.Serializable
+import kotlin.math.abs
+import kotlin.math.roundToLong
 
 data class ChunkClip(
     val globalIndex: Int,
     val localIndex: Int,
     val item: EditOperation.MergeItem,
     val resolvedLocalPath: String? = null,
-    val originalUriString: String? = null
+    val originalUriString: String? = null,
+    val fullClipDurationMs: Long = 0L,
+    val sliceStartInClipMs: Long = 0L,
+    val sliceDurationMs: Long = 0L
 ) : Serializable
 
 data class ChunkBoundaryTransition(
@@ -66,38 +71,67 @@ data class ChunkExportPlan(
     val density: Float = 1.0f,
     val fontFilePath: String? = null,
     val operations: List<EditOperation> = emptyList(),
-    val canStreamCopyFinalPass: Boolean = false
+    val canStreamCopyFinalPass: Boolean = false,
+    val canStreamCopyVideoWithAudioMux: Boolean = false,
+    val audioMixCommand: String? = null,
+    val mixedAudioTempPath: String? = null,
+    val audioBitrate: String = "128k",
+    val videoDurationSecs: Double = 0.0,
+    val needsVideoPadding: Boolean = false,
+    val paddingDurationSecs: Double = 0.0
 ) : Serializable
 
 /**
- * Pure Chunk Planner for large sequence exports (> 24 inputs).
+ * Pure Chunk Planner for large sequence exports (> 16 inputs).
  * Prevents kernel OOM kills on 60+ image projects by planning sub-sequence chunks
- * of at most MAX_CHUNK_SIZE clips.
+ * of at most MAX_CHUNK_SIZE clips (or up to MAX_CHUNK_SIZE + 1 when optimizing cuts).
  */
 object ChunkPlanner {
 
     const val CHUNK_TRIGGER_THRESHOLD = 16
     const val MAX_CHUNK_SIZE = 10
+    private const val TRANSITION_SAFE_MARGIN_MS = 150L
+    private const val MIN_SPLIT_INTERIOR_MS = 400L
+
+    internal fun getClipFullDurationMs(item: EditOperation.MergeItem): Long {
+        return when {
+            item.trimmedDurationMs > 0L -> item.trimmedDurationMs
+            item.trimEndMs > item.trimStartMs -> ((item.trimEndMs - item.trimStartMs) / item.speed).toLong()
+            item.durationMs > 0L -> item.durationMs
+            else -> 5000L
+        }
+    }
 
     /**
      * Plans chunks for a given sequence of clips and transitions.
      * If sequenceItems.size <= CHUNK_TRIGGER_THRESHOLD (16), single-pass graph is preserved.
+     *
+     * When [containBoundaryTransitions] is true, chunk boundaries avoid splitting across
+     * transitions either by cutting at a nearby transition-free gap or by slicing a clip
+     * cleanly in its transition-free interior so all transitions stay inside chunks and final
+     * assembly can use fast `-c copy` concatenation instead of re-encoding the full video.
      */
     fun plan(
         sequenceItems: List<EditOperation.MergeItem>,
-        transitions: List<EditOperation.Transition>
+        transitions: List<EditOperation.Transition>,
+        containBoundaryTransitions: Boolean = false,
+        fps: Int = 30
     ): ChunkPlan {
         val totalLayout = TimelineLayoutCalculator.computeTimelineLayout(sequenceItems, transitions)
         val totalDurationMs = totalLayout.totalDurationMs
 
         if (sequenceItems.size <= CHUNK_TRIGGER_THRESHOLD) {
             val singleChunkClips = sequenceItems.mapIndexed { idx, item ->
+                val fullDur = getClipFullDurationMs(item)
                 ChunkClip(
                     globalIndex = idx,
                     localIndex = idx,
                     item = item,
                     resolvedLocalPath = item.uri.path ?: item.uri.toString(),
-                    originalUriString = item.uri.toString()
+                    originalUriString = item.uri.toString(),
+                    fullClipDurationMs = fullDur,
+                    sliceStartInClipMs = 0L,
+                    sliceDurationMs = fullDur
                 )
             }
             val singleChunk = ChunkSpec(
@@ -120,66 +154,189 @@ object ChunkPlanner {
         val boundaryTransitions = mutableListOf<ChunkBoundaryTransition>()
 
         val totalClips = sequenceItems.size
+        val safeFps = fps.coerceAtLeast(1)
+        val frameDurMs = 1000.0 / safeFps
+
+        fun activeTransitionAtGap(gapIdx: Int): EditOperation.Transition? {
+            val t = transitions.find { it.index == gapIdx }
+            return if (t != null && !t.type.equals("none", ignoreCase = true) && t.durationMs > 0L) t else null
+        }
+
         var currentGlobalIdx = 0
+        var pendingTailStartMs = 0L
+        var accumulatedGlobalStartMs = 0L
         var chunkIdx = 0
 
         while (currentGlobalIdx < totalClips) {
-            val chunkSize = minOf(MAX_CHUNK_SIZE, totalClips - currentGlobalIdx)
-            val chunkClipsRaw = sequenceItems.subList(currentGlobalIdx, currentGlobalIdx + chunkSize)
+            val remainingClips = totalClips - currentGlobalIdx
 
-            val chunkClips = chunkClipsRaw.mapIndexed { localIdx, item ->
-                ChunkClip(
-                    globalIndex = currentGlobalIdx + localIdx,
-                    localIndex = localIdx,
-                    item = item,
-                    resolvedLocalPath = item.uri.path ?: item.uri.toString(),
-                    originalUriString = item.uri.toString()
-                )
+            var endGlobalIdx: Int
+            var endClipSplitMs: Long? = null
+            var nextGlobalIdx: Int
+            var nextPendingTailStartMs = 0L
+            var chunkBoundaryGapIdx: Int? = null
+            var chunkBoundaryTrans: EditOperation.Transition? = null
+
+            if (!containBoundaryTransitions || remainingClips <= MAX_CHUNK_SIZE) {
+                val chunkSize = minOf(MAX_CHUNK_SIZE, remainingClips)
+                endGlobalIdx = currentGlobalIdx + chunkSize - 1
+                nextGlobalIdx = endGlobalIdx + 1
+                if (nextGlobalIdx < totalClips) {
+                    chunkBoundaryGapIdx = endGlobalIdx
+                    chunkBoundaryTrans = activeTransitionAtGap(endGlobalIdx)
+                }
+            } else {
+                val idealEnd = currentGlobalIdx + MAX_CHUNK_SIZE - 1
+                val maxEnd = minOf(totalClips - 2, currentGlobalIdx + MAX_CHUNK_SIZE)
+                val minEnd = minOf(maxEnd, currentGlobalIdx + 6)
+
+                // Priority 1: Cut at a transition-free gap in [minEnd..maxEnd] closest to idealEnd
+                val freeGap = (minEnd..maxEnd)
+                    .filter { g -> activeTransitionAtGap(g) == null }
+                    .minWithOrNull(compareBy<Int> { abs(it - idealEnd) }.thenByDescending { it })
+
+                if (freeGap != null) {
+                    endGlobalIdx = freeGap
+                    nextGlobalIdx = freeGap + 1
+                    chunkBoundaryGapIdx = freeGap
+                    chunkBoundaryTrans = null
+                } else {
+                    // Priority 2: Split a clip cleanly in its transition-free interior
+                    data class SplitCandidate(val clipIdx: Int, val splitMs: Long, val isImage: Boolean)
+
+                    val splitCandidate = ((currentGlobalIdx + 1)..maxEnd)
+                        .filter { c -> c in minEnd..maxEnd }
+                        .mapNotNull { c ->
+                            val item = sequenceItems[c]
+                            val fullDurMs = getClipFullDurationMs(item)
+                            val prevFullDurMs = getClipFullDurationMs(sequenceItems[c - 1])
+                            val nextFullDurMs = getClipFullDurationMs(sequenceItems[c + 1])
+
+                            val rawTransIn = activeTransitionAtGap(c - 1)?.durationMs ?: 0L
+                            val transInMs = rawTransIn.coerceAtMost(minOf(prevFullDurMs, fullDurMs))
+                            val rawTransOut = activeTransitionAtGap(c)?.durationMs ?: 0L
+                            val transOutMs = rawTransOut.coerceAtMost(minOf(fullDurMs, nextFullDurMs))
+
+                            val interiorStartMs = transInMs + TRANSITION_SAFE_MARGIN_MS
+                            val interiorEndMs = fullDurMs - transOutMs - TRANSITION_SAFE_MARGIN_MS
+                            if (interiorEndMs - interiorStartMs >= MIN_SPLIT_INTERIOR_MS) {
+                                val rawMidMs = (interiorStartMs + interiorEndMs) / 2L
+                                val alignedFrame = (rawMidMs / frameDurMs).roundToLong()
+                                val alignedMs = (alignedFrame * frameDurMs).roundToLong()
+                                    .coerceIn(interiorStartMs, interiorEndMs)
+                                SplitCandidate(c, alignedMs, item.isImage)
+                            } else {
+                                null
+                            }
+                        }
+                        .minWithOrNull(
+                            compareBy<SplitCandidate> { !it.isImage }
+                                .thenBy { abs(it.clipIdx - idealEnd) }
+                        )
+
+                    if (splitCandidate != null) {
+                        endGlobalIdx = splitCandidate.clipIdx
+                        endClipSplitMs = splitCandidate.splitMs
+                        nextGlobalIdx = splitCandidate.clipIdx
+                        nextPendingTailStartMs = splitCandidate.splitMs
+                        // Boundary transition eliminated because clip is split cleanly outside transitions
+                    } else {
+                        // Priority 3: Fallback to standard boundary transition if all clips are ultra-short
+                        endGlobalIdx = minOf(totalClips - 2, idealEnd)
+                        nextGlobalIdx = endGlobalIdx + 1
+                        chunkBoundaryGapIdx = endGlobalIdx
+                        chunkBoundaryTrans = activeTransitionAtGap(endGlobalIdx)
+                    }
+                }
             }
 
-            // Internal transitions for this chunk
+            val chunkClips = mutableListOf<ChunkClip>()
+            val sliceDurationsMs = mutableListOf<Long>()
+            for (gIdx in currentGlobalIdx..endGlobalIdx) {
+                val localIdx = gIdx - currentGlobalIdx
+                val item = sequenceItems[gIdx]
+                val fullDurMs = getClipFullDurationMs(item)
+                val sliceStart = if (gIdx == currentGlobalIdx) pendingTailStartMs else 0L
+                val sliceEnd = if (gIdx == endGlobalIdx && endClipSplitMs != null) endClipSplitMs else fullDurMs
+                val sliceDur = (sliceEnd - sliceStart).coerceAtLeast(100L)
+
+                chunkClips.add(
+                    ChunkClip(
+                        globalIndex = gIdx,
+                        localIndex = localIdx,
+                        item = item,
+                        resolvedLocalPath = item.uri.path ?: item.uri.toString(),
+                        originalUriString = item.uri.toString(),
+                        fullClipDurationMs = fullDurMs,
+                        sliceStartInClipMs = sliceStart,
+                        sliceDurationMs = sliceDur
+                    )
+                )
+                sliceDurationsMs.add(sliceDur)
+            }
+
+            // Internal transitions for this chunk (between adjacent clips inside the chunk)
             val internalTrans = mutableListOf<EditOperation.Transition>()
-            for (localGap in 0 until chunkSize - 1) {
+            val numLocalGaps = chunkClips.size - 1
+            for (localGap in 0 until numLocalGaps) {
                 val globalGap = currentGlobalIdx + localGap
                 val trans = transitions.find { it.index == globalGap }
                 if (trans != null) {
-                    // Remap transition index to local gap index
                     internalTrans.add(trans.copy(index = localGap))
                 }
             }
 
-            val chunkLayout = TimelineLayoutCalculator.computeTimelineLayout(chunkClipsRaw, internalTrans)
+            val chunkLayout = TimelineLayoutCalculator.computeTimelineLayoutFromDurations(sliceDurationsMs, internalTrans)
             val chunkDurationMs = chunkLayout.totalDurationMs
 
-            val firstClipGlobalStart = totalLayout.clips.getOrNull(currentGlobalIdx)?.startMs ?: 0L
-            val lastClipGlobalEnd = totalLayout.clips.getOrNull(currentGlobalIdx + chunkSize - 1)?.endMs ?: (firstClipGlobalStart + chunkDurationMs)
+            val chunkGlobalStartMs = if (!containBoundaryTransitions && pendingTailStartMs == 0L) {
+                totalLayout.clips.getOrNull(currentGlobalIdx)?.startMs ?: accumulatedGlobalStartMs
+            } else {
+                accumulatedGlobalStartMs
+            }
+            val chunkGlobalEndMs = chunkGlobalStartMs + chunkDurationMs
 
             chunks.add(
                 ChunkSpec(
                     chunkIndex = chunkIdx,
                     clips = chunkClips,
                     internalTransitions = internalTrans,
-                    globalStartMs = firstClipGlobalStart,
-                    globalEndMs = lastClipGlobalEnd,
+                    globalStartMs = chunkGlobalStartMs,
+                    globalEndMs = chunkGlobalEndMs,
                     durationMs = chunkDurationMs
                 )
             )
 
-            // Check if there is a boundary transition between this chunk and the next
-            val nextGlobalIdx = currentGlobalIdx + chunkSize
             if (nextGlobalIdx < totalClips) {
-                val boundaryGap = nextGlobalIdx - 1
-                val boundaryTrans = transitions.find { it.index == boundaryGap }
-                boundaryTransitions.add(
-                    ChunkBoundaryTransition(
-                        boundaryIndex = chunkIdx,
-                        globalGapIndex = boundaryGap,
-                        transition = boundaryTrans
+                if (chunkBoundaryGapIdx != null) {
+                    boundaryTransitions.add(
+                        ChunkBoundaryTransition(
+                            boundaryIndex = chunkIdx,
+                            globalGapIndex = chunkBoundaryGapIdx,
+                            transition = chunkBoundaryTrans
+                        )
                     )
-                )
+                } else {
+                    boundaryTransitions.add(
+                        ChunkBoundaryTransition(
+                            boundaryIndex = chunkIdx,
+                            globalGapIndex = -1,
+                            transition = null
+                        )
+                    )
+                }
             }
 
+            val boundaryOverlapMs = if (chunkBoundaryTrans != null) {
+                val nextFullDur = getClipFullDurationMs(sequenceItems[nextGlobalIdx])
+                chunkBoundaryTrans.durationMs.coerceAtMost(minOf(chunkDurationMs, nextFullDur))
+            } else {
+                0L
+            }
+            accumulatedGlobalStartMs = chunkGlobalEndMs - boundaryOverlapMs
+
             currentGlobalIdx = nextGlobalIdx
+            pendingTailStartMs = nextPendingTailStartMs
             chunkIdx++
         }
 

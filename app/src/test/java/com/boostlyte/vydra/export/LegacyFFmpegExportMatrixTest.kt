@@ -188,12 +188,30 @@ class LegacyFFmpegExportMatrixTest {
         assertNotNull(audioPlan)
         assertFalse("Chunked export with audio cannot stream copy", audioPlan!!.canStreamCopyFinalPass)
 
-        // 3. Project with boundary transition -> canStreamCopy = false (must re-encode transition)
+        // 3. Project with transition at gap 9 on 3000ms clips -> boundary transition contained inside chunk -> canStreamCopyFinalPass = true
         val transitionProject = createProject(20, withAudio = false, withBoundaryTransitions = true)
         viewModel.loadProject(transitionProject)
         val transitionPlan = viewModel.buildChunkExportPlan("/tmp/source.mp4", "/tmp/out.mp4")
         assertNotNull(transitionPlan)
-        assertFalse("Chunked export with boundary transition cannot stream copy", transitionPlan!!.canStreamCopyFinalPass)
+        assertTrue("Chunked export with containable boundary transition can still stream copy", transitionPlan!!.canStreamCopyFinalPass)
+
+        // 4. Unsplit-able ultra-short clips (500ms) with transitions at every gap -> boundary transition remains -> canStreamCopy = false
+        val shortItems = (1..19).map {
+            EditOperation.MergeItem(uri = DummyUri.fromPath("/tmp/short_$it.jpg"), durationMs = 500L, isImage = true)
+        }
+        val denseTrans = (0..18).map {
+            EditOperation.Transition(index = it, type = "fade", durationMs = 400L)
+        }
+        val unsplitProject = VideoProject(
+            sourceUri = DummyUri.fromPath("/tmp/source_0.jpg"),
+            sourceName = "source_0.jpg",
+            operations = listOf(EditOperation.Merge(items = shortItems)) + denseTrans,
+            canvasAspectRatio = CanvasAspectRatio.LANDSCAPE_16_9
+        )
+        viewModel.loadProject(unsplitProject)
+        val unsplitPlan = viewModel.buildChunkExportPlan("/tmp/source_0.jpg", "/tmp/out.mp4")
+        assertNotNull(unsplitPlan)
+        assertFalse("Chunked export with uncontainable boundary transition cannot stream copy", unsplitPlan!!.canStreamCopyFinalPass)
     }
 
     @Test

@@ -57,6 +57,7 @@ class ExportService : Service() {
         const val EXTRA_IS_AUDIO_ONLY = "extra_is_audio_only"
         const val EXTRA_CHUNK_PLAN_FILE = "extra_chunk_plan_file"
         const val EXTRA_RENDER_PATH = "extra_render_path"
+        const val EXTRA_PREP_DURATION_MS = "extra_prep_duration_ms"
     }
 
     override fun onCreate() {
@@ -105,6 +106,7 @@ class ExportService : Service() {
             return START_NOT_STICKY
         }
         val isAudioOnly = intent.getBooleanExtra(EXTRA_IS_AUDIO_ONLY, false)
+        val prepDurationMs = intent.getLongExtra(EXTRA_PREP_DURATION_MS, 0L)
         val chunkPlanFilePath = intent.getStringExtra(EXTRA_CHUNK_PLAN_FILE)
         if (chunkPlanFilePath != null) {
             val planFile = File(chunkPlanFilePath)
@@ -133,7 +135,7 @@ class ExportService : Service() {
                 }
 
                 if (chunkPlan != null && chunkPlan.isChunked) {
-                    handleChunkedExport(chunkPlan, tempOutputPath, isAudioOnly, planFile)
+                    handleChunkedExport(chunkPlan, tempOutputPath, isAudioOnly, planFile, prepDurationMs)
                     return START_NOT_STICKY
                 }
             }
@@ -219,6 +221,13 @@ class ExportService : Service() {
                             returnCode = 0,
                             renderPath = renderPath
                         )
+                        val spEncoder = if (command.contains("h264_mediacodec")) "h264_mediacodec" else "libx264"
+                        com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                            this@ExportService,
+                            "single_pass_ffmpeg",
+                            passDurationSec,
+                            "sizeBytes=${tempFile.length()} encoder=$spEncoder"
+                        )
                         updateNotification(100, "Saving video...")
                         broadcastProgress(100)
 
@@ -228,13 +237,40 @@ class ExportService : Service() {
                             showCompletionNotification("Export Failed", "Rendered file is missing or empty", null)
                             broadcastFailure("Rendered output file is empty or missing", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         } else {
+                            val outputSizeBytes = tempFile.length()
+                            val galleryStartMs = System.currentTimeMillis()
                             val savedUri = try {
                                 saveVideoToGallery(tempFile, isAudioOnly)
                             } catch (e: Exception) {
                                 Log.e(TAG, "Exception saving to gallery", e)
                                 null
                             }
+                            val gallerySaveSecs = (System.currentTimeMillis() - galleryStartMs) / 1000.0
+                            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                                this@ExportService,
+                                "gallery_save",
+                                gallerySaveSecs,
+                                "saved=${savedUri != null}"
+                            )
                             if (savedUri != null) {
+                                val prepSecs = prepDurationMs / 1000.0
+                                val totalSecs = prepSecs + passDurationSec + gallerySaveSecs
+                                com.boostlyte.vydra.utils.AppLogger.logExportProfileSummary(
+                                    context = this@ExportService,
+                                    mode = "single_pass",
+                                    prepSecs = prepSecs,
+                                    chunksSecs = 0.0,
+                                    audioSecs = 0.0,
+                                    finalAssemblySecs = passDurationSec,
+                                    gallerySaveSecs = gallerySaveSecs,
+                                    totalSecs = totalSecs,
+                                    videoDurationSecs = durationSecs,
+                                    outputSizeBytes = outputSizeBytes,
+                                    resolution = Regex("""scale=(\d+):(\d+)""").find(command)?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 0,
+                                    fps = Regex("""fps=(\d+)""").find(command)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 30,
+                                    encoder = spEncoder,
+                                    numChunks = 1
+                                )
                                 com.boostlyte.vydra.utils.AppLogger.logExportEnded(this@ExportService, 0, tempOutputPath)
                                 showCompletionNotification("Export Complete", "Video saved to gallery", savedUri)
                                 broadcastSuccess(savedUri.toString())
@@ -558,14 +594,15 @@ class ExportService : Service() {
         plan: ChunkExportPlan,
         tempOutputPath: String,
         isAudioOnly: Boolean,
-        planFile: File?
+        planFile: File?,
+        prepDurationMs: Long = 0L
     ) {
         val totalChunkDurations = plan.chunkDurationsSecs.sum()
         val finalPassDuration = plan.totalDurationSecs
         val totalWeight = totalChunkDurations + finalPassDuration
         val numChunks = plan.chunkCommands.size
 
-        val projectStats = "mode=chunked numChunks=$numChunks totalDurationSecs=${plan.totalDurationSecs} isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath canStreamCopy=${plan.canStreamCopyFinalPass}"
+        val projectStats = "mode=chunked numChunks=$numChunks totalDurationSecs=${plan.totalDurationSecs} isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath canStreamCopy=${plan.canStreamCopyFinalPass} canStreamCopyWithAudio=${plan.canStreamCopyVideoWithAudioMux}"
         com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
 
         // Storage verification
@@ -578,7 +615,7 @@ class ExportService : Service() {
         if (!storageResult.isSufficient) {
             val msg = storageResult.message ?: "Insufficient storage for export"
             Log.e(TAG, msg)
-            cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+            cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
             com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, msg, -1, null)
             showCompletionNotification("Export Failed", msg, null)
             broadcastFailure(msg, ErrorCode.STORAGE_FULL.code)
@@ -589,11 +626,11 @@ class ExportService : Service() {
 
         // Encoder capability selection
         val sharedPrefs = getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
-        val prefEncoder = sharedPrefs.getString("default_encoder", "auto") ?: "auto"
-        val encoderPref = when (prefEncoder) {
-            "hardware" -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.HARDWARE
-            "software" -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.SOFTWARE
-            else -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.AUTO
+        val prefEncoder = sharedPrefs.getString("default_encoder", "software") ?: "software"
+        val encoderPref = when {
+            prefEncoder.equals("hardware", ignoreCase = true) -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.HARDWARE
+            prefEncoder.equals("auto", ignoreCase = true) -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.AUTO
+            else -> com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.SOFTWARE
         }
         val selectedEncoder = com.boostlyte.vydra.export.EncoderSelector.selectEncoder(
             preference = encoderPref,
@@ -606,6 +643,8 @@ class ExportService : Service() {
         updateNotification(0, "Exporting part 1/$numChunks...")
 
         serviceScope.launch {
+            val serviceExecStartMs = System.currentTimeMillis()
+            val prepSecs = prepDurationMs / 1000.0
             val tempFile = File(tempOutputPath)
             var accumulatedWeight = 0.0
             val jobDir = File(cacheDir, "export_job_${System.currentTimeMillis()}").apply { mkdirs() }
@@ -617,12 +656,16 @@ class ExportService : Service() {
                 var currentChunkCommands = plan.chunkCommands
                 var currentFinalPassCommand = plan.finalPassCommand
                 var currentEncoderIsHardware = selectedEncoder.isHardware
+                var activeCodecArgs = selectedEncoder.ffmpegVideoCodecArgs
+                var activeEncoderLabel = selectedEncoder.codecName ?: if (currentEncoderIsHardware) "h264_mediacodec" else "libx264"
                 var hasRetriedWithSoftware = false
                 var chunkLoopSuccess = false
+                var chunksStartMs = System.currentTimeMillis()
 
                 while (!chunkLoopSuccess) {
                     var retryWithSoftwareRequested = false
                     accumulatedWeight = 0.0
+                    chunksStartMs = System.currentTimeMillis()
 
                     // Execute each chunk pass sequentially
                     for ((idx, chunkCmd) in currentChunkCommands.withIndex()) {
@@ -714,13 +757,19 @@ class ExportService : Service() {
                                 if (!chunkOutputFile.exists() || chunkOutputFile.length() == 0L) {
                                     val errorMsg = "Chunk $chunkIdx/$numChunks output file missing or empty"
                                     Log.e(TAG, errorMsg)
-                                    cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                                    cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
                                     jobDir.deleteRecursively()
                                     com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, errorMsg, -1, activeScriptFile)
                                     showCompletionNotification("Export Failed", errorMsg, null)
                                     broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                                     return@launch
                                 }
+                                com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                                    this@ExportService,
+                                    "chunk_$chunkIdx",
+                                    passDurationSec,
+                                    "sizeBytes=${chunkOutputFile.length()} encoder=$activeEncoderLabel"
+                                )
                                 Log.d(TAG, "Chunk $chunkIdx/$numChunks completed successfully (${chunkOutputFile.length()} bytes)")
                             }
                             is FFmpegRenderEngine.RenderResult.Failure -> {
@@ -731,10 +780,17 @@ class ExportService : Service() {
                                 // Hardware encoder failure fallback to software libx264 for the ENTIRE job
                                 if (currentEncoderIsHardware && !hasRetriedWithSoftware && !com.boostlyte.vydra.export.EncoderSelector.isPermanentFailure(result.error, false)) {
                                     Log.w(TAG, "Hardware encoder failed on $stageName (${result.error}). Cleaning up partial chunks and restarting entire export with software libx264.")
-                                    cleanupChunkTempFiles(plan.chunkTempPaths, null)
+                                    cleanupChunkTempFiles(plan.chunkTempPaths, null, plan.mixedAudioTempPath)
                                     hasRetriedWithSoftware = true
                                     currentEncoderIsHardware = false
-                                    val swEncoderArgs = "-c:v libx264 -preset veryfast -threads 0 -pix_fmt yuv420p"
+                                    val swEncoder = com.boostlyte.vydra.export.EncoderSelector.selectEncoder(
+                                        preference = com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.SOFTWARE,
+                                        targetWidth = plan.targetWidth,
+                                        targetHeight = plan.targetHeight,
+                                        fps = plan.fps
+                                    )
+                                    activeCodecArgs = swEncoder.ffmpegVideoCodecArgs
+                                    activeEncoderLabel = "libx264"
 
                                     val swChunkCommands = mutableListOf<ChunkCommand>()
                                     for ((cIdx, chunk) in plan.chunkSpecs.withIndex()) {
@@ -750,26 +806,16 @@ class ExportService : Service() {
                                             targetWidth = plan.targetWidth,
                                             targetHeight = plan.targetHeight,
                                             operations = plan.operations,
-                                            encoderOverride = swEncoderArgs
+                                            encoderOverride = activeCodecArgs
                                         )
                                         swChunkCommands.add(swCmd.copy(renderPath = "legacy"))
                                     }
                                     currentChunkCommands = swChunkCommands
 
-                                    val swFinalCmd = vm.buildFinalPassCommand(
-                                        chunkPlan = com.boostlyte.vydra.services.ChunkPlanner.plan(
-                                            plan.chunkSpecs.flatMap { it.clips.map { it.item } },
-                                            plan.operations.filterIsInstance<com.boostlyte.vydra.models.EditOperation.Transition>()
-                                        ),
-                                        chunkTempPaths = plan.chunkTempPaths,
-                                        outputFilePath = tempOutputPath,
-                                        context = this@ExportService,
-                                        targetWidth = plan.targetWidth,
-                                        targetHeight = plan.targetHeight,
-                                        operations = plan.operations,
-                                        encoderOverride = swEncoderArgs
-                                    )
-                                    currentFinalPassCommand = swFinalCmd.command
+                                    val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(plan.resolution)
+                                    currentFinalPassCommand = currentFinalPassCommand?.let {
+                                        com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(it, swCrf)
+                                    }
                                     retryWithSoftwareRequested = true
                                     break
                                 }
@@ -783,7 +829,7 @@ class ExportService : Service() {
                                     ffmpegLogs = errorLines
                                 )
                                 Log.e(TAG, "$stageName failed: ${result.error}")
-                                cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                                cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
                                 jobDir.deleteRecursively()
                                 com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "$stageName failed: ${result.error}", returnCode, activeScriptFile)
                                 showCompletionNotification("Export Failed", "Error during $stageName", null)
@@ -792,7 +838,7 @@ class ExportService : Service() {
                             }
                             is FFmpegRenderEngine.RenderResult.Cancelled -> {
                                 Log.d(TAG, "Export was cancelled during chunk $chunkIdx/$numChunks")
-                                cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                                cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
                                 jobDir.deleteRecursively()
                                 com.boostlyte.vydra.utils.AppLogger.logExportCancelled(this@ExportService)
                                 val manager = getSystemService(NotificationManager::class.java)
@@ -810,50 +856,176 @@ class ExportService : Service() {
                     }
                 }
 
-                // All chunks succeeded! Now execute final pass.
+                val chunksTotalSecs = (System.currentTimeMillis() - chunksStartMs) / 1000.0
+                com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                    this@ExportService,
+                    "chunks_total",
+                    chunksTotalSecs,
+                    "numChunks=$numChunks encoder=$activeEncoderLabel"
+                )
+
+                // All chunks succeeded! Verify chunk files before audio/final assembly.
                 val finalSpanStart = if (totalWeight > 0.0) (totalChunkDurations / totalWeight) * 100.0 else (numChunks.toDouble() / (numChunks + 1)) * 100.0
                 val finalSpanEnd = 100.0
                 var lastReportedProgress = -1
                 var lastNotificationTime = 0L
 
-                val finalPassStartIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
-                val finalPassStartTimeMs = System.currentTimeMillis()
                 val finalRenderPath = plan.renderPath
 
                 // Pre-assembly chunk verification
-                Log.d(TAG, "Starting final pass assembly verification for ${plan.chunkCommands.size} chunks (total duration: ${plan.totalDurationSecs}s)")
-                for ((idx, chunkCmd) in plan.chunkCommands.withIndex()) {
+                Log.d(TAG, "Starting final pass assembly verification for ${currentChunkCommands.size} chunks (total duration: ${plan.totalDurationSecs}s)")
+                for ((idx, chunkCmd) in currentChunkCommands.withIndex()) {
                     val f = File(chunkCmd.outputPath)
                     val exists = f.exists()
                     val length = if (exists) f.length() else 0L
-                    Log.d(TAG, "Chunk verification [$idx/${plan.chunkCommands.size}]: path=${f.absolutePath}, exists=$exists, sizeBytes=$length, plannedDur=${chunkCmd.durationSecs}s")
+                    Log.d(TAG, "Chunk verification [$idx/${currentChunkCommands.size}]: path=${f.absolutePath}, exists=$exists, sizeBytes=$length, plannedDur=${chunkCmd.durationSecs}s")
                     if (!exists || length == 0L) {
                         val errorMsg = "Chunk $idx intermediate file is missing or empty (${f.absolutePath})"
                         Log.e(TAG, errorMsg)
-                        cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                        cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
                         jobDir.deleteRecursively()
                         broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         return@launch
                     }
                 }
+
+                // Stage 4: Pre-mix background audio / voiceover into a single AAC .m4a file
+                // so final assembly can concatenate chunk videos via `-c copy` without video re-encoding.
+                var audioSecs = 0.0
+                var mixedAudioReady = false
+                if (!plan.audioMixCommand.isNullOrBlank() && !plan.mixedAudioTempPath.isNullOrBlank()) {
+                    val audioStartMs = System.currentTimeMillis()
+                    updateNotification(finalSpanStart.toInt(), "Processing audio...")
+                    val audioResult = ffmpegEngine.exportFinal(
+                        ffmpegCommand = plan.audioMixCommand,
+                        totalDurationSecs = plan.totalDurationSecs,
+                        onProgress = { }
+                    )
+                    audioSecs = (System.currentTimeMillis() - audioStartMs) / 1000.0
+                    try {
+                        com.antonkarpenko.ffmpegkit.FFmpegKitConfig.clearSessions()
+                    } catch (_: Exception) {}
+
+                    when (audioResult) {
+                        is FFmpegRenderEngine.RenderResult.Success -> {
+                            val mixedFile = File(plan.mixedAudioTempPath)
+                            mixedAudioReady = mixedFile.exists() && mixedFile.length() > 0L
+                            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                                this@ExportService,
+                                "audio_processing",
+                                audioSecs,
+                                "ready=$mixedAudioReady sizeBytes=${if (mixedAudioReady) mixedFile.length() else 0L}"
+                            )
+                        }
+                        is FFmpegRenderEngine.RenderResult.Cancelled -> {
+                            Log.d(TAG, "Export was cancelled during audio mix pass")
+                            cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
+                            jobDir.deleteRecursively()
+                            com.boostlyte.vydra.utils.AppLogger.logExportCancelled(this@ExportService)
+                            val manager = getSystemService(NotificationManager::class.java)
+                            manager?.cancel(NOTIFICATION_ID)
+                            broadcastCancelled()
+                            return@launch
+                        }
+                        is FFmpegRenderEngine.RenderResult.Failure -> {
+                            Log.w(TAG, "Audio mix pre-pass failed (${audioResult.error}), falling back to full final pass.")
+                            try {
+                                File(plan.mixedAudioTempPath).delete()
+                            } catch (_: Exception) {}
+                            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                                this@ExportService,
+                                "audio_processing",
+                                audioSecs,
+                                "ready=false fallback=true"
+                            )
+                        }
+                    }
+                }
+
+                // Stage 5: Final Assembly
                 updateNotification(finalSpanStart.toInt(), "Assembling final video...")
+                val finalPassStartIso = com.boostlyte.vydra.utils.AppLogger.getIsoTimestamp()
+                val finalPassStartTimeMs = System.currentTimeMillis()
 
                 var usedStreamCopy = false
-                var finalPassCmdStr = if (plan.canStreamCopyFinalPass) {
-                    Log.d(TAG, "Using fast stream copy concat demuxer for final chunk assembly")
+                var paddedLastChunkSuccess = true
+                val formattedTotalDur = String.format(java.util.Locale.US, "%.3f", plan.totalDurationSecs).trimEnd('0').trimEnd('.')
+
+                var finalPassCmdStr: String? = null
+                if (plan.canStreamCopyFinalPass) {
+                    Log.d(TAG, "Using fast stream copy concat demuxer for final chunk assembly (video only)")
                     val concatContent = StringBuilder()
-                    for (chunkCmd in plan.chunkCommands) {
-                        val f = File(chunkCmd.outputPath)
-                        concatContent.append("file '${f.absolutePath}'\n")
+                    for (chunkCmd in currentChunkCommands) {
+                        concatContent.append("file '${File(chunkCmd.outputPath).absolutePath}'\n")
                     }
                     val concatListFile = File(jobDir, "final_concat_list.txt")
                     concatListFile.writeText(concatContent.toString())
                     usedStreamCopy = true
-                    "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -c copy \"$tempOutputPath\""
-                } else {
-                    plan.finalPassCommand ?: run {
+                    finalPassCmdStr = "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -c copy -movflags +faststart \"$tempOutputPath\""
+                } else if (plan.canStreamCopyVideoWithAudioMux && mixedAudioReady && !plan.mixedAudioTempPath.isNullOrBlank()) {
+                    Log.d(TAG, "Using fast stream copy concat + mixed AAC audio mux for final chunk assembly")
+                    val concatContent = StringBuilder()
+                    for (chunkCmd in currentChunkCommands) {
+                        concatContent.append("file '${File(chunkCmd.outputPath).absolutePath}'\n")
+                    }
+                    val concatListFile = File(jobDir, "final_concat_list.txt")
+                    concatListFile.writeText(concatContent.toString())
+                    usedStreamCopy = true
+                    finalPassCmdStr = "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -i \"${plan.mixedAudioTempPath}\" -map 0:v -map 1:a -c copy -movflags +faststart -t $formattedTotalDur \"$tempOutputPath\""
+                } else if (mixedAudioReady && plan.needsVideoPadding && !plan.mixedAudioTempPath.isNullOrBlank() && currentChunkCommands.isNotEmpty()) {
+                    // Pad ONLY the last chunk so preceding chunks stay untouched for -c copy mux
+                    val lastChunk = currentChunkCommands.last()
+                    val paddedLastChunkFile = File(jobDir, "padded_last_chunk.mp4")
+                    val formattedPad = String.format(java.util.Locale.US, "%.3f", plan.paddingDurationSecs).trimEnd('0').trimEnd('.')
+                    val padCmd = "-y -i \"${lastChunk.outputPath}\" -vf \"tpad=stop_mode=clone:stop_duration=$formattedPad,settb=1/${plan.fps},fps=${plan.fps},format=yuv420p\" -an $activeCodecArgs -movflags +faststart \"${paddedLastChunkFile.absolutePath}\""
+                    Log.d(TAG, "Audio extends ${formattedPad}s past video; padding only last chunk for stream-copy assembly")
+                    val padResult = ffmpegEngine.exportFinal(
+                        ffmpegCommand = padCmd,
+                        totalDurationSecs = lastChunk.durationSecs + plan.paddingDurationSecs,
+                        onProgress = { }
+                    )
+                    try {
+                        com.antonkarpenko.ffmpegkit.FFmpegKitConfig.clearSessions()
+                    } catch (_: Exception) {}
+
+                    when (padResult) {
+                        is FFmpegRenderEngine.RenderResult.Success -> {
+                            if (paddedLastChunkFile.exists() && paddedLastChunkFile.length() > 0L) {
+                                val concatContent = StringBuilder()
+                                for (cIdx in 0 until currentChunkCommands.size - 1) {
+                                    concatContent.append("file '${File(currentChunkCommands[cIdx].outputPath).absolutePath}'\n")
+                                }
+                                concatContent.append("file '${paddedLastChunkFile.absolutePath}'\n")
+                                val concatListFile = File(jobDir, "final_concat_list.txt")
+                                concatListFile.writeText(concatContent.toString())
+                                usedStreamCopy = true
+                                finalPassCmdStr = "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -i \"${plan.mixedAudioTempPath}\" -map 0:v -map 1:a -c copy -movflags +faststart -t $formattedTotalDur \"$tempOutputPath\""
+                            } else {
+                                paddedLastChunkSuccess = false
+                            }
+                        }
+                        is FFmpegRenderEngine.RenderResult.Cancelled -> {
+                            Log.d(TAG, "Export was cancelled during last-chunk padding")
+                            cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
+                            jobDir.deleteRecursively()
+                            com.boostlyte.vydra.utils.AppLogger.logExportCancelled(this@ExportService)
+                            val manager = getSystemService(NotificationManager::class.java)
+                            manager?.cancel(NOTIFICATION_ID)
+                            broadcastCancelled()
+                            return@launch
+                        }
+                        is FFmpegRenderEngine.RenderResult.Failure -> {
+                            Log.w(TAG, "Last-chunk padding failed (${padResult.error}), falling back to full final pass.")
+                            paddedLastChunkSuccess = false
+                        }
+                    }
+                }
+
+                if (finalPassCmdStr == null || !paddedLastChunkSuccess) {
+                    usedStreamCopy = false
+                    finalPassCmdStr = currentFinalPassCommand ?: run {
                         val errorMsg = "Missing final pass command in chunk plan"
-                        cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                        cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
                         jobDir.deleteRecursively()
                         broadcastFailure(errorMsg, ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         return@launch
@@ -861,7 +1033,7 @@ class ExportService : Service() {
                 }
 
                 var finalResult = ffmpegEngine.exportFinal(
-                    ffmpegCommand = finalPassCmdStr,
+                    ffmpegCommand = finalPassCmdStr!!,
                     totalDurationSecs = plan.totalDurationSecs,
                     onProgress = { p ->
                         try {
@@ -880,14 +1052,15 @@ class ExportService : Service() {
                 )
 
                 // Fallback: If fast stream copy failed, seamlessly retry with safe flat re-encoding final pass
-                if (finalResult is FFmpegRenderEngine.RenderResult.Failure && usedStreamCopy && !plan.finalPassCommand.isNullOrBlank()) {
+                if (finalResult is FFmpegRenderEngine.RenderResult.Failure && usedStreamCopy && !currentFinalPassCommand.isNullOrBlank()) {
                     Log.w(TAG, "Stream copy concat failed (${finalResult.error}). Retrying with flat re-encoding fallback pass.")
                     try {
                         tempFile.delete()
                     } catch (_: Exception) {}
-                    finalPassCmdStr = plan.finalPassCommand
+                    usedStreamCopy = false
+                    finalPassCmdStr = currentFinalPassCommand
                     finalResult = ffmpegEngine.exportFinal(
-                        ffmpegCommand = finalPassCmdStr,
+                        ffmpegCommand = finalPassCmdStr!!,
                         totalDurationSecs = plan.totalDurationSecs,
                         onProgress = { p ->
                             try {
@@ -927,22 +1100,54 @@ class ExportService : Service() {
                             returnCode = 0,
                             renderPath = finalRenderPath
                         )
+                        val outputSizeBytes = tempFile.length()
+                        com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                            this@ExportService,
+                            "final_assembly",
+                            finalPassDurationSec,
+                            "usedStreamCopy=$usedStreamCopy outputSizeBytes=$outputSizeBytes"
+                        )
                         updateNotification(100, "Saving video...")
                         broadcastProgress(100)
 
-                        if (!tempFile.exists() || tempFile.length() == 0L) {
+                        if (!tempFile.exists() || outputSizeBytes == 0L) {
                             Log.e(TAG, "Rendered output file is missing or 0 bytes: $tempOutputPath")
                             com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, "Rendered file is missing or empty", -1, null)
                             showCompletionNotification("Export Failed", "Rendered file is missing or empty", null)
                             broadcastFailure("Rendered output file is empty or missing", ErrorCode.FFMPEG_EXECUTION_FAILED.code)
                         } else {
+                            val galleryStartMs = System.currentTimeMillis()
                             val savedUri = try {
                                 saveVideoToGallery(tempFile, isAudioOnly)
                             } catch (e: Exception) {
                                 Log.e(TAG, "Exception saving to gallery", e)
                                 null
                             }
+                            val gallerySaveSecs = (System.currentTimeMillis() - galleryStartMs) / 1000.0
+                            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                                this@ExportService,
+                                "gallery_save",
+                                gallerySaveSecs,
+                                "saved=${savedUri != null}"
+                            )
                             if (savedUri != null) {
+                                val totalSecs = prepSecs + ((System.currentTimeMillis() - serviceExecStartMs) / 1000.0)
+                                com.boostlyte.vydra.utils.AppLogger.logExportProfileSummary(
+                                    context = this@ExportService,
+                                    mode = "chunked",
+                                    prepSecs = prepSecs,
+                                    chunksSecs = chunksTotalSecs,
+                                    audioSecs = audioSecs,
+                                    finalAssemblySecs = finalPassDurationSec,
+                                    gallerySaveSecs = gallerySaveSecs,
+                                    totalSecs = totalSecs,
+                                    videoDurationSecs = plan.totalDurationSecs,
+                                    outputSizeBytes = outputSizeBytes,
+                                    resolution = plan.resolution,
+                                    fps = plan.fps,
+                                    encoder = activeEncoderLabel,
+                                    numChunks = numChunks
+                                )
                                 com.boostlyte.vydra.utils.AppLogger.logExportEnded(this@ExportService, 0, tempOutputPath)
                                 showCompletionNotification("Export Complete", "Video saved to gallery", savedUri)
                                 broadcastSuccess(savedUri.toString())
@@ -980,7 +1185,7 @@ class ExportService : Service() {
                 }
 
                 // Guaranteed cleanup of chunk temp files and plan file
-                cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
                 jobDir.deleteRecursively()
                 try {
                     if (tempFile.exists()) tempFile.delete()
@@ -989,7 +1194,7 @@ class ExportService : Service() {
 
             } catch (e: Exception) {
                 Log.e(TAG, "Chunked export exception", e)
-                cleanupChunkTempFiles(plan.chunkTempPaths, planFile)
+                cleanupChunkTempFiles(plan.chunkTempPaths, planFile, plan.mixedAudioTempPath)
                 jobDir.deleteRecursively()
                 com.boostlyte.vydra.utils.AppLogger.logExportFailed(this@ExportService, e.message ?: "Unknown error", -1, null)
                 showCompletionNotification("Export Failed", e.message ?: "Unknown error", null)
@@ -1006,13 +1211,20 @@ class ExportService : Service() {
         }
     }
 
-    private fun cleanupChunkTempFiles(chunkPaths: List<String>, planFile: File?) {
+    private fun cleanupChunkTempFiles(chunkPaths: List<String>, planFile: File?, mixedAudioTempPath: String? = null) {
         try {
             for (path in chunkPaths) {
                 val f = File(path)
                 if (f.exists()) {
                     f.delete()
                     Log.d(TAG, "Deleted temp chunk file: $path")
+                }
+            }
+            if (!mixedAudioTempPath.isNullOrBlank()) {
+                val audioFile = File(mixedAudioTempPath)
+                if (audioFile.exists()) {
+                    audioFile.delete()
+                    Log.d(TAG, "Deleted temp mixed audio file: $mixedAudioTempPath")
                 }
             }
             if (planFile?.exists() == true) {

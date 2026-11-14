@@ -177,7 +177,7 @@ class FFmpegRenderEngine(private val context: Context) {
 
                     if (!isRetry && !isPermanent && command.contains("h264_mediacodec")) {
                         Log.w(TAG, "Hardware encoder h264_mediacodec failed or produced no video stream. Falling back to software encoder libx264. Error:\n$diagnosticLog")
-                        val fallbackCommand = command.replace("h264_mediacodec", "libx264 -preset veryfast -threads 0")
+                        val fallbackCommand = com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(command)
                         return@withContext executeCommand(fallbackCommand, isRetry = true)
                     }
 
@@ -352,7 +352,7 @@ class FFmpegRenderEngine(private val context: Context) {
 
                     if (!isRetry && !isPermanent && ffmpegCommand.contains("h264_mediacodec")) {
                         Log.w(TAG, "Hardware encoder h264_mediacodec failed or produced no video stream. Falling back to software encoder libx264. Error:\n$diagnosticLog")
-                        val fallbackCommand = ffmpegCommand.replace("h264_mediacodec", "libx264 -preset veryfast -threads 0")
+                        val fallbackCommand = com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(ffmpegCommand)
                         return@withContext exportFinal(fallbackCommand, totalDurationSecs, onProgress, isRetry = true)
                     }
 

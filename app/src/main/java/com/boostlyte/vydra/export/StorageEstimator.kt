@@ -24,13 +24,13 @@ object StorageEstimator {
         resolution: Int,
         isChunked: Boolean
     ): Long {
-        val bitrateBitsPerSec = when (resolution) {
-            2160 -> 30_000_000L
-            1440 -> 16_000_000L
-            1080 -> 8_000_000L
-            720 -> 5_000_000L
-            480 -> 2_000_000L
-            else -> 1_500_000L
+        val bitrateBitsPerSec = when {
+            resolution >= 2160 -> 25_000_000L
+            resolution >= 1440 -> 14_000_000L
+            resolution >= 1080 -> 8_000_000L
+            resolution >= 720 -> 4_000_000L
+            resolution >= 480 -> 1_500_000L
+            else -> 750_000L
         }
         val bytesPerSec = bitrateBitsPerSec / 8L
         val estimatedFinalVideoBytes = (durationSecs * bytesPerSec).toLong()

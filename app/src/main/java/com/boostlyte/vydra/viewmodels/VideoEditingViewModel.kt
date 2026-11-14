@@ -294,6 +294,22 @@ class VideoEditingViewModel : ViewModel() {
         )
     }
 
+    private fun hasAnimatedMask(mc: EditOperation.MaskConfig): Boolean {
+        return mc.shape != EditOperation.MaskShape.NONE && (
+            mc.positionKeyframes.isNotEmpty() ||
+            mc.sizeKeyframes.isNotEmpty() ||
+            mc.rotationKeyframes.isNotEmpty() ||
+            mc.featherKeyframes.isNotEmpty()
+        )
+    }
+
+    private fun isImageFilePath(path: String): Boolean {
+        return path.endsWith(".png", ignoreCase = true) ||
+               path.endsWith(".jpg", ignoreCase = true) ||
+               path.endsWith(".jpeg", ignoreCase = true) ||
+               path.endsWith(".webp", ignoreCase = true)
+    }
+
     private fun buildFFmpegMaskAlphaExpr(
         mc: EditOperation.MaskConfig,
         cx: String,
@@ -303,7 +319,8 @@ class VideoEditingViewModel : ViewModel() {
         cosA: String,
         sinA: String,
         startTimeMs: Long = 0L,
-        timeVar: String = "T"
+        timeVar: String = "T",
+        timeOffsetMs: Long = 0L
     ): String {
         val dx = "(X - ($cx))"
         val dy = "(Y - ($cy))"
@@ -311,7 +328,7 @@ class VideoEditingViewModel : ViewModel() {
         val ry = "(-$dx * $sinA + $dy * $cosA)"
 
         val featherExpr = if (mc.featherKeyframes.isNotEmpty()) {
-            buildFFmpegInterpolationExpr(mc.featherKeyframes, false, mc.feather, startTimeMs, timeVar)
+            buildFFmpegInterpolationExpr(mc.featherKeyframes, false, mc.feather, startTimeMs, timeVar, timeOffsetMs = timeOffsetMs)
         } else {
             mc.feather.toString()
         }
@@ -918,6 +935,16 @@ class VideoEditingViewModel : ViewModel() {
         val speedOp = operations.filterIsInstance<EditOperation.SpeedMain>().lastOrNull()
         val finalProxyUri = reverseOp?.proxyUri ?: speedOp?.proxyUri
         
+        val mainMaskConfigForInput = operations.filterIsInstance<EditOperation.MaskMain>().lastOrNull()?.maskConfig
+            ?: mergeOp?.items?.getOrNull(0)?.maskConfig
+            ?: EditOperation.MaskConfig()
+        val mainIsSingleFrameImage = if (finalProxyUri == null && isMainImage) {
+            !hasAnimatedMask(mainMaskConfigForInput)
+        } else {
+            false
+        }
+        var mainSingleFrameDurSec = 5.0
+
         val exportFpsVal = _exportFps.value
         if (finalProxyUri != null) {
             val proxyPath = resolveUriToPath(finalProxyUri) ?: finalProxyUri.toString()
@@ -942,16 +969,18 @@ class VideoEditingViewModel : ViewModel() {
                 cmd.append(" -i \"$proxyPath\"")
             }
         } else {
-            val isMainImage = sourceFilePath.endsWith(".png", ignoreCase = true) ||
-                              sourceFilePath.endsWith(".jpg", ignoreCase = true) ||
-                              sourceFilePath.endsWith(".jpeg", ignoreCase = true) ||
-                              sourceFilePath.endsWith(".webp", ignoreCase = true)
             if (isMainImage) {
                 val duration = if (trimOp != null) (trimOp.endMs - trimOp.startMs) / 1000.0 else 5.0
+                mainSingleFrameDurSec = duration
                 if (mergeOp == null) {
                     outputDuration = duration
                 }
-                cmd.append(" -framerate $exportFpsVal -loop 1 -t $duration -i \"$sourceFilePath\"")
+                if (mainIsSingleFrameImage) {
+                    // Decode single image frame once; filtergraph expands frames via zoompan/loop
+                    cmd.append(" -framerate $exportFpsVal -i \"$sourceFilePath\"")
+                } else {
+                    cmd.append(" -framerate $exportFpsVal -loop 1 -t $duration -i \"$sourceFilePath\"")
+                }
             } else if (trimOp != null) {
                 val startSecs = trimOp.startMs / 1000.0
                 val duration = (trimOp.endMs - trimOp.startMs) / 1000.0
@@ -967,12 +996,18 @@ class VideoEditingViewModel : ViewModel() {
 
         // 2. Merge Video Inputs
         val mergeVideoIndices = mutableListOf<Int>()
+        val isClipSingleFrameImage = mutableListOf<Boolean>()
+        isClipSingleFrameImage.add(mainIsSingleFrameImage)
+        val isClipImage = mutableListOf<Boolean>()
+        isClipImage.add(finalProxyUri == null && isMainImage)
         if (mergeOp != null) {
             for (item in mergeOp.items) {
                 if (item.proxyUri != null) {
                     val proxyPath = resolveUriToPath(item.proxyUri) ?: item.proxyUri.path ?: item.proxyUri.toString()
                     val duration = item.trimmedDurationMs / 1000.0
                     cmd.append(" -t $duration -i \"$proxyPath\"")
+                    isClipSingleFrameImage.add(false)
+                    isClipImage.add(false)
                 } else {
                     val videoPath = resolveUriToPath(item.uri) ?: item.uri.toString()
                     val startSecs = item.trimStartMs / 1000.0
@@ -986,16 +1021,18 @@ class VideoEditingViewModel : ViewModel() {
                         5.0
                     }
                     
-                    val isImage = item.isImage || 
-                                  videoPath.endsWith(".png", ignoreCase = true) || 
-                                  videoPath.endsWith(".jpg", ignoreCase = true) || 
-                                  videoPath.endsWith(".jpeg", ignoreCase = true) ||
-                                  videoPath.endsWith(".webp", ignoreCase = true)
-                    
-                    if (isImage) {
+                    val isImage = item.isImage || isImageFilePath(videoPath)
+                    isClipImage.add(isImage)
+                    if (isImage && !hasAnimatedMask(item.maskConfig)) {
+                        // Single-frame image input avoids repeated JPEG decode on every frame
+                        cmd.append(" -framerate $exportFpsVal -i \"$videoPath\"")
+                        isClipSingleFrameImage.add(true)
+                    } else if (isImage) {
                         cmd.append(" -framerate $exportFpsVal -loop 1 -t $itemDurSec -i \"$videoPath\"")
+                        isClipSingleFrameImage.add(false)
                     } else {
                         cmd.append(" -ss $startSecs -t $itemDurSec -i \"$videoPath\"")
+                        isClipSingleFrameImage.add(false)
                     }
                 }
                 mergeVideoIndices.add(inputIndex)
@@ -1181,6 +1218,14 @@ class VideoEditingViewModel : ViewModel() {
                 val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == i }
                 val clipMotionType = motionOp?.motionType ?: if (i > 0) mergeOp?.items?.getOrNull(i - 1)?.motionEffect else null
                 val d = durationsArray[i].coerceAtLeast(0.1)
+                val isSingleFrame = isClipSingleFrameImage.getOrElse(i) { false }
+                val isImgClip = isClipImage.getOrElse(i) { false }
+                val clipFrames = kotlin.math.round(d * exportFpsVal).toInt().coerceAtLeast(1)
+                val singleFrameLoop = if (isSingleFrame) {
+                    ",format=yuv420p,loop=loop=-1:size=1:start=0,setpts=N/($exportFpsVal*TB),trim=duration=$d,setpts=PTS-STARTPTS"
+                } else {
+                    ""
+                }
 
                 // High-precision motion coordinate space (anchored at >= 1080p density)
                 // Prevents integer-truncation micro-stutter on 720p and 480p exports
@@ -1191,16 +1236,17 @@ class VideoEditingViewModel : ViewModel() {
                 val motionH = (((baseH * 1.15).toInt()) / 2) * 2
                 val coverScale = "scale=w=$motionW:h=$motionH:force_original_aspect_ratio=increase"
                 val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
-                val panScaleDown = if (scaleFactor > 1.0) ",scale=${mainWidth}x${mainHeight}" else ""
+                val panScaleDown = if (scaleFactor > 1.0) ",scale=${mainWidth}x${mainHeight}:flags=bilinear" else ""
+                val zoompanD = if (isSingleFrame) clipFrames else 1
 
                 val motionFilter = when (clipMotionType) {
-                    "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*(on/($exportFpsVal*$d))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
-                    "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*(on/($exportFpsVal*$d))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
-                    "pan_left" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'$panScaleDown"
-                    "pan_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'$panScaleDown"
-                    "pan_up" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'$panScaleDown"
-                    "pan_down" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$d)'$panScaleDown"
-                    "drift_up_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)*(1-(t/$d))'$panScaleDown"
+                    "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*(on/($exportFpsVal*$d))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=$zoompanD:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
+                    "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*(on/($exportFpsVal*$d))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=$zoompanD:s=${mainWidth}x${mainHeight}:fps=$exportFpsVal"
+                    "pan_left" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)*(1-(t/$d))':y='(in_h-out_h)/2'$panScaleDown"
+                    "pan_right" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)/2'$panScaleDown"
+                    "pan_up" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$d))'$panScaleDown"
+                    "pan_down" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$d)'$panScaleDown"
+                    "drift_up_right" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$d)':y='(in_h-out_h)*(1-(t/$d))'$panScaleDown"
                     else -> null
                 }
 
@@ -1213,26 +1259,26 @@ class VideoEditingViewModel : ViewModel() {
                     filterParts.add("[pre$i]split=2[bg_orig$i][fg_orig$i]")
                     filterParts.add("[bg_orig$i]$bgScale[bg$i]")
                     filterParts.add("[fg_orig$i]$fgScale[fg$i]")
-                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2[raw_stage$i]")
+                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2${singleFrameLoop}[raw_stage$i]")
                 } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgImageIndex != -1) {
                     val bgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=increase,crop=$mainWidth:$mainHeight:(in_w-$mainWidth)/2:(in_h-$mainHeight)/2"
                     val fgScale = "scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease"
                     filterParts.add("[$bgImageIndex:v]$bgScale[bg$i]")
                     filterParts.add("[pre$i]$fgScale[fg$i]")
-                    // Use shortest=1 in case the loop goes on forever, but we specified -loop 1 which creates an infinite stream for image
-                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$i]")
+                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1${singleFrameLoop}[raw_stage$i]")
                 } else {
-                    // Default COLOR
+                    // Default COLOR: direct scale+pad avoids an extra color generator + overlay pass
                     val color = bgOp?.colorHex ?: "black"
                     val padColor = if (color.startsWith("#")) formatColorForFFmpeg(color) else "black"
-                    // Create a solid color background of mainWidth x mainHeight
-                    filterParts.add("color=c=$padColor:s=${mainWidth}x${mainHeight}:r=${_exportFps.value}[bg$i]")
-                    filterParts.add("[pre$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease[fg$i]")
-                    filterParts.add("[bg$i][fg$i]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$i]")
+                    filterParts.add("[pre$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2:color=$padColor,setsar=1${singleFrameLoop}[raw_stage$i]")
                 }
 
-                // Explicit normalization stage for clip i: guarantees exact resolution, padding, SAR, fps, and pixel format before xfade/transitions
-                filterParts.add("[raw_stage$i]settb=1/${_exportFps.value},setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
+                // Explicit normalization stage for clip i: skip redundant scale/pad when image filter already matches targetWidth x targetHeight
+                if (isImgClip) {
+                    filterParts.add("[raw_stage$i]settb=1/${_exportFps.value},setpts=N,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
+                } else {
+                    filterParts.add("[raw_stage$i]settb=1/${_exportFps.value},setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
+                }
 
                 val isClipMuted = operations.filterIsInstance<EditOperation.MuteClip>().find { it.index == i }?.isMuted ?: false
                 if (hasAudioArray[i] && !isClipMuted) {
@@ -1556,22 +1602,17 @@ class VideoEditingViewModel : ViewModel() {
                     cmd.append(" -an")
                 }
                 
-                val bitrate = when (_exportResolution.value) {
-                    2160 -> "30M"
-                    1440 -> "16M"
-                    1080 -> "8M"
-                    720 -> "5M"
-                    480 -> "2M"
-                    else -> "1M"
-                }
+                val bitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(_exportResolution.value, _exportFps.value)
+                val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(_exportResolution.value)
+                val audioBitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetAudioBitrate(_exportResolution.value)
                 val videoCodec = encoderOverride ?: run {
-                    val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+                    val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate, swCrf)
                     enc.ffmpegVideoCodecArgs
                 }
                 cmd.append(" $videoCodec")
                 
                 if (!audioMuted) {
-                    cmd.append(" -c:a aac")
+                    cmd.append(" -c:a aac -b:a $audioBitrate")
                 }
             }
 
@@ -1639,6 +1680,13 @@ class VideoEditingViewModel : ViewModel() {
             val combinedFilters = prepFilters.joinToString(",")
             filterComplexParts.add("[0:v]${combinedFilters}[cfv]")
             currentInputVideoLabel = "[cfv]"
+        }
+
+        if (mainIsSingleFrameImage) {
+            val expandLabel = "[img_exp]"
+            val safeDur = mainSingleFrameDurSec.coerceAtLeast(0.1)
+            filterComplexParts.add("${currentInputVideoLabel}scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,format=yuv420p,loop=loop=-1:size=1:start=0,setpts=N/($exportFpsVal*TB),trim=duration=$safeDur,setpts=PTS-STARTPTS$expandLabel")
+            currentInputVideoLabel = expandLabel
         }
 
         // ── Video filter stages (crop, text, image overlays) ──
@@ -1841,16 +1889,11 @@ class VideoEditingViewModel : ViewModel() {
                 cmd.append(" -c:a libmp3lame -b:a 192k")
             }
         } else {
-            val bitrate = when (_exportResolution.value) {
-                2160 -> "30M"
-                1440 -> "16M"
-                1080 -> "8M"
-                720 -> "5M"
-                480 -> "2M"
-                else -> "1M"
-            }
+            val bitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(_exportResolution.value, _exportFps.value)
+            val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(_exportResolution.value)
+            val audioBitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetAudioBitrate(_exportResolution.value)
             val videoCodec = encoderOverride ?: run {
-                val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+                val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate, swCrf)
                 enc.ffmpegVideoCodecArgs
             }
             // If there are no video filters, we still need to apply the scale and fps output params
@@ -1861,7 +1904,7 @@ class VideoEditingViewModel : ViewModel() {
             }
             
             if (!effectiveAudioMuted) {
-                cmd.append(" -c:a aac")
+                cmd.append(" -c:a aac -b:a $audioBitrate")
             }
         }
 
@@ -1905,8 +1948,29 @@ class VideoEditingViewModel : ViewModel() {
         val cmd = StringBuilder("-y")
         var inputIndex = 0
 
+        val exportFps = _exportFps.value.coerceAtLeast(1)
+        val clipIsImageFlags = mutableListOf<Boolean>()
+        val clipIsSingleFrameFlags = mutableListOf<Boolean>()
+        val clipFullDurationsSec = mutableListOf<Double>()
+        val clipSliceStartsSec = mutableListOf<Double>()
+        val clipSliceDurationsSec = mutableListOf<Double>()
+
         // 1. Inputs for this chunk's clips
         for ((localIdx, clip) in chunkSpec.clips.withIndex()) {
+            val fullDurMs = if (clip.fullClipDurationMs > 0L) clip.fullClipDurationMs else ChunkPlanner.getClipFullDurationMs(clip.item)
+            val sliceStartMs = clip.sliceStartInClipMs.coerceAtLeast(0L)
+            val sliceDurMs = if (clip.sliceDurationMs > 0L) clip.sliceDurationMs else (fullDurMs - sliceStartMs).coerceAtLeast(100L)
+
+            val fullDurSec = (fullDurMs / 1000.0).coerceAtLeast(0.1)
+            val sliceStartSec = sliceStartMs / 1000.0
+            val sliceDurSec = (sliceDurMs / 1000.0).coerceAtLeast(0.1)
+
+            clipFullDurationsSec.add(fullDurSec)
+            clipSliceStartsSec.add(sliceStartSec)
+            clipSliceDurationsSec.add(sliceDurSec)
+
+            val maskAnimated = hasAnimatedMask(clip.item.maskConfig)
+
             if (clip.globalIndex == 0) {
                 val origUri = clip.item.uri
                 val origUriStr = origUri.toString()
@@ -1915,30 +1979,40 @@ class VideoEditingViewModel : ViewModel() {
                 val f = File(resolvedPath)
                 val exists = f.exists()
                 val size = if (exists) f.length() else -1L
-                Log.i(TAG, "ChunkClip: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex} (global 0), origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', exists=$exists, size=$size bytes")
+                Log.i(TAG, "ChunkClip: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex} (global 0), origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', exists=$exists, size=$size bytes, slice=${sliceStartMs}ms..${sliceStartMs + sliceDurMs}ms")
 
-                val isMainImage = sourceFilePath.endsWith(".png", ignoreCase = true) ||
-                                  sourceFilePath.endsWith(".jpg", ignoreCase = true) ||
-                                  sourceFilePath.endsWith(".jpeg", ignoreCase = true) ||
-                                  sourceFilePath.endsWith(".webp", ignoreCase = true)
+                val isMainImage = clip.item.isImage || isImageFilePath(sourceFilePath)
                 val trimOp = operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
-                val duration = if (clip.item.trimmedDurationMs > 0L) {
-                    clip.item.trimmedDurationMs / 1000.0
-                } else if (trimOp != null) {
-                    (trimOp.endMs - trimOp.startMs) / 1000.0
-                } else {
-                    5.0
-                }
+
                 if (clip.item.proxyUri != null) {
                     val proxyPath = resolveUriToPath(context, clip.item.proxyUri) ?: clip.item.proxyUri.path ?: clip.item.proxyUri.toString()
-                    cmd.append(" -t $duration -i \"$proxyPath\"")
+                    if (sliceStartMs > 0L) {
+                        cmd.append(" -ss $sliceStartSec -t $sliceDurSec -i \"$proxyPath\"")
+                    } else {
+                        cmd.append(" -t $sliceDurSec -i \"$proxyPath\"")
+                    }
+                    clipIsImageFlags.add(false)
+                    clipIsSingleFrameFlags.add(false)
                 } else if (isMainImage) {
-                    cmd.append(" -framerate ${_exportFps.value} -loop 1 -t $duration -i \"$sourceFilePath\"")
-                } else if (trimOp != null) {
-                    val startSecs = trimOp.startMs / 1000.0
-                    cmd.append(" -ss $startSecs -t $duration -i \"$sourceFilePath\"")
+                    if (!maskAnimated) {
+                        cmd.append(" -framerate $exportFps -i \"$sourceFilePath\"")
+                        clipIsSingleFrameFlags.add(true)
+                    } else {
+                        cmd.append(" -framerate $exportFps -loop 1 -t $sliceDurSec -i \"$sourceFilePath\"")
+                        clipIsSingleFrameFlags.add(false)
+                    }
+                    clipIsImageFlags.add(true)
+                } else if (trimOp != null || sliceStartMs > 0L || sliceDurMs < fullDurMs) {
+                    val baseStartSecs = (trimOp?.startMs ?: clip.item.trimStartMs) / 1000.0
+                    val effectiveSs = baseStartSecs + (sliceStartSec * clip.item.speed.toDouble())
+                    val effectiveReadDur = sliceDurSec * clip.item.speed.toDouble()
+                    cmd.append(" -ss $effectiveSs -t $effectiveReadDur -i \"$sourceFilePath\"")
+                    clipIsImageFlags.add(false)
+                    clipIsSingleFrameFlags.add(false)
                 } else {
                     cmd.append(" -i \"$sourceFilePath\"")
+                    clipIsImageFlags.add(false)
+                    clipIsSingleFrameFlags.add(false)
                 }
             } else {
                 val item = clip.item
@@ -1949,36 +2023,36 @@ class VideoEditingViewModel : ViewModel() {
                 val f = File(resolvedPath)
                 val exists = f.exists()
                 val size = if (exists) f.length() else -1L
-                Log.i(TAG, "ChunkClip: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex} (global ${clip.globalIndex}), origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', exists=$exists, size=$size bytes")
+                Log.i(TAG, "ChunkClip: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex} (global ${clip.globalIndex}), origUri='$origUriStr', scheme='$scheme', resolvedPath='$resolvedPath', exists=$exists, size=$size bytes, slice=${sliceStartMs}ms..${sliceStartMs + sliceDurMs}ms")
                 if (!exists || size <= 0L) {
                     Log.e(TAG, "ChunkClip missing or empty: chunk=${chunkSpec.chunkIndex}, clip=${clip.localIndex}, path='$resolvedPath', uri='$origUriStr'")
                 }
 
                 if (item.proxyUri != null) {
                     val proxyPath = resolveUriToPath(context, item.proxyUri) ?: item.proxyUri.path ?: item.proxyUri.toString()
-                    val duration = item.trimmedDurationMs / 1000.0
-                    cmd.append(" -t $duration -i \"$proxyPath\"")
+                    if (sliceStartMs > 0L) {
+                        cmd.append(" -ss $sliceStartSec -t $sliceDurSec -i \"$proxyPath\"")
+                    } else {
+                        cmd.append(" -t $sliceDurSec -i \"$proxyPath\"")
+                    }
+                    clipIsImageFlags.add(false)
+                    clipIsSingleFrameFlags.add(false)
                 } else {
                     val videoPath = resolvedPath
-                    val startSecs = item.trimStartMs / 1000.0
-                    val itemDurSec = if (item.trimmedDurationMs > 0L) {
-                        item.trimmedDurationMs / 1000.0
-                    } else if (item.trimEndMs > item.trimStartMs) {
-                        (item.trimEndMs - item.trimStartMs) / 1000.0
-                    } else if (item.durationMs > 0L) {
-                        item.durationMs / 1000.0
+                    val isImage = item.isImage || isImageFilePath(videoPath)
+                    clipIsImageFlags.add(isImage)
+                    if (isImage && !maskAnimated) {
+                        cmd.append(" -framerate $exportFps -i \"$videoPath\"")
+                        clipIsSingleFrameFlags.add(true)
+                    } else if (isImage) {
+                        cmd.append(" -framerate $exportFps -loop 1 -t $sliceDurSec -i \"$videoPath\"")
+                        clipIsSingleFrameFlags.add(false)
                     } else {
-                        5.0
-                    }
-                    val isImage = item.isImage ||
-                                  videoPath.endsWith(".png", ignoreCase = true) ||
-                                  videoPath.endsWith(".jpg", ignoreCase = true) ||
-                                  videoPath.endsWith(".jpeg", ignoreCase = true) ||
-                                  videoPath.endsWith(".webp", ignoreCase = true)
-                    if (isImage) {
-                        cmd.append(" -framerate ${_exportFps.value} -loop 1 -t $itemDurSec -i \"$videoPath\"")
-                    } else {
-                        cmd.append(" -ss $startSecs -t $itemDurSec -i \"$videoPath\"")
+                        val baseStartSecs = item.trimStartMs / 1000.0
+                        val effectiveSs = baseStartSecs + (sliceStartSec * item.speed.toDouble())
+                        val effectiveReadDur = sliceDurSec * item.speed.toDouble()
+                        cmd.append(" -ss $effectiveSs -t $effectiveReadDur -i \"$videoPath\"")
+                        clipIsSingleFrameFlags.add(false)
                     }
                 }
             }
@@ -2033,16 +2107,16 @@ class VideoEditingViewModel : ViewModel() {
         val durationsArray = DoubleArray(inputCount)
 
         for ((localIdx, clip) in chunkSpec.clips.withIndex()) {
-            val d = if (clip.item.trimmedDurationMs > 0L) {
-                clip.item.trimmedDurationMs / 1000.0
-            } else if (clip.item.trimEndMs > clip.item.trimStartMs) {
-                (clip.item.trimEndMs - clip.item.trimStartMs) / 1000.0
-            } else if (clip.item.durationMs > 0L) {
-                clip.item.durationMs / 1000.0
-            } else {
-                5.0
-            }
-            durationsArray[localIdx] = d
+            val safeSliceD = clipSliceDurationsSec[localIdx]
+            val safeFullD = clipFullDurationsSec[localIdx]
+            val sliceStartSec = clipSliceStartsSec[localIdx]
+            val isSingleFrame = clipIsSingleFrameFlags[localIdx]
+            val isImgClip = clipIsImageFlags[localIdx]
+            durationsArray[localIdx] = safeSliceD
+
+            val sliceFrames = kotlin.math.round(safeSliceD * exportFps).toInt().coerceAtLeast(1)
+            val startFrame = kotlin.math.round(sliceStartSec * exportFps).toInt().coerceAtLeast(0)
+            val maskTimeOffsetMs = clip.sliceStartInClipMs
 
             val colorFilterOp = operations.filterIsInstance<EditOperation.ColorFilter>().find { it.index == clip.globalIndex }
             val lutFilterExpr = colorFilterOp?.let { getFFmpegFilterForName(it.filterName) }
@@ -2059,15 +2133,15 @@ class VideoEditingViewModel : ViewModel() {
 
             if (maskConfig.shape != EditOperation.MaskShape.NONE) {
                 val mc = maskConfig
-                val cx = if (mc.positionKeyframes.isNotEmpty()) "(W*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, false, mc.relativeX, 0L, "T") + "))" else "W*${mc.relativeX}"
-                val cy = if (mc.positionKeyframes.isNotEmpty()) "(H*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, true, mc.relativeY, 0L, "T") + "))" else "H*${mc.relativeY}"
-                val sizeExpr = if (mc.sizeKeyframes.isNotEmpty()) buildFFmpegInterpolationExpr(mc.sizeKeyframes, false, ((mc.relativeWidth + mc.relativeHeight) / 2f * 200f), 0L, "T") else null
+                val cx = if (mc.positionKeyframes.isNotEmpty()) "(W*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, false, mc.relativeX, 0L, "T", timeOffsetMs = maskTimeOffsetMs) + "))" else "W*${mc.relativeX}"
+                val cy = if (mc.positionKeyframes.isNotEmpty()) "(H*(" + buildFFmpegInterpolationExpr(mc.positionKeyframes, true, mc.relativeY, 0L, "T", timeOffsetMs = maskTimeOffsetMs) + "))" else "H*${mc.relativeY}"
+                val sizeExpr = if (mc.sizeKeyframes.isNotEmpty()) buildFFmpegInterpolationExpr(mc.sizeKeyframes, false, ((mc.relativeWidth + mc.relativeHeight) / 2f * 200f), 0L, "T", timeOffsetMs = maskTimeOffsetMs) else null
                 val mw = if (sizeExpr != null) "(W*(($sizeExpr)/200))" else "W*${mc.relativeWidth}"
                 val mh = if (sizeExpr != null) "(H*(($sizeExpr)/200))" else "H*${mc.relativeHeight}"
                 val cosA: String
                 val sinA: String
                 if (mc.rotationKeyframes.isNotEmpty()) {
-                    val rotExpr = buildFFmpegInterpolationExpr(mc.rotationKeyframes, false, mc.rotationAngle, 0L, "T")
+                    val rotExpr = buildFFmpegInterpolationExpr(mc.rotationKeyframes, false, mc.rotationAngle, 0L, "T", timeOffsetMs = maskTimeOffsetMs)
                     val rad = "(($rotExpr)*PI/180)"
                     cosA = "cos($rad)"
                     sinA = "sin($rad)"
@@ -2076,14 +2150,13 @@ class VideoEditingViewModel : ViewModel() {
                     cosA = Math.cos(rad).toString()
                     sinA = Math.sin(rad).toString()
                 }
-                val finalAlphaExpr = buildFFmpegMaskAlphaExpr(mc, cx, cy, mw, mh, cosA, sinA, 0L, "T")
+                val finalAlphaExpr = buildFFmpegMaskAlphaExpr(mc, cx, cy, mw, mh, cosA, sinA, 0L, "T", timeOffsetMs = maskTimeOffsetMs)
                 preFilters += ",format=rgba,geq=r='r(X,Y)*($finalAlphaExpr/255)':g='g(X,Y)*($finalAlphaExpr/255)':b='b(X,Y)*($finalAlphaExpr/255)':a='255*($finalAlphaExpr/255)'"
             }
             filterParts.add("[$localIdx:v]$preFilters[pre$localIdx]")
 
             val motionOp = operations.filterIsInstance<EditOperation.MotionEffect>().find { it.index == clip.globalIndex }
             val clipMotionType = motionOp?.motionType ?: clip.item.motionEffect
-            val safeD = d.coerceAtLeast(0.1)
 
             // High-precision motion coordinate space (anchored at >= 1080p density)
             // Prevents integer-truncation micro-stutter on 720p and 480p exports
@@ -2094,16 +2167,25 @@ class VideoEditingViewModel : ViewModel() {
             val motionH = (((baseH * 1.15).toInt()) / 2) * 2
             val coverScale = "scale=w=$motionW:h=$motionH:force_original_aspect_ratio=increase"
             val coverCrop = "crop=$motionW:$motionH:(in_w-$motionW)/2:(in_h-$motionH)/2"
-            val panScaleDown = if (scaleFactor > 1.0) ",scale=${targetWidth}x${targetHeight}" else ""
+            val panScaleDown = if (scaleFactor > 1.0) ",scale=${targetWidth}x${targetHeight}:flags=bilinear" else ""
+
+            val singleFrameLoop = if (isSingleFrame) {
+                ",format=yuv420p,loop=loop=-1:size=1:start=0,setpts=N/($exportFps*TB),trim=duration=$safeSliceD,setpts=PTS-STARTPTS"
+            } else {
+                ""
+            }
+            val zoompanD = if (isSingleFrame) sliceFrames else 1
+            val zoomOnExpr = if (startFrame > 0) "(on+$startFrame)" else "on"
+            val panTimeRatio = if (sliceStartSec > 0.0) "((t+$sliceStartSec)/$safeFullD)" else "(t/$safeFullD)"
 
             val motionFilter = when (clipMotionType) {
-                "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*(on/(${_exportFps.value}*$safeD))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
-                "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*(on/(${_exportFps.value}*$safeD))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${targetWidth}x${targetHeight}:fps=${_exportFps.value}"
-                "pan_left" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(1-(t/$safeD))':y='(in_h-out_h)/2'$panScaleDown"
-                "pan_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)/2'$panScaleDown"
-                "pan_up" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-(t/$safeD))'$panScaleDown"
-                "pan_down" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(t/$safeD)'$panScaleDown"
-                "drift_up_right" -> "$coverScale,$coverCrop,crop=$baseW:$baseH:x='(in_w-out_w)*(t/$safeD)':y='(in_h-out_h)*(1-(t/$safeD))'$panScaleDown"
+                "zoom_in" -> "$coverScale,$coverCrop,zoompan=z='min(1.0+0.12*($zoomOnExpr/($exportFps*$safeFullD))\\,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=$zoompanD:s=${targetWidth}x${targetHeight}:fps=$exportFps"
+                "zoom_out" -> "$coverScale,$coverCrop,zoompan=z='max(1.12-0.12*($zoomOnExpr/($exportFps*$safeFullD))\\,1.0)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=$zoompanD:s=${targetWidth}x${targetHeight}:fps=$exportFps"
+                "pan_left" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)*(1-$panTimeRatio)':y='(in_h-out_h)/2'$panScaleDown"
+                "pan_right" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)*$panTimeRatio':y='(in_h-out_h)/2'$panScaleDown"
+                "pan_up" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*(1-$panTimeRatio)'$panScaleDown"
+                "pan_down" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)/2':y='(in_h-out_h)*$panTimeRatio'$panScaleDown"
+                "drift_up_right" -> "$coverScale,$coverCrop$singleFrameLoop,crop=$baseW:$baseH:x='(in_w-out_w)*$panTimeRatio':y='(in_h-out_h)*(1-$panTimeRatio)'$panScaleDown"
                 else -> null
             }
 
@@ -2116,22 +2198,24 @@ class VideoEditingViewModel : ViewModel() {
                 filterParts.add("[pre$localIdx]split=2[bg_orig$localIdx][fg_orig$localIdx]")
                 filterParts.add("[bg_orig$localIdx]$bgScale[bg$localIdx]")
                 filterParts.add("[fg_orig$localIdx]$fgScale[fg$localIdx]")
-                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2[raw_stage$localIdx]")
+                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2${singleFrameLoop}[raw_stage$localIdx]")
             } else if (bgOp?.type == EditOperation.CanvasBackground.BackgroundType.IMAGE && bgImageIndex != -1) {
                 val bgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=increase,crop=$targetWidth:$targetHeight:(in_w-$targetWidth)/2:(in_h-$targetHeight)/2"
                 val fgScale = "scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease"
                 filterParts.add("[$bgImageIndex:v]$bgScale[bg$localIdx]")
                 filterParts.add("[pre$localIdx]$fgScale[fg$localIdx]")
-                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$localIdx]")
+                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2:shortest=1${singleFrameLoop}[raw_stage$localIdx]")
             } else {
                 val color = bgOp?.colorHex ?: "black"
                 val padColor = if (color.startsWith("#")) formatColorForFFmpeg(color) else "black"
-                filterParts.add("color=c=$padColor:s=${targetWidth}x${targetHeight}:r=${_exportFps.value}[bg$localIdx]")
-                filterParts.add("[pre$localIdx]scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease[fg$localIdx]")
-                filterParts.add("[bg$localIdx][fg$localIdx]overlay=(W-w)/2:(H-h)/2:shortest=1[raw_stage$localIdx]")
+                filterParts.add("[pre$localIdx]scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2:color=$padColor,setsar=1${singleFrameLoop}[raw_stage$localIdx]")
             }
 
-            filterParts.add("[raw_stage$localIdx]settb=1/${_exportFps.value},setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$localIdx]")
+            if (isImgClip) {
+                filterParts.add("[raw_stage$localIdx]settb=1/$exportFps,setpts=N,setsar=1,fps=$exportFps,format=yuv420p[norm$localIdx]")
+            } else {
+                filterParts.add("[raw_stage$localIdx]settb=1/$exportFps,setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=$exportFps,format=yuv420p[norm$localIdx]")
+            }
         }
 
         // Chain internal transitions for this chunk
@@ -2271,7 +2355,12 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         val finalVideoLabel = "[chunk_out]"
-        filterParts.add("${currentVideoLabel}scale=$targetWidth:$targetHeight,fps=${_exportFps.value},format=yuv420p$finalVideoLabel")
+        val hasCropOverlay = overlayOpsToApply.any { it is EditOperation.Crop }
+        if (hasCropOverlay) {
+            filterParts.add("${currentVideoLabel}scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=$exportFps,format=yuv420p$finalVideoLabel")
+        } else {
+            filterParts.add("${currentVideoLabel}setsar=1,fps=$exportFps,format=yuv420p$finalVideoLabel")
+        }
 
         val filterComplexStr = filterParts.joinToString(";\n")
         var scriptFile: File? = null
@@ -2284,16 +2373,10 @@ class VideoEditingViewModel : ViewModel() {
             cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
         }
 
-        val bitrate = when (_exportResolution.value) {
-            2160 -> "30M"
-            1440 -> "16M"
-            1080 -> "8M"
-            720 -> "5M"
-            480 -> "2M"
-            else -> "1M"
-        }
+        val bitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(_exportResolution.value, _exportFps.value)
+        val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(_exportResolution.value)
         val videoCodec = encoderOverride ?: run {
-            val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+            val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate, swCrf)
             enc.ffmpegVideoCodecArgs
         }
 
@@ -2426,85 +2509,10 @@ class VideoEditingViewModel : ViewModel() {
             }
         }
 
-        var currentAudioLabel: String? = null
-        var maxAudioEndSec = 0.0
-        if (audioInputIndices.isNotEmpty()) {
-            val mixInputLabels = mutableListOf<String>()
-            for ((idx, pair) in audioInputIndices.withIndex()) {
-                val (inputIdx, audioOp) = pair
-                val trackLabel = "[a_bg_$idx]"
-                val filters = mutableListOf<String>()
-
-                val internalStartSec = audioOp.internalStartMs / 1000.0
-                var internalEndSec = if (audioOp.internalEndMs > 0L) audioOp.internalEndMs / 1000.0 else Double.MAX_VALUE
-
-                if (audioOp.startTimeMs != null && audioOp.endTimeMs != null) {
-                    val timelineDurationSec = (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
-                    val maxEndSec = internalStartSec + timelineDurationSec
-                    if (maxEndSec < internalEndSec) internalEndSec = maxEndSec
-                }
-
-                if (internalStartSec > 0.0 || internalEndSec != Double.MAX_VALUE) {
-                    if (internalEndSec != Double.MAX_VALUE) {
-                        filters.add("atrim=start=$internalStartSec:end=$internalEndSec,asetpts=PTS-STARTPTS")
-                    } else {
-                        filters.add("atrim=start=$internalStartSec,asetpts=PTS-STARTPTS")
-                    }
-                }
-                if (audioOp.fadeInDurationMs > 0L) {
-                    val fadeSec = audioOp.fadeInDurationMs / 1000.0
-                    filters.add("afade=t=in:st=0:d=$fadeSec")
-                }
-                if (audioOp.fadeOutDurationMs > 0L) {
-                    val fadeSec = audioOp.fadeOutDurationMs / 1000.0
-                    val clipDur = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
-                        (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
-                    } else if (audioOp.internalEndMs > 0L) {
-                        (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
-                    } else {
-                        (audioOp.originalDurationMs - audioOp.internalStartMs) / 1000.0
-                    }
-                    val fadeOutStart = maxOf(0.0, clipDur - fadeSec)
-                    filters.add("afade=t=out:st=$fadeOutStart:d=$fadeSec")
-                }
-                var delayMs = audioOp.startTimeMs ?: 0L
-                if (delayMs < 0) delayMs = 0L
-                if (delayMs > 0) {
-                    filters.add("aformat=channel_layouts=stereo,adelay=$delayMs|$delayMs")
-                }
-                val safeVol = audioOp.volume.coerceIn(0f, 2f)
-                filters.add("volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}")
-
-                val effectiveAudioDur = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
-                    (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
-                } else if (audioOp.internalEndMs > 0L) {
-                    (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
-                } else {
-                    audioOp.originalDurationMs / 1000.0
-                }
-                val totalAudioTrackEnd = (delayMs / 1000.0) + effectiveAudioDur
-                if (totalAudioTrackEnd > maxAudioEndSec) {
-                    maxAudioEndSec = totalAudioTrackEnd
-                }
-
-                if (filters.isNotEmpty()) {
-                    filterParts.add("[$inputIdx:a]${filters.joinToString(",")}$trackLabel")
-                    mixInputLabels.add(trackLabel)
-                } else {
-                    mixInputLabels.add("[$inputIdx:a]")
-                }
-            }
-
-            if (mixInputLabels.size == 1) {
-                val singleLabel = mixInputLabels[0]
-                filterParts.add("${singleLabel}aformat=sample_rates=44100:channel_layouts=stereo[outa]")
-                currentAudioLabel = "[outa]"
-            } else {
-                val allBg = mixInputLabels.joinToString("")
-                filterParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
-                currentAudioLabel = "[outa]"
-            }
-        }
+        val audioStageResult = buildBackgroundAudioFilterStages(audioInputIndices)
+        filterParts.addAll(audioStageResult.filterParts)
+        val currentAudioLabel = audioStageResult.outputLabel
+        val maxAudioEndSec = audioStageResult.maxAudioEndSec
 
         // If audio extends past total video duration, pad video with frozen last frame (tpad)
         val finalEffectiveDurationSec = if (maxAudioEndSec > currentStreamDurationSec && maxAudioEndSec > 0.0) {
@@ -2527,22 +2535,17 @@ class VideoEditingViewModel : ViewModel() {
             cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
         }
 
-        val bitrate = when (_exportResolution.value) {
-            2160 -> "30M"
-            1440 -> "16M"
-            1080 -> "8M"
-            720 -> "5M"
-            480 -> "2M"
-            else -> "1M"
-        }
+        val bitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(_exportResolution.value, _exportFps.value)
+        val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(_exportResolution.value)
+        val audioBitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetAudioBitrate(_exportResolution.value)
         val videoCodec = encoderOverride ?: run {
-            val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate)
+            val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(context, targetWidth, targetHeight, _exportFps.value, bitrate, swCrf)
             enc.ffmpegVideoCodecArgs
         }
 
         cmd.append(" -map \"$currentV\"")
         if (currentAudioLabel != null) {
-            cmd.append(" -map \"$currentAudioLabel\" -c:a aac")
+            cmd.append(" -map \"$currentAudioLabel\" -c:a aac -b:a $audioBitrate")
         } else {
             cmd.append(" -an")
         }
@@ -2560,6 +2563,141 @@ class VideoEditingViewModel : ViewModel() {
             durationSecs = finalEffectiveDurationSec,
             scriptFilePath = scriptFile?.absolutePath
         )
+    }
+
+    private data class AudioFilterStageResult(
+        val filterParts: List<String>,
+        val outputLabel: String?,
+        val maxAudioEndSec: Double
+    )
+
+    private fun buildBackgroundAudioFilterStages(
+        audioInputIndices: List<Pair<Int, EditOperation.AddBackgroundAudio>>
+    ): AudioFilterStageResult {
+        if (audioInputIndices.isEmpty()) {
+            return AudioFilterStageResult(emptyList(), null, 0.0)
+        }
+        val filterParts = mutableListOf<String>()
+        val mixInputLabels = mutableListOf<String>()
+        var maxAudioEndSec = 0.0
+
+        for ((idx, pair) in audioInputIndices.withIndex()) {
+            val (inputIdx, audioOp) = pair
+            val trackLabel = "[a_bg_$idx]"
+            val filters = mutableListOf<String>()
+
+            val internalStartSec = audioOp.internalStartMs / 1000.0
+            var internalEndSec = if (audioOp.internalEndMs > 0L) audioOp.internalEndMs / 1000.0 else Double.MAX_VALUE
+
+            if (audioOp.startTimeMs != null && audioOp.endTimeMs != null) {
+                val timelineDurationSec = (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+                val maxEndSec = internalStartSec + timelineDurationSec
+                if (maxEndSec < internalEndSec) internalEndSec = maxEndSec
+            }
+
+            if (internalStartSec > 0.0 || internalEndSec != Double.MAX_VALUE) {
+                if (internalEndSec != Double.MAX_VALUE) {
+                    filters.add("atrim=start=$internalStartSec:end=$internalEndSec,asetpts=PTS-STARTPTS")
+                } else {
+                    filters.add("atrim=start=$internalStartSec,asetpts=PTS-STARTPTS")
+                }
+            }
+            if (audioOp.fadeInDurationMs > 0L) {
+                val fadeSec = audioOp.fadeInDurationMs / 1000.0
+                filters.add("afade=t=in:st=0:d=$fadeSec")
+            }
+            if (audioOp.fadeOutDurationMs > 0L) {
+                val fadeSec = audioOp.fadeOutDurationMs / 1000.0
+                val clipDur = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
+                    (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+                } else if (audioOp.internalEndMs > 0L) {
+                    (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
+                } else {
+                    (audioOp.originalDurationMs - audioOp.internalStartMs) / 1000.0
+                }
+                val fadeOutStart = maxOf(0.0, clipDur - fadeSec)
+                filters.add("afade=t=out:st=$fadeOutStart:d=$fadeSec")
+            }
+            var delayMs = audioOp.startTimeMs ?: 0L
+            if (delayMs < 0) delayMs = 0L
+            if (delayMs > 0) {
+                filters.add("aformat=channel_layouts=stereo,adelay=$delayMs|$delayMs")
+            }
+            val safeVol = audioOp.volume.coerceIn(0f, 2f)
+            filters.add("volume=${String.format(java.util.Locale.US, "%.2f", safeVol)}")
+
+            val effectiveAudioDur = if (audioOp.endTimeMs != null && audioOp.startTimeMs != null) {
+                (audioOp.endTimeMs - audioOp.startTimeMs) / 1000.0
+            } else if (audioOp.internalEndMs > 0L) {
+                (audioOp.internalEndMs - audioOp.internalStartMs) / 1000.0
+            } else {
+                audioOp.originalDurationMs / 1000.0
+            }
+            val totalAudioTrackEnd = (delayMs / 1000.0) + effectiveAudioDur
+            if (totalAudioTrackEnd > maxAudioEndSec) {
+                maxAudioEndSec = totalAudioTrackEnd
+            }
+
+            if (filters.isNotEmpty()) {
+                filterParts.add("[$inputIdx:a]${filters.joinToString(",")}$trackLabel")
+                mixInputLabels.add(trackLabel)
+            } else {
+                mixInputLabels.add("[$inputIdx:a]")
+            }
+        }
+
+        if (mixInputLabels.size == 1) {
+            val singleLabel = mixInputLabels[0]
+            filterParts.add("${singleLabel}aformat=sample_rates=44100:channel_layouts=stereo[outa]")
+        } else {
+            val allBg = mixInputLabels.joinToString("")
+            filterParts.add("${allBg}amix=inputs=${mixInputLabels.size}:duration=longest:normalize=0,alimiter=limit=0.95[outa]")
+        }
+        return AudioFilterStageResult(filterParts, "[outa]", maxAudioEndSec)
+    }
+
+    /**
+     * Builds an audio-only FFmpeg command to mix voiceover/background audio tracks into a single
+     * AAC .m4a file so final assembly can stream-copy all video chunks (`-c copy`) with the mixed audio.
+     */
+    fun buildAudioMixCommand(
+        operations: List<EditOperation>,
+        outputAudioPath: String,
+        targetDurationSecs: Double,
+        context: Context?,
+        audioBitrate: String = com.boostlyte.vydra.export.EncoderSelector.getTargetAudioBitrate(_exportResolution.value)
+    ): String? {
+        if (operations.any { it is EditOperation.MuteAudio }) return null
+        val audioOps = operations.filterIsInstance<EditOperation.AddBackgroundAudio>()
+        if (audioOps.isEmpty()) return null
+
+        val cmd = StringBuilder("-y")
+        val audioInputIndices = mutableListOf<Pair<Int, EditOperation.AddBackgroundAudio>>()
+        var inputIdx = 0
+        for (audioOp in audioOps) {
+            val audioPath = resolveUriToPath(context, audioOp.audioUri) ?: continue
+            cmd.append(" -i \"$audioPath\"")
+            audioInputIndices.add(Pair(inputIdx, audioOp))
+            inputIdx++
+        }
+        if (audioInputIndices.isEmpty()) return null
+
+        val audioStage = buildBackgroundAudioFilterStages(audioInputIndices)
+        val outLabel = audioStage.outputLabel ?: return null
+        val filterStr = audioStage.filterParts.joinToString(";")
+
+        if (context != null && filterStr.length > 2000) {
+            val scriptFile = File(context.cacheDir, "filter_script_audio_${System.currentTimeMillis()}.txt")
+            scriptFile.writeText(filterStr)
+            cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
+        } else {
+            cmd.append(" -filter_complex \"$filterStr\"")
+        }
+
+        val effectiveDur = maxOf(targetDurationSecs, audioStage.maxAudioEndSec).coerceAtLeast(0.1)
+        val formattedDur = String.format(java.util.Locale.US, "%.3f", effectiveDur).trimEnd('0').trimEnd('.')
+        cmd.append(" -vn -map \"$outLabel\" -c:a aac -b:a $audioBitrate -t $formattedDur \"$outputAudioPath\"")
+        return cmd.toString()
     }
 
     /**
@@ -2685,14 +2823,9 @@ class VideoEditingViewModel : ViewModel() {
         val chunkTempDir = context?.cacheDir ?: File("/tmp")
         val timestamp = System.currentTimeMillis()
 
-        val bitrate = when (_exportResolution.value) {
-            2160 -> "30M"
-            1440 -> "16M"
-            1080 -> "8M"
-            720 -> "5M"
-            480 -> "2M"
-            else -> "1M"
-        }
+        val bitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(_exportResolution.value, _exportFps.value)
+        val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(_exportResolution.value)
+        val audioBitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetAudioBitrate(_exportResolution.value)
 
         // Select capability-aware encoder path consistently for the entire export
         val selectedEncoder = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(
@@ -2700,7 +2833,8 @@ class VideoEditingViewModel : ViewModel() {
             targetWidth = targetWidth,
             targetHeight = targetHeight,
             fps = _exportFps.value,
-            bitrate = bitrate
+            bitrate = bitrate,
+            crf = swCrf
         )
         val overallRenderPath = "legacy"
 
@@ -2725,12 +2859,18 @@ class VideoEditingViewModel : ViewModel() {
                 resolution = _exportResolution.value,
                 density = context?.resources?.displayMetrics?.density ?: 1.0f,
                 fontFilePath = fontFilePath,
-                operations = activeOperations
+                operations = activeOperations,
+                audioBitrate = audioBitrate
             )
         }
 
-        // Large sequence (> 16 inputs) -> Plan Chunks purely with legacy FFmpeg without GL pre-processing upfront.
-        val plan = ChunkPlanner.plan(allSequenceItems, transitions)
+        // Large sequence (> 16 inputs) -> Plan chunks while containing boundary transitions inside chunks
+        val plan = ChunkPlanner.plan(
+            sequenceItems = allSequenceItems,
+            transitions = transitions,
+            containBoundaryTransitions = true,
+            fps = _exportFps.value
+        )
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
 
         val chunkCommands = mutableListOf<ChunkCommand>()
@@ -2767,12 +2907,28 @@ class VideoEditingViewModel : ViewModel() {
             encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
         )
 
-        // Determine if final pass can safely use fast stream copy (-c copy concat demuxer)
-        // Subtitles and text overlays are clamped and burned directly into each chunk MP4,
-        // so they do not require re-encoding during final assembly.
         val hasBoundaryTransitions = plan.boundaryTransitions.any { it.transition != null && it.transition.type != "none" }
-        val hasAudioOperations = activeOperations.any { it is EditOperation.AddBackgroundAudio }
+        val isMuted = activeOperations.any { it is EditOperation.MuteAudio }
+        val hasAudioOperations = !isMuted && activeOperations.any { it is EditOperation.AddBackgroundAudio }
         val canStreamCopy = !hasBoundaryTransitions && !hasAudioOperations
+
+        val videoOnlyDurationSecs = plan.totalDurationMs / 1000.0
+        val paddingDurationSecs = (finalPassCmd.durationSecs - videoOnlyDurationSecs).coerceAtLeast(0.0)
+        val needsVideoPadding = paddingDurationSecs > 0.05
+
+        val mixedAudioTempFile = File(chunkTempDir, "mixed_audio_${timestamp}.m4a")
+        val audioMixCmd = if (!hasBoundaryTransitions && hasAudioOperations) {
+            buildAudioMixCommand(
+                operations = activeOperations,
+                outputAudioPath = mixedAudioTempFile.absolutePath,
+                targetDurationSecs = finalPassCmd.durationSecs,
+                context = context,
+                audioBitrate = audioBitrate
+            )
+        } else {
+            null
+        }
+        val canStreamCopyWithAudioMux = !hasBoundaryTransitions && (audioMixCmd != null) && !needsVideoPadding
 
         return ChunkExportPlan(
             isChunked = true,
@@ -2790,7 +2946,14 @@ class VideoEditingViewModel : ViewModel() {
             density = density,
             fontFilePath = fontFilePath,
             operations = activeOperations,
-            canStreamCopyFinalPass = canStreamCopy
+            canStreamCopyFinalPass = canStreamCopy,
+            canStreamCopyVideoWithAudioMux = canStreamCopyWithAudioMux,
+            audioMixCommand = audioMixCmd,
+            mixedAudioTempPath = if (audioMixCmd != null) mixedAudioTempFile.absolutePath else null,
+            audioBitrate = audioBitrate,
+            videoDurationSecs = videoOnlyDurationSecs,
+            needsVideoPadding = needsVideoPadding,
+            paddingDurationSecs = paddingDurationSecs
         )
     }
 
