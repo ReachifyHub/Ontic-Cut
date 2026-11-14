@@ -129,8 +129,8 @@ class FFmpegRenderEngine(private val context: Context) {
             val alias = fileName.substringBeforeLast('.')
             fontMap[alias] = fileName
             FFmpegKitConfig.setFontDirectory(context, context.cacheDir.absolutePath, fontMap)
-            
-            alias
+
+            fontFile.absolutePath
         } catch (e: Exception) {
             Log.e(TAG, "Failed to copy font to cache: ${e.message}", e)
             null

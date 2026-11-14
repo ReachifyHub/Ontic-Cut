@@ -122,7 +122,7 @@ object CaptionCueBuilder {
         }
         val srtText = buildSrtString(subCues)
         return EditOperation.AddSubtitles(
-            subtitlesUri = android.net.Uri.parse("vydra://auto_captions"),
+            subtitlesUri = resolveAutoCaptionsUri(),
             srtContent = srtText,
             fileName = "Auto Captions",
             cues = subCues,
@@ -140,6 +140,89 @@ object CaptionCueBuilder {
             sb.append("${cue.text}\n\n")
         }
         return sb.toString()
+    }
+
+    /**
+     * Unifies legacy `AddText(groupId == CAPTION_GROUP_ID)` operations into the single
+     * `EditOperation.AddSubtitles` pipeline so Auto Captions and .srt subtitles always
+     * share one renderer, one timeline track, and one FFmpeg export filter path.
+     *
+     * - If an `AddSubtitles` operation already exists, any legacy auto-caption `AddText`
+     *   operations are removed (keeping only the last `AddSubtitles`).
+     * - If only legacy auto-caption `AddText` operations exist, they are converted into a
+     *   single `EditOperation.AddSubtitles` preserving font, font size, color, and position.
+     */
+    fun normalizeCaptionOperations(operations: List<EditOperation>): List<EditOperation> {
+        val existingSubs = operations.filterIsInstance<EditOperation.AddSubtitles>()
+        val legacyAutoCaptions = operations.filterIsInstance<EditOperation.AddText>().filter {
+            it.groupId == CAPTION_GROUP_ID
+        }
+
+        if (legacyAutoCaptions.isEmpty() && existingSubs.size <= 1) {
+            return operations
+        }
+
+        val cleanedOps = operations.filterNot { op ->
+            (op is EditOperation.AddText && op.groupId == CAPTION_GROUP_ID) ||
+                op is EditOperation.AddSubtitles
+        }.toMutableList()
+
+        val unifiedSubOp: EditOperation.AddSubtitles? = if (existingSubs.isNotEmpty()) {
+            existingSubs.last()
+        } else if (legacyAutoCaptions.isNotEmpty()) {
+            val subCues = legacyAutoCaptions.mapNotNull { op ->
+                val cleanText = op.text.trim()
+                if (cleanText.isEmpty()) {
+                    null
+                } else {
+                    val startMs = (op.startTimeMs ?: 0L).coerceAtLeast(0L)
+                    val endMs = (op.endTimeMs ?: (startMs + 2000L)).coerceAtLeast(startMs + 100L)
+                    com.boostlyte.vydra.models.SubtitleCue(
+                        startTimeMs = startMs,
+                        endTimeMs = endMs,
+                        text = cleanText
+                    )
+                }
+            }.sortedBy { it.startTimeMs }
+                .distinctBy { Pair(it.startTimeMs, it.endTimeMs) }
+
+            if (subCues.isNotEmpty()) {
+                val styleRef = legacyAutoCaptions.first()
+                val isDefaultAnchor = styleRef.position == DEFAULT_POSITION &&
+                    styleRef.relativeX == DEFAULT_RELATIVE_X &&
+                    styleRef.relativeY == DEFAULT_RELATIVE_Y
+                EditOperation.AddSubtitles(
+                    subtitlesUri = resolveAutoCaptionsUri(),
+                    srtContent = buildSrtString(subCues),
+                    fileName = "Auto Captions",
+                    cues = subCues,
+                    color = styleRef.color,
+                    fontSize = styleRef.fontSize,
+                    position = styleRef.position,
+                    relativeX = if (isDefaultAnchor) null else styleRef.relativeX,
+                    relativeY = if (isDefaultAnchor) null else styleRef.relativeY,
+                    fontPath = styleRef.fontPath
+                )
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+
+        if (unifiedSubOp != null) {
+            cleanedOps.add(unifiedSubOp)
+        }
+        return cleanedOps
+    }
+
+    private fun resolveAutoCaptionsUri(): android.net.Uri {
+        @Suppress("USELESS_ELVIS")
+        return android.net.Uri.parse("vydra://auto_captions")
+            ?: android.net.Uri.EMPTY
+            ?: (Class.forName("android.net.DummyUri")
+                .getMethod("fromPath", String::class.java)
+                .invoke(null, "vydra://auto_captions") as android.net.Uri)
     }
 
     private fun formatSrtTime(ms: Long): String {

@@ -90,11 +90,14 @@ class VideoEditingViewModel : ViewModel() {
     }
 
     fun loadProject(project: VideoProject) {
-        _project.value = project
+        val normalizedProject = project.copy(
+            operations = com.boostlyte.vydra.captions.CaptionCueBuilder.normalizeCaptionOperations(project.operations)
+        )
+        _project.value = normalizedProject
         _undoStack.value = emptyList()
         _redoStack.value = emptyList()
         _hasUnsavedEdits.value = false
-        updateUiState { it.copy(canUndo = false, pendingOperationCount = project.getOperationCount()) }
+        updateUiState { it.copy(canUndo = false, pendingOperationCount = normalizedProject.getOperationCount()) }
     }
 
 
@@ -723,7 +726,8 @@ class VideoEditingViewModel : ViewModel() {
                     }
 
                     for (cue in op.cues) {
-                        val cleanText = cue.text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+                        val cleanText = cue.text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").trim()
+                        if (cleanText.isBlank()) continue
                         val (posX, posY) = if (op.hasCustomPosition()) {
                             Pair("'(w*${op.relativeX})-(tw/2)'", "'(h*${op.relativeY})-(th/2)'")
                         } else {
@@ -742,6 +746,7 @@ class VideoEditingViewModel : ViewModel() {
 
                         val cueStartLocal = (cue.startTimeMs - timeOffsetMs).coerceAtLeast(0L)
                         val cueEndLocal = (cue.endTimeMs - timeOffsetMs).coerceAtLeast(0L)
+                        if (cueEndLocal <= cueStartLocal) continue
 
                         val filterExpr = com.boostlyte.vydra.utils.FFmpegFilterUtils.buildValidatedDrawtextFilter(
                             text = cleanText,
@@ -778,6 +783,30 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         return Pair(stages, currentLabel)
+    }
+
+    /**
+     * Ensures FFmpeg receives a real, existing font file path on disk (never a bare alias such as
+     * "Roboto-Regular" or null when a Context is available).
+     */
+    private fun resolveEffectiveFontPath(fontFilePath: String?, context: Context?): String? {
+        if (!fontFilePath.isNullOrBlank() && java.io.File(fontFilePath).exists()) {
+            return fontFilePath
+        }
+        if (context != null) {
+            return try {
+                val f = java.io.File(context.cacheDir, "Roboto-Regular.ttf")
+                if (!f.exists() || f.length() == 0L) {
+                    context.assets.open("fonts/Roboto-Regular.ttf").use { input ->
+                        f.outputStream().use { output -> input.copyTo(output) }
+                    }
+                }
+                f.absolutePath
+            } catch (_: Exception) {
+                fontFilePath
+            }
+        }
+        return fontFilePath
     }
 
     /**
@@ -873,7 +902,9 @@ class VideoEditingViewModel : ViewModel() {
             return "-y -i \"$sourceFilePath\" -c copy \"$outputFilePath\""
         }
 
-        val operations = operationsOverride ?: currentProject.operations
+        val operations = com.boostlyte.vydra.captions.CaptionCueBuilder.normalizeCaptionOperations(
+            operationsOverride ?: currentProject.operations
+        )
 
         // Detect if source video has an audio stream
         val hasAudio = if (isMainImage) {
@@ -907,23 +938,7 @@ class VideoEditingViewModel : ViewModel() {
         val cmd = StringBuilder("-y") // Always overwrite output — prevents silent failure on retry
         var inputIndex = 0
 
-        val effectiveFontPath = if (!fontFilePath.isNullOrBlank() && java.io.File(fontFilePath).exists()) {
-            fontFilePath
-        } else if (context != null) {
-            try {
-                val f = java.io.File(context.cacheDir, "Roboto-Regular.ttf")
-                if (!f.exists() || f.length() == 0L) {
-                    context.assets.open("fonts/Roboto-Regular.ttf").use { input ->
-                        f.outputStream().use { output -> input.copyTo(output) }
-                    }
-                }
-                f.absolutePath
-            } catch (e: Exception) {
-                fontFilePath
-            }
-        } else {
-            fontFilePath
-        }
+        val effectiveFontPath = resolveEffectiveFontPath(fontFilePath, context)
 
         /** Resolve a URI to a real filesystem path FFmpeg can read.
          *  content:// URIs are copied to cacheDir; file:// or plain paths are used directly. */
@@ -1576,9 +1591,7 @@ class VideoEditingViewModel : ViewModel() {
             val filterComplexStr = filterParts.joinToString(";\n")
             if (context != null) {
                 com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr)
-            }
-            if (context != null && (filterComplexStr.length > 2000 || (mergeOp != null && mergeOp.items.size >= 10))) {
-                val scriptFile = File(context.cacheDir, "filter_script_${System.currentTimeMillis()}.txt")
+                val scriptFile = File(context.cacheDir, "filter_script_${System.nanoTime()}.txt")
                 scriptFile.writeText(filterComplexStr)
                 com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
                 cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
@@ -1845,10 +1858,7 @@ class VideoEditingViewModel : ViewModel() {
             
             val filterComplexStr = filterComplexParts.joinToString(";\n")
             if (context != null) {
-                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr)
-            }
-            if (context != null && filterComplexStr.length > 2000) {
-                val scriptFile = File(context.cacheDir, "filter_script_${System.currentTimeMillis()}.txt")
+                val scriptFile = File(context.cacheDir, "filter_script_${System.nanoTime()}.txt")
                 scriptFile.writeText(filterComplexStr)
                 com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
                 cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
@@ -2339,11 +2349,12 @@ class VideoEditingViewModel : ViewModel() {
             }
         }
 
+        val effectiveFontPath = resolveEffectiveFontPath(fontFilePath, context)
         val overlayOpsToApply = clampedTextOps + clampedImageOps + clampedSubtitleOps
         if (overlayOpsToApply.isNotEmpty()) {
             val (overlayStages, tempLabel) = buildVideoFilterStages(
                 operations = overlayOpsToApply,
-                fontFilePath = fontFilePath,
+                fontFilePath = effectiveFontPath,
                 inputLabel = currentVideoLabel,
                 imageInputIndices = visibleImageIndices,
                 density = density,
@@ -2364,8 +2375,8 @@ class VideoEditingViewModel : ViewModel() {
 
         val filterComplexStr = filterParts.joinToString(";\n")
         var scriptFile: File? = null
-        if (context != null && filterComplexStr.length > 2000) {
-            scriptFile = File(context.cacheDir, "filter_script_chunk_${chunkSpec.chunkIndex}_${System.currentTimeMillis()}.txt")
+        if (context != null) {
+            scriptFile = File(context.cacheDir, "filter_script_chunk_${chunkSpec.chunkIndex}_${System.nanoTime()}.txt")
             scriptFile.writeText(filterComplexStr)
             com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
             cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
@@ -2526,8 +2537,8 @@ class VideoEditingViewModel : ViewModel() {
 
         val filterComplexStr = filterParts.joinToString(";\n")
         var scriptFile: File? = null
-        if (context != null && filterComplexStr.length > 2000) {
-            scriptFile = File(context.cacheDir, "filter_script_final_${System.currentTimeMillis()}.txt")
+        if (context != null) {
+            scriptFile = File(context.cacheDir, "filter_script_final_${System.nanoTime()}.txt")
             scriptFile.writeText(filterComplexStr)
             com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
             cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
@@ -2686,8 +2697,8 @@ class VideoEditingViewModel : ViewModel() {
         val outLabel = audioStage.outputLabel ?: return null
         val filterStr = audioStage.filterParts.joinToString(";")
 
-        if (context != null && filterStr.length > 2000) {
-            val scriptFile = File(context.cacheDir, "filter_script_audio_${System.currentTimeMillis()}.txt")
+        if (context != null) {
+            val scriptFile = File(context.cacheDir, "filter_script_audio_${System.nanoTime()}.txt")
             scriptFile.writeText(filterStr)
             cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
         } else {
@@ -2713,7 +2724,10 @@ class VideoEditingViewModel : ViewModel() {
         operationsOverride: List<EditOperation>? = null
     ): ChunkExportPlan? {
         val currentProject = _project.value ?: return null
-        val activeOperations = operationsOverride ?: currentProject.operations
+        val activeOperations = com.boostlyte.vydra.captions.CaptionCueBuilder.normalizeCaptionOperations(
+            operationsOverride ?: currentProject.operations
+        )
+        val effectiveFontPath = resolveEffectiveFontPath(fontFilePath, context)
 
 
         val mergeOp = activeOperations.filterIsInstance<EditOperation.Merge>().firstOrNull()
@@ -2843,7 +2857,7 @@ class VideoEditingViewModel : ViewModel() {
             val singlePassCmd = buildConsolidatedFFmpegCommand(
                 sourceFilePath = sourceFilePath,
                 outputFilePath = outputFilePath,
-                fontFilePath = fontFilePath,
+                fontFilePath = effectiveFontPath,
                 context = context,
                 operationsOverride = activeOperations,
                 encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
@@ -2858,7 +2872,7 @@ class VideoEditingViewModel : ViewModel() {
                 fps = _exportFps.value,
                 resolution = _exportResolution.value,
                 density = context?.resources?.displayMetrics?.density ?: 1.0f,
-                fontFilePath = fontFilePath,
+                fontFilePath = effectiveFontPath,
                 operations = activeOperations,
                 audioBitrate = audioBitrate
             )
@@ -2884,7 +2898,7 @@ class VideoEditingViewModel : ViewModel() {
                 chunkSpec = chunk,
                 sourceFilePath = sourceFilePath,
                 chunkOutputPath = chunkTempFile.absolutePath,
-                fontFilePath = fontFilePath,
+                fontFilePath = effectiveFontPath,
                 context = context,
                 totalDurationMs = plan.totalDurationMs,
                 density = density,
@@ -2944,7 +2958,7 @@ class VideoEditingViewModel : ViewModel() {
             fps = _exportFps.value,
             resolution = _exportResolution.value,
             density = density,
-            fontFilePath = fontFilePath,
+            fontFilePath = effectiveFontPath,
             operations = activeOperations,
             canStreamCopyFinalPass = canStreamCopy,
             canStreamCopyVideoWithAudioMux = canStreamCopyWithAudioMux,
@@ -2969,16 +2983,18 @@ class VideoEditingViewModel : ViewModel() {
         previewOutputPath: String,
         seekPositionMs: Long,
         fontFilePath: String? = null,
-        density: Float = 1.0f
+        density: Float = 1.0f,
+        context: Context? = null
     ): String? {
         val currentProject = _project.value ?: return null
-        val operations = currentProject.operations
+        val operations = com.boostlyte.vydra.captions.CaptionCueBuilder.normalizeCaptionOperations(currentProject.operations)
             .filterNot { it is EditOperation.Merge } // Skip merge for preview
 
         if (operations.none { it is EditOperation.Crop || it is EditOperation.AddText || it is EditOperation.AddSubtitles }) {
             return null // No visual operations to preview
         }
 
+        val effectiveFontPath = resolveEffectiveFontPath(fontFilePath, context)
         val videoOps = operations.filter { it is EditOperation.Crop || it is EditOperation.AddText || it is EditOperation.AddSubtitles }
         val trimOp = operations.filterIsInstance<EditOperation.Trim>().lastOrNull()
 
@@ -2995,12 +3011,19 @@ class VideoEditingViewModel : ViewModel() {
         // Build filter_complex for video operations
         val (videoStages, finalLabel) = buildVideoFilterStages(
             operations = videoOps,
-            fontFilePath = fontFilePath,
+            fontFilePath = effectiveFontPath,
             density = density,
             sourceVideoHeight = 1080
         )
         if (videoStages.isNotEmpty()) {
-            cmd.append(" -filter_complex \"${videoStages.joinToString(";")}\"")
+            val filterStr = videoStages.joinToString(";\n")
+            if (context != null) {
+                val scriptFile = File(context.cacheDir, "filter_script_preview_${System.nanoTime()}.txt")
+                scriptFile.writeText(filterStr)
+                cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
+            } else {
+                cmd.append(" -filter_complex \"${videoStages.joinToString(";")}\"")
+            }
             cmd.append(" -map \"$finalLabel\" -map 0:a?")
         }
 
@@ -3146,10 +3169,14 @@ class VideoEditingViewModel : ViewModel() {
         _project.value?.let { EditRecipe.fromVideoProject(projectName, it) }
 
     fun loadRecipe(recipe: EditRecipe) {
-        _project.value = recipe.toVideoProject()
+        val restored = recipe.toVideoProject()
+        val normalized = restored.copy(
+            operations = com.boostlyte.vydra.captions.CaptionCueBuilder.normalizeCaptionOperations(restored.operations)
+        )
+        _project.value = normalized
         _undoStack.value = emptyList()
         _redoStack.value = emptyList()
-        updateUiState { it.copy(pendingOperationCount = recipe.operations.size, canUndo = false) }
+        updateUiState { it.copy(pendingOperationCount = normalized.operations.size, canUndo = false) }
     }
 
     private fun updateUiState(updater: (VideoEditingUiState) -> VideoEditingUiState) {

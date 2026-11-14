@@ -35,6 +35,12 @@ object FFmpegFilterUtils {
 
     /**
      * Escapes arbitrary user text for FFmpeg's `drawtext` filter with `expansion=none`.
+     *
+     * Inside a `-filter_complex_script` graph wrapped as `text='...'`:
+     * 1. Level 1 (`parse_filter` / `av_get_token`): strips the outer single quotes and unescapes
+     *    tokens outside quotes (`'\\\'` becomes literal `\'`).
+     * 2. Level 2 (`av_set_options_string` / `drawtext`): unescapes `\'`, `\,`, `\:`, `\;`, `\[`,
+     *    `\]`, and `\\`. Using `'\\\''` ensures an apostrophe does NOT reopen/swallow `:x=:y=:enable=`.
      */
     fun escapeDrawtextText(text: String): String {
         return text
@@ -42,7 +48,7 @@ object FFmpegFilterUtils {
             .replace("\n", " ")
             .replace("\r", " ")
             .replace("\\", "\\\\")
-            .replace("'", "'\\''")
+            .replace("'", "'\\\\\\''")
             .replace(":", "\\:")
             .replace(",", "\\,")
             .replace(";", "\\;")

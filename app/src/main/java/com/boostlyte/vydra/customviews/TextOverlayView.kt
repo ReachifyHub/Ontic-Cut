@@ -368,7 +368,11 @@ class TextOverlayView @JvmOverloads constructor(
             } else {
                 paint.typeface = android.graphics.Typeface.DEFAULT
             }
-            paint.color = Color.WHITE
+            paint.color = try {
+                if (!subOp?.color.isNullOrBlank()) Color.parseColor(subOp!!.color) else Color.WHITE
+            } catch (_: Exception) {
+                Color.WHITE
+            }
 
             val bgPaint = Paint().apply {
                 isAntiAlias = true
