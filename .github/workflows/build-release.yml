@@ -58,8 +58,8 @@ jobs:
                 VERSION_TAG=${GITHUB_REF#refs/tags/}
                 cp "$apk" "release-artifacts/Vydra-${VERSION_TAG}.apk"
               fi
-            fi
-          done
+            done
+          fi
           ls -lh release-artifacts/
 
       - name: Upload Release APK Artifact (For Actions Tab)
