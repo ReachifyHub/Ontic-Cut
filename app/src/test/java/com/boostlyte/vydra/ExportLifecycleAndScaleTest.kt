@@ -122,54 +122,6 @@ class ExportLifecycleAndScaleTest {
     }
 
     @Test
-    fun testPerChunkMotionRenderingBoundedToActiveChunk() {
-        val viewModel = VideoEditingViewModel()
-        val dummyTempDir = File("/tmp/test_chunk_motion_${System.currentTimeMillis()}").apply { mkdirs() }
-
-        try {
-            // Build a chunk with 10 clips, only 2 having motion
-            val chunkSpecClips = (0 until 10).map { idx ->
-                val hasMotion = (idx == 2 || idx == 7)
-                com.boostlyte.vydra.services.ChunkClip(
-                    globalIndex = idx,
-                    localIndex = idx,
-                    item = EditOperation.MergeItem(
-                        uri = DummyUri.fromPath("/tmp/image_$idx.jpg"),
-                        durationMs = 3000L,
-                        isImage = true,
-                        motionEffect = if (hasMotion) "zoom_in" else null
-                    )
-                )
-            }
-            val chunkSpec = com.boostlyte.vydra.services.ChunkSpec(
-                chunkIndex = 0,
-                clips = chunkSpecClips,
-                internalTransitions = emptyList(),
-                globalStartMs = 0L,
-                globalEndMs = 30000L,
-                durationMs = 30000L
-            )
-
-            val (renderedSpec, createdFiles) = viewModel.preRenderGlMotionForChunk(
-                chunkSpec = chunkSpec,
-                operations = emptyList(),
-                cacheDir = dummyTempDir,
-                targetWidth = 1080,
-                targetHeight = 1920,
-                fps = 30,
-                preferredEncoder = "hardware"
-            )
-
-            // Since test environment doesn't have real GPU/MediaCodec, renderMotionClip falls back to legacy
-            // or reports failure gracefully, returning the original clips or created MP4s without throwing.
-            assertEquals(10, renderedSpec.clips.size)
-            assertNotNull(createdFiles)
-        } finally {
-            dummyTempDir.deleteRecursively()
-        }
-    }
-
-    @Test
     fun testEncoderSelector_modesAndPermanentErrors() {
         // Selection with AUTO mode
         val autoSelected = EncoderSelector.selectEncoder(

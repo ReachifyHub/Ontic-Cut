@@ -2958,43 +2958,6 @@ class VideoEditingViewModel : ViewModel() {
     }
 
     /**
-     * Bounded per-chunk GL motion pre-rendering.
-     * Renders motion MP4 clips only for image items in the active chunk with motion effects.
-     * Intermediate files are deleted immediately after that chunk completes.
-     */
-    /**
-     * Legacy no-op stub: GL motion rendering during export is disabled.
-     */
-    @Deprecated("Legacy FFmpeg is the sole rendering engine. GL motion rendering is disabled.")
-    fun preRenderGlMotionForChunk(
-        chunkSpec: ChunkSpec,
-        operations: List<EditOperation>,
-        cacheDir: File,
-        targetWidth: Int,
-        targetHeight: Int,
-        fps: Int,
-        preferredEncoder: String = "hardware"
-    ): Pair<ChunkSpec, List<File>> {
-        return Pair(chunkSpec, emptyList())
-    }
-
-    /**
-     * Legacy no-op stub: GL motion rendering during export is disabled.
-     */
-    @Deprecated("Legacy FFmpeg is the sole rendering engine. GL motion rendering is disabled.")
-    fun preRenderGlMotionIntermediates(
-        items: List<EditOperation.MergeItem>,
-        operations: List<EditOperation>,
-        cacheDir: File,
-        targetWidth: Int,
-        targetHeight: Int,
-        fps: Int,
-        preferredEncoder: String = "hardware"
-    ): Pair<List<EditOperation.MergeItem>, String> {
-        return Pair(items, "legacy")
-    }
-
-    /**
      * Build an FFmpeg command for a fast 3-second preview around the playhead.
      * Uses ultrafast preset and high CRF for speed over quality.
      * Skips merge operations (preview is source-only).
