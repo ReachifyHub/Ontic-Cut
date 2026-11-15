@@ -98,8 +98,24 @@ class FFmpegRenderEngine(private val context: Context) {
 
     // ── Result type ───────────────────────────────────────────────────────────
 
+    data class ExecutionStats(
+        val actualEncoder: String = "unknown",
+        val hardwareFallbackTriggered: Boolean = false,
+        val hardwareFailureReason: String? = null,
+        val hardwareAttemptDurationSecs: Double = 0.0,
+        val firstFrameLatencyMs: Long = -1L,
+        val avgFps: Float = 0f,
+        val avgSpeed: Double = 0.0,
+        val lastReportedBitrateKbps: Double = 0.0,
+        val finalFrameCount: Long = 0L
+    )
+
     sealed class RenderResult {
-        data class Success(val outputPath: String, val session: FFmpegSession) : RenderResult()
+        data class Success(
+            val outputPath: String,
+            val session: FFmpegSession,
+            val stats: ExecutionStats = ExecutionStats()
+        ) : RenderResult()
         data class Failure(val error: String, val session: FFmpegSession? = null) : RenderResult()
         object Cancelled : RenderResult()
     }
@@ -287,9 +303,18 @@ class FFmpegRenderEngine(private val context: Context) {
     ): RenderResult {
         return withContext(Dispatchers.IO) {
             val scriptFilePath = extractScriptFilePath(ffmpegCommand)
+            val execStartMs = System.currentTimeMillis()
+            var firstFrameLatencyMs = -1L
+            var fpsSum = 0.0
+            var fpsCount = 0
+            var speedSum = 0.0
+            var speedCount = 0
+            var lastBitrateKbps = 0.0
+            var maxFrameNumber = 0L
+
             try {
                 Log.d(TAG, "Executing FFmpeg command: $ffmpegCommand")
-                
+
                 val session = suspendCancellableCoroutine<FFmpegSession> { cont ->
                     val asyncSession = FFmpegKit.executeAsync(ffmpegCommand, { completeSession ->
                         cont.resume(completeSession)
@@ -306,6 +331,23 @@ class FFmpegRenderEngine(private val context: Context) {
                             Log.d(TAG, "[ffmpeg] $msg")
                         }
                     }, { statistics ->
+                        if (firstFrameLatencyMs < 0L && (statistics.videoFrameNumber > 0 || statistics.time > 0)) {
+                            firstFrameLatencyMs = System.currentTimeMillis() - execStartMs
+                        }
+                        if (statistics.videoFps > 0f) {
+                            fpsSum += statistics.videoFps.toDouble()
+                            fpsCount++
+                        }
+                        if (statistics.speed > 0.0) {
+                            speedSum += statistics.speed
+                            speedCount++
+                        }
+                        if (statistics.bitrate > 0.0) {
+                            lastBitrateKbps = statistics.bitrate
+                        }
+                        if (statistics.videoFrameNumber > maxFrameNumber) {
+                            maxFrameNumber = statistics.videoFrameNumber.toLong()
+                        }
                         if (totalDurationSecs != null && totalDurationSecs > 0) {
                             val timeMs = statistics.time
                             if (timeMs > 0) {
@@ -316,44 +358,71 @@ class FFmpegRenderEngine(private val context: Context) {
                         }
                     })
                     activeSessions.add(asyncSession)
-                    
+
                     cont.invokeOnCancellation {
                         FFmpegKit.cancel(asyncSession.sessionId)
                         activeSessions.remove(asyncSession)
                         sessionLogBuffers.remove(asyncSession.sessionId)
                     }
                 }
-                
+
                 activeSessions.remove(session)
 
                 val returnCode = session.getReturnCode()
                 Log.d(TAG, "FFmpeg completed with return code: ${returnCode?.getValue()}")
 
                 val logs = sessionLogBuffers.remove(session.sessionId)?.toList()
-                val outputPath = extractOutputPath(ffmpegCommand)
+                val outputPath = extractOutputPath(command = ffmpegCommand)
                 val missingVideo = isMissingVideoStream(ffmpegCommand, logs, outputPath)
 
                 val isCancelled = ReturnCode.isCancel(returnCode) || returnCode?.getValue() == 255
                 if (isCancelled) {
                     Log.d(TAG, "FFmpeg export session was cancelled by user (return code: ${returnCode?.getValue()})")
-                    val outputPath = extractOutputPath(ffmpegCommand)
-                    if (outputPath != null) {
+                    if (outputPath.isNotBlank()) {
                         try { File(outputPath).delete() } catch (_: Exception) {}
                     }
                     RenderResult.Cancelled
                 } else if (ReturnCode.isSuccess(returnCode) && !missingVideo) {
+                    val detectedEncoder = detectExecutedEncoder(ffmpegCommand, logs)
+                    val avgFps = if (fpsCount > 0) (fpsSum / fpsCount).toFloat() else 0f
+                    val avgSpeed = if (speedCount > 0) (speedSum / speedCount) else 0.0
                     RenderResult.Success(
                         outputPath = outputPath,
-                        session = session
+                        session = session,
+                        stats = ExecutionStats(
+                            actualEncoder = detectedEncoder,
+                            hardwareFallbackTriggered = isRetry,
+                            firstFrameLatencyMs = firstFrameLatencyMs,
+                            avgFps = avgFps,
+                            avgSpeed = avgSpeed,
+                            lastReportedBitrateKbps = lastBitrateKbps,
+                            finalFrameCount = maxFrameNumber
+                        )
                     )
                 } else {
                     val diagnosticLog = createDiagnosticReport(context, ffmpegCommand, returnCode, session, logs)
                     val isPermanent = com.boostlyte.vydra.export.EncoderSelector.isPermanentFailure(diagnosticLog, isCancelled)
 
                     if (!isRetry && !isPermanent && ffmpegCommand.contains("h264_mediacodec")) {
+                        val hwElapsedSecs = (System.currentTimeMillis() - execStartMs) / 1000.0
+                        val failureSnippet = logs?.lastOrNull {
+                            val m = it.message?.lowercase() ?: ""
+                            m.contains("error") || m.contains("failed") || m.contains("mediacodec")
+                        }?.message?.trim() ?: "rc=${returnCode?.getValue()} missingVideo=$missingVideo"
                         Log.w(TAG, "Hardware encoder h264_mediacodec failed or produced no video stream. Falling back to software encoder libx264. Error:\n$diagnosticLog")
                         val fallbackCommand = com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(ffmpegCommand)
-                        return@withContext exportFinal(fallbackCommand, totalDurationSecs, onProgress, isRetry = true)
+                        val retryResult = exportFinal(fallbackCommand, totalDurationSecs, onProgress, isRetry = true)
+                        return@withContext if (retryResult is RenderResult.Success) {
+                            retryResult.copy(
+                                stats = retryResult.stats.copy(
+                                    hardwareFallbackTriggered = true,
+                                    hardwareFailureReason = failureSnippet,
+                                    hardwareAttemptDurationSecs = hwElapsedSecs
+                                )
+                            )
+                        } else {
+                            retryResult
+                        }
                     }
 
                     Log.e(TAG, "FFmpeg error:\n$diagnosticLog")
@@ -381,6 +450,28 @@ class FFmpegRenderEngine(private val context: Context) {
                     }
                 }
             }
+        }
+    }
+
+    private fun detectExecutedEncoder(command: String, logs: List<com.antonkarpenko.ffmpegkit.Log>?): String {
+        if (logs != null) {
+            for (l in logs) {
+                val msg = l.message ?: continue
+                if (msg.contains("h264_mediacodec", ignoreCase = true) && !msg.contains("Option")) {
+                    return "h264_mediacodec"
+                }
+                if (msg.contains("libx264", ignoreCase = true)) {
+                    return "libx264"
+                }
+            }
+        }
+        return when {
+            command.contains("-c copy") || command.contains("-c:v copy") -> "copy"
+            command.contains("h264_mediacodec") -> "h264_mediacodec"
+            command.contains("libx264") -> "libx264"
+            command.contains("-vn") && command.contains("aac") -> "aac"
+            command.contains("-vn") && command.contains("libmp3lame") -> "libmp3lame"
+            else -> "unknown"
         }
     }
 

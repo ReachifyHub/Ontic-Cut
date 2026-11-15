@@ -6314,6 +6314,10 @@ class VideoEditingActivity : AppCompatActivity() {
 
                 val prepResult = withContext(Dispatchers.IO) {
                     val prepStartMs = System.currentTimeMillis()
+                    com.boostlyte.vydra.utils.AppLogger.resetFilterGraphLog(
+                        this@VideoEditingActivity,
+                        "res=${viewModel.exportResolution.value}p fps=${viewModel.exportFps.value} audioOnly=$isAudioOnly"
+                    )
                     // Autosave project state before export
                     val autosaveStartMs = System.currentTimeMillis()
                     try {
@@ -6343,12 +6347,19 @@ class VideoEditingActivity : AppCompatActivity() {
                     )
 
                     val uriResolveStartMs = System.currentTimeMillis()
+                    var imagesCopied = 0
+                    var videosCopied = 0
+                    var audioCopied = 0
+                    var directFiles = 0
+                    var copiedBytes = 0L
 
                     val sourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
+                        directFiles++
                         tempInputFile.absolutePath
                     } else {
                         val resolved = getFilePathFromUri(project.sourceUri)
                         if (resolved != null && File(resolved).exists()) {
+                            directFiles++
                             tempInputFile = File(resolved)
                             resolved
                         } else {
@@ -6356,6 +6367,8 @@ class VideoEditingActivity : AppCompatActivity() {
                             val fExt = if (isImg) ".jpg" else ".mp4"
                             val fallback = copyContentUriToTempFile(project.sourceUri, "export_source", fExt)
                             if (fallback != null && fallback.exists()) {
+                                if (isImg) imagesCopied++ else videosCopied++
+                                copiedBytes += fallback.length()
                                 tempInputFile = fallback
                                 fallback.absolutePath
                             } else {
@@ -6375,6 +6388,7 @@ class VideoEditingActivity : AppCompatActivity() {
                                     val origUriStr = origUri.toString()
                                     val scheme = origUri.scheme ?: "none"
                                     val itemPath = if (scheme == "file") {
+                                        directFiles++
                                         origUri.path
                                     } else if (scheme == "content") {
                                         val ext = if (item.isImage) ".jpg" else ".mp4"
@@ -6383,14 +6397,23 @@ class VideoEditingActivity : AppCompatActivity() {
                                             contentResolver.openInputStream(origUri)?.use { input ->
                                                 targetFile.outputStream().use { output -> input.copyTo(output) }
                                             }
-                                            if (targetFile.exists() && targetFile.length() > 0L) targetFile.absolutePath else null
+                                            if (targetFile.exists() && targetFile.length() > 0L) {
+                                                if (item.isImage) imagesCopied++ else videosCopied++
+                                                copiedBytes += targetFile.length()
+                                                targetFile.absolutePath
+                                            } else null
                                         } catch (e: Exception) {
                                             Log.e(TAG, "Failed copying content URI $origUri: ${e.message}")
                                             null
-                                        } ?: getFilePathFromUri(origUri)
+                                        } ?: getFilePathFromUri(origUri)?.also { directFiles++ }
                                     } else {
                                         val p = origUri.path ?: origUriStr
-                                        if (File(p).exists()) p else getFilePathFromUri(origUri)
+                                        if (File(p).exists()) {
+                                            directFiles++
+                                            p
+                                        } else {
+                                            getFilePathFromUri(origUri)?.also { directFiles++ }
+                                        }
                                     }
 
                                     val f = itemPath?.let { File(it) }
@@ -6411,6 +6434,7 @@ class VideoEditingActivity : AppCompatActivity() {
                                 val origUriStr = origUri.toString()
                                 val scheme = origUri.scheme ?: "none"
                                 val audioPath = if (scheme == "file") {
+                                    directFiles++
                                     origUri.path
                                 } else if (scheme == "content") {
                                     val targetFile = File(exportJobDir, "audio_${System.currentTimeMillis()}.mp3")
@@ -6418,14 +6442,23 @@ class VideoEditingActivity : AppCompatActivity() {
                                         contentResolver.openInputStream(origUri)?.use { input ->
                                             targetFile.outputStream().use { output -> input.copyTo(output) }
                                         }
-                                        if (targetFile.exists() && targetFile.length() > 0L) targetFile.absolutePath else null
+                                        if (targetFile.exists() && targetFile.length() > 0L) {
+                                            audioCopied++
+                                            copiedBytes += targetFile.length()
+                                            targetFile.absolutePath
+                                        } else null
                                     } catch (e: Exception) {
                                         Log.e(TAG, "Failed copying audio content URI $origUri: ${e.message}")
                                         null
-                                    } ?: getFilePathFromUri(origUri)
+                                    } ?: getFilePathFromUri(origUri)?.also { directFiles++ }
                                 } else {
                                     val p = origUri.path ?: origUriStr
-                                    if (File(p).exists()) p else getFilePathFromUri(origUri)
+                                    if (File(p).exists()) {
+                                        directFiles++
+                                        p
+                                    } else {
+                                        getFilePathFromUri(origUri)?.also { directFiles++ }
+                                    }
                                 }
 
                                 val f = audioPath?.let { File(it) }
@@ -6456,7 +6489,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     com.boostlyte.vydra.utils.AppLogger.logStageTiming(
                         this@VideoEditingActivity,
                         "prep_uri_resolve",
-                        uriResolveSecs
+                        uriResolveSecs,
+                        "imagesCopied=$imagesCopied videosCopied=$videosCopied audioCopied=$audioCopied directFiles=$directFiles copiedBytes=$copiedBytes"
                     )
 
                     val planBuildStartMs = System.currentTimeMillis()
@@ -6480,9 +6514,44 @@ class VideoEditingActivity : AppCompatActivity() {
                         "isChunked=${chunkPlan.isChunked} numChunks=${chunkPlan.chunkCommands.size}"
                     )
 
+                    val activeOps = chunkPlan.operations
+                    val mergeOpForMeta = activeOps.filterIsInstance<EditOperation.Merge>().firstOrNull()
+                    val isSrcImg = sourceFilePath.endsWith(".png", true) || sourceFilePath.endsWith(".jpg", true) ||
+                        sourceFilePath.endsWith(".jpeg", true) || sourceFilePath.endsWith(".webp", true)
+                    val totalImagesCount = (if (isSrcImg) 1 else 0) + (mergeOpForMeta?.items?.count { it.isImage } ?: 0)
+                    val totalVideosCount = (if (!isSrcImg) 1 else 0) + (mergeOpForMeta?.items?.count { !it.isImage } ?: 0)
+                    val activeTrans = activeOps.filterIsInstance<EditOperation.Transition>()
+                        .filter { !it.type.equals("none", ignoreCase = true) && it.durationMs > 0L }
+                    val transTotalSec = activeTrans.sumOf { it.durationMs } / 1000.0
+                    val motionOpIndices = activeOps.filterIsInstance<EditOperation.MotionEffect>()
+                        .filter { !it.motionType.equals("none", ignoreCase = true) }
+                    val itemMotionTypes = (mergeOpForMeta?.items?.mapIndexedNotNull { i, m ->
+                        val t = m.motionEffect
+                        if (!t.isNullOrBlank() && !t.equals("none", ignoreCase = true)) (i + 1) to t else null
+                    } ?: emptyList())
+                    val motionByIdx = mutableMapOf<Int, String>()
+                    itemMotionTypes.forEach { (idx, t) -> motionByIdx[idx] = t }
+                    motionOpIndices.forEach { motionByIdx[it.index] = it.motionType }
+                    val zoomInCount = motionByIdx.values.count { it.contains("zoom_in", true) || it.contains("in", true) }
+                    val zoomOutCount = motionByIdx.values.count { it.contains("zoom_out", true) || it.contains("out", true) }
+                    val panCount = motionByIdx.values.count { it.contains("pan", true) }
+                    val captionCuesCount = activeOps.filterIsInstance<EditOperation.AddSubtitles>().sumOf { it.cues.size }
+                    val textOverlaysCount = activeOps.filterIsInstance<EditOperation.AddText>().size
+                    val imageOverlaysCount = activeOps.filterIsInstance<EditOperation.AddImageOverlay>().size
+                    val audioTracksCount = if (activeOps.any { it is EditOperation.MuteAudio }) 0 else activeOps.filterIsInstance<EditOperation.AddBackgroundAudio>().size
+                    val projectMetaStr = "images=$totalImagesCount videos=$totalVideosCount transitions=${activeTrans.size} transTotalSec=${String.format(java.util.Locale.US, "%.2f", transTotalSec)} motionClips=${motionByIdx.size} (zoomIn=$zoomInCount zoomOut=$zoomOutCount pan=$panCount) captionCues=$captionCuesCount textOverlays=$textOverlaysCount imageOverlays=$imageOverlaysCount audioTracks=$audioTracksCount dim=${chunkPlan.targetWidth}x${chunkPlan.targetHeight}@${chunkPlan.fps} res=${chunkPlan.resolution}p"
+
                     if (chunkPlan.isChunked) {
+                        val serializeStartMs = System.currentTimeMillis()
                         val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.json")
                         planFile.writeText(com.boostlyte.vydra.utils.ProjectSerializer.gson.toJson(chunkPlan))
+                        val serializeSecs = (System.currentTimeMillis() - serializeStartMs) / 1000.0
+                        com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                            this@VideoEditingActivity,
+                            "prep_plan_serialize",
+                            serializeSecs,
+                            "planBytes=${planFile.length()}"
+                        )
                         Log.i(TAG, "Saved chunk plan JSON (${planFile.length()} bytes) to: ${planFile.absolutePath}")
                         val prepDurationMs = System.currentTimeMillis() - prepStartMs
                         com.boostlyte.vydra.utils.AppLogger.logStageTiming(
@@ -6491,13 +6560,14 @@ class VideoEditingActivity : AppCompatActivity() {
                             prepDurationMs / 1000.0,
                             "mode=chunked numChunks=${chunkPlan.chunkCommands.size}"
                         )
-                        ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath, prepDurationMs)
+                        ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath, prepDurationMs, projectMetaStr)
                     } else {
                         var ffmpegCommand = chunkPlan.singlePassCommand ?: return@withContext null
                         Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
 
                         var generatedConcat: File? = null
                         if (ffmpegCommand.contains("(CONCAT_LIST:")) {
+                            val concatWriteStartMs = System.currentTimeMillis()
                             val concatListStart = ffmpegCommand.indexOf("(CONCAT_LIST:") + "(CONCAT_LIST:".length
                             val concatListEnd = ffmpegCommand.lastIndexOf(")")
                             if (concatListStart > 13 && concatListEnd > concatListStart) {
@@ -6513,6 +6583,12 @@ class VideoEditingActivity : AppCompatActivity() {
                                     .substring(0, ffmpegCommand.indexOf("(CONCAT_LIST:"))
                                     .trim()
                             }
+                            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                                this@VideoEditingActivity,
+                                "prep_concat_write",
+                                (System.currentTimeMillis() - concatWriteStartMs) / 1000.0,
+                                "bytes=${generatedConcat?.length() ?: 0L}"
+                            )
                         }
 
                         Log.d(TAG, "Final FFmpeg command: $ffmpegCommand")
@@ -6525,7 +6601,7 @@ class VideoEditingActivity : AppCompatActivity() {
                             prepDurationMs / 1000.0,
                             "mode=single_pass"
                         )
-                        ExportPrepResult(ffmpegCommand, generatedConcat, totalDurationSecs, chunkPlan.renderPath, prepDurationMs)
+                        ExportPrepResult(ffmpegCommand, generatedConcat, totalDurationSecs, chunkPlan.renderPath, prepDurationMs, projectMetaStr)
                     }
                 }
 
@@ -6542,7 +6618,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                val (ffmpegCommand, generatedFile, totalDurationSecs, renderPath, prepDurationMs) = prepResult
+                val (ffmpegCommand, generatedFile, totalDurationSecs, renderPath, prepDurationMs, exportMetadata) = prepResult
                 val isChunkedPlan = (ffmpegCommand == null)
 
                 exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = getString(R.string.str_please_don_t_close_the_app)
@@ -6561,6 +6637,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_TOTAL_DURATION_SECS, totalDurationSecs)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_IS_AUDIO_ONLY, isAudioOnly)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_PREP_DURATION_MS, prepDurationMs)
+                    putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_EXPORT_METADATA, exportMetadata)
                 }
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -11754,7 +11831,8 @@ class VideoEditingActivity : AppCompatActivity() {
         val generatedFile: File?,
         val totalDurationSecs: Double,
         val renderPath: String,
-        val prepDurationMs: Long = 0L
+        val prepDurationMs: Long = 0L,
+        val exportMetadata: String = ""
     )
 
     companion object {

@@ -185,6 +185,15 @@ object AppLogger {
     }
 
     /**
+     * Records full project & encoder configuration at the start of export.
+     */
+    fun logExportConfig(context: Context, configDetails: String) {
+        val line = "EXPORT_CONFIG ${getIsoTimestamp()} ${redact(configDetails)}"
+        Log.i("ExportProfiler", line)
+        appendToFileCapped(getExportLogFile(context), line)
+    }
+
+    /**
      * Records fine-grained timing for an individual export stage to Logcat and vydra_export.log.
      */
     fun logStageTiming(
@@ -217,7 +226,13 @@ object AppLogger {
         resolution: Int,
         fps: Int,
         encoder: String,
-        numChunks: Int
+        numChunks: Int,
+        requestedEncoderPref: String = "unknown",
+        hwRetryTriggered: Boolean = false,
+        usedStreamCopy: Boolean = false,
+        reencodedFullVideo: Boolean = false,
+        targetBitrate: String = "unknown",
+        extraDetails: String = ""
     ) {
         val bitrateKbps = if (videoDurationSecs > 0.0) {
             ((outputSizeBytes * 8.0) / videoDurationSecs / 1000.0).toLong()
@@ -234,8 +249,12 @@ object AppLogger {
             append("total=${String.format(Locale.US, "%.2f", totalSecs)}s ")
             append("videoDuration=${String.format(Locale.US, "%.2f", videoDurationSecs)}s ")
             append("outputSizeBytes=$outputSizeBytes (${sizeMb}MB) ")
-            append("avgBitrate=${bitrateKbps}kbps ")
-            append("res=${resolution}p@$fps encoder=$encoder")
+            append("avgBitrate=${bitrateKbps}kbps targetBitrate=$targetBitrate ")
+            append("res=${resolution}p@$fps encoderPref=$requestedEncoderPref actualEncoder=$encoder ")
+            append("hwRetryTriggered=$hwRetryTriggered usedStreamCopy=$usedStreamCopy reencodedFullVideo=$reencodedFullVideo")
+            if (extraDetails.isNotBlank()) {
+                append(" ").append(redact(extraDetails))
+            }
         }
         Log.i("ExportProfiler", line)
         appendToFileCapped(getExportLogFile(context), line)
@@ -291,20 +310,84 @@ object AppLogger {
     }
 
     /**
+     * Clears/initializes the filter graph & command log at the start of a new export run.
+     */
+    fun resetFilterGraphLog(context: Context, headerInfo: String = "") {
+        try {
+            val destFile = getFilterGraphLogFile(context)
+            destFile.writeText(
+                buildString {
+                    appendLine("=== VYDRA EXPORT FILTER GRAPH & COMMANDS (${getIsoTimestamp()}) ===")
+                    if (headerInfo.isNotBlank()) {
+                        appendLine(redact(headerInfo))
+                    }
+                    appendLine()
+                }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to reset filter graph log: ${e.message}")
+        }
+    }
+
+    /**
+     * Appends an executed FFmpeg command and its filter_complex script into vydra_filter_graph.log
+     * (bounded cleanly under ~512 KB so Share App Logs remains reliable).
+     */
+    fun appendFilterGraphEntry(
+        context: Context,
+        passName: String,
+        command: String?,
+        filterScriptContent: String? = null,
+        sourceFile: File? = null
+    ) {
+        try {
+            val destFile = getFilterGraphLogFile(context)
+            val maxFilterLogBytes = 512 * 1024L
+            if (destFile.exists() && destFile.length() >= maxFilterLogBytes) {
+                return
+            }
+            val scriptBody = when {
+                !filterScriptContent.isNullOrBlank() -> filterScriptContent
+                sourceFile != null && sourceFile.exists() -> sourceFile.readText()
+                else -> null
+            }
+            val entry = buildString {
+                appendLine("--- PASS: $passName (${getIsoTimestamp()}) ---")
+                if (!command.isNullOrBlank()) {
+                    appendLine("CMD: ${redact(command)}")
+                }
+                if (!scriptBody.isNullOrBlank()) {
+                    val lines = scriptBody.lines()
+                    appendLine("FILTER_SCRIPT (${lines.size} lines, ${scriptBody.length} chars):")
+                    if (scriptBody.length > 64 * 1024) {
+                        appendLine(redact(scriptBody.take(64 * 1024)))
+                        appendLine("... [TRUNCATED ${scriptBody.length - 64 * 1024} chars] ...")
+                    } else {
+                        appendLine(redact(scriptBody))
+                    }
+                }
+                appendLine()
+            }
+            FileWriter(destFile, true).use { writer ->
+                writer.append(entry)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to append filter graph entry: ${e.message}")
+        }
+    }
+
+    /**
      * Saves or copies the generated filter_complex_script into cacheDir/logs/
      * so it is permanently preserved in the "Share App Logs" diagnostic bundle.
      */
     fun saveFilterComplexScriptLog(context: Context, scriptContent: String, sourceFile: File? = null) {
-        try {
-            val destFile = getFilterGraphLogFile(context)
-            if (sourceFile != null && sourceFile.exists()) {
-                sourceFile.copyTo(destFile, overwrite = true)
-            } else {
-                destFile.writeText(scriptContent)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to persist filter graph script: ${e.message}")
-        }
+        appendFilterGraphEntry(
+            context = context,
+            passName = sourceFile?.nameWithoutExtension ?: "filter_script",
+            command = null,
+            filterScriptContent = scriptContent,
+            sourceFile = sourceFile
+        )
     }
 
     /**

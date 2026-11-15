@@ -1590,10 +1590,8 @@ class VideoEditingViewModel : ViewModel() {
             }
             val filterComplexStr = filterParts.joinToString(";\n")
             if (context != null) {
-                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr)
                 val scriptFile = File(context.cacheDir, "filter_script_${System.nanoTime()}.txt")
                 scriptFile.writeText(filterComplexStr)
-                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
                 cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
             } else {
                 cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
@@ -1636,6 +1634,14 @@ class VideoEditingViewModel : ViewModel() {
             cmd.append(" \"$outputFilePath\"")
 
             val finalCommand = cmd.toString()
+            if (context != null) {
+                com.boostlyte.vydra.utils.AppLogger.appendFilterGraphEntry(
+                    context = context,
+                    passName = "single_pass_merge",
+                    command = finalCommand,
+                    filterScriptContent = filterComplexStr
+                )
+            }
             Log.d(TAG, "Built merge command: $finalCommand")
             return finalCommand
         }
@@ -1860,7 +1866,6 @@ class VideoEditingViewModel : ViewModel() {
             if (context != null) {
                 val scriptFile = File(context.cacheDir, "filter_script_${System.nanoTime()}.txt")
                 scriptFile.writeText(filterComplexStr)
-                com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
                 cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
             } else {
                 cmd.append(" -filter_complex \"${filterComplexParts.joinToString(";")}\"")
@@ -1924,6 +1929,15 @@ class VideoEditingViewModel : ViewModel() {
         cmd.append(" \"$outputFilePath\"")
 
         val finalCommand = cmd.toString()
+        if (context != null) {
+            val nonMergeFilterStr = if (hasVideoFilters || hasAudioFilters) filterComplexParts.joinToString(";\n") else null
+            com.boostlyte.vydra.utils.AppLogger.appendFilterGraphEntry(
+                context = context,
+                passName = "single_pass",
+                command = finalCommand,
+                filterScriptContent = nonMergeFilterStr
+            )
+        }
         Log.d(TAG, "Built command: $finalCommand")
         return finalCommand
     }
@@ -2378,7 +2392,6 @@ class VideoEditingViewModel : ViewModel() {
         if (context != null) {
             scriptFile = File(context.cacheDir, "filter_script_chunk_${chunkSpec.chunkIndex}_${System.nanoTime()}.txt")
             scriptFile.writeText(filterComplexStr)
-            com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
             cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
         } else {
             cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
@@ -2396,6 +2409,14 @@ class VideoEditingViewModel : ViewModel() {
         cmd.append(" -t $formattedDur \"$chunkOutputPath\"")
 
         val commandStr = cmd.toString()
+        if (context != null) {
+            com.boostlyte.vydra.utils.AppLogger.appendFilterGraphEntry(
+                context = context,
+                passName = "chunk_${chunkSpec.chunkIndex + 1}_built",
+                command = commandStr,
+                filterScriptContent = filterComplexStr
+            )
+        }
         Log.d(TAG, "Built chunk ${chunkSpec.chunkIndex} command: $commandStr")
         return ChunkCommand(
             chunkIndex = chunkSpec.chunkIndex,
@@ -2540,7 +2561,6 @@ class VideoEditingViewModel : ViewModel() {
         if (context != null) {
             scriptFile = File(context.cacheDir, "filter_script_final_${System.nanoTime()}.txt")
             scriptFile.writeText(filterComplexStr)
-            com.boostlyte.vydra.utils.AppLogger.saveFilterComplexScriptLog(context, filterComplexStr, scriptFile)
             cmd.append(" -filter_complex_script \"${scriptFile.absolutePath}\"")
         } else {
             cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
@@ -2566,6 +2586,14 @@ class VideoEditingViewModel : ViewModel() {
         cmd.append(" -t $formattedTotalDur \"$outputFilePath\"")
 
         val commandStr = cmd.toString()
+        if (context != null) {
+            com.boostlyte.vydra.utils.AppLogger.appendFilterGraphEntry(
+                context = context,
+                passName = "final_pass_fallback_built",
+                command = commandStr,
+                filterScriptContent = filterComplexStr
+            )
+        }
         Log.d(TAG, "Built final pass command: $commandStr")
         return ChunkCommand(
             chunkIndex = -1,
@@ -2708,7 +2736,16 @@ class VideoEditingViewModel : ViewModel() {
         val effectiveDur = maxOf(targetDurationSecs, audioStage.maxAudioEndSec).coerceAtLeast(0.1)
         val formattedDur = String.format(java.util.Locale.US, "%.3f", effectiveDur).trimEnd('0').trimEnd('.')
         cmd.append(" -vn -map \"$outLabel\" -c:a aac -b:a $audioBitrate -t $formattedDur \"$outputAudioPath\"")
-        return cmd.toString()
+        val audioCmdStr = cmd.toString()
+        if (context != null) {
+            com.boostlyte.vydra.utils.AppLogger.appendFilterGraphEntry(
+                context = context,
+                passName = "audio_mix_built",
+                command = audioCmdStr,
+                filterScriptContent = filterStr
+            )
+        }
+        return audioCmdStr
     }
 
     /**
@@ -2744,6 +2781,7 @@ class VideoEditingViewModel : ViewModel() {
         val speed = speedOp?.speed ?: 1.0f
         val proxyUri = reverseOp?.proxyUri ?: speedOp?.proxyUri
 
+        val probeStartMs = System.currentTimeMillis()
         val isMainImage = sourceFilePath.endsWith(".png", ignoreCase = true) ||
                           sourceFilePath.endsWith(".jpg", ignoreCase = true) ||
                           sourceFilePath.endsWith(".jpeg", ignoreCase = true) ||
@@ -2830,6 +2868,15 @@ class VideoEditingViewModel : ViewModel() {
                 Log.e(TAG, "Error reading video dimensions: ${e.message}")
             }
         }
+        val probeSecs = (System.currentTimeMillis() - probeStartMs) / 1000.0
+        if (context != null) {
+            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                context,
+                "prep_media_probe",
+                probeSecs,
+                "clips=${allSequenceItems.size} mainImage=$isMainImage src=${sourceVideoWidth}x${sourceVideoHeight}"
+            )
+        }
 
         val targetCanvasRatio = currentProject.canvasAspectRatio ?: com.boostlyte.vydra.models.CanvasAspectRatio.fromDimensions(sourceVideoWidth, sourceVideoHeight)
         val (targetWidth, targetHeight) = targetCanvasRatio.getTargetDimensions(_exportResolution.value)
@@ -2854,6 +2901,7 @@ class VideoEditingViewModel : ViewModel() {
 
         // TRIGGER CHECK: If <= 16, execute single-pass export using legacy FFmpeg directly (no GL intermediates)
         if (allSequenceItems.size <= ChunkPlanner.CHUNK_TRIGGER_THRESHOLD) {
+            val cmdBuildStartMs = System.currentTimeMillis()
             val singlePassCmd = buildConsolidatedFFmpegCommand(
                 sourceFilePath = sourceFilePath,
                 outputFilePath = outputFilePath,
@@ -2862,6 +2910,14 @@ class VideoEditingViewModel : ViewModel() {
                 operationsOverride = activeOperations,
                 encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
             ) ?: return null
+            if (context != null) {
+                com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                    context,
+                    "prep_command_build",
+                    (System.currentTimeMillis() - cmdBuildStartMs) / 1000.0,
+                    "mode=single_pass encoderBackend=${selectedEncoder.backend}"
+                )
+            }
 
             return ChunkExportPlan(
                 isChunked = false,
@@ -2879,14 +2935,17 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         // Large sequence (> 16 inputs) -> Plan chunks while containing boundary transitions inside chunks
+        val chunkPlanStartMs = System.currentTimeMillis()
         val plan = ChunkPlanner.plan(
             sequenceItems = allSequenceItems,
             transitions = transitions,
             containBoundaryTransitions = true,
             fps = _exportFps.value
         )
+        val chunkPlanSecs = (System.currentTimeMillis() - chunkPlanStartMs) / 1000.0
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
 
+        val cmdBuildStartMs = System.currentTimeMillis()
         val chunkCommands = mutableListOf<ChunkCommand>()
         val chunkTempPaths = mutableListOf<String>()
 
@@ -2943,6 +3002,23 @@ class VideoEditingViewModel : ViewModel() {
             null
         }
         val canStreamCopyWithAudioMux = !hasBoundaryTransitions && (audioMixCmd != null) && !needsVideoPadding
+        val cmdBuildSecs = (System.currentTimeMillis() - cmdBuildStartMs) / 1000.0
+        if (context != null) {
+            val activeBoundaryTransCount = plan.boundaryTransitions.count { it.transition != null && it.transition.type != "none" }
+            val splitBoundaries = plan.boundaryTransitions.count { it.globalGapIndex == -1 }
+            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                context,
+                "prep_chunk_planning",
+                chunkPlanSecs,
+                "numChunks=${plan.chunks.size} splitBoundaries=$splitBoundaries unresolvedBoundaryTrans=$activeBoundaryTransCount"
+            )
+            com.boostlyte.vydra.utils.AppLogger.logStageTiming(
+                context,
+                "prep_command_build",
+                cmdBuildSecs,
+                "mode=chunked encoderBackend=${selectedEncoder.backend} canStreamCopy=$canStreamCopy canStreamCopyAudioMux=$canStreamCopyWithAudioMux needsPadding=$needsVideoPadding padSecs=${String.format(java.util.Locale.US, "%.2f", paddingDurationSecs)}"
+            )
+        }
 
         return ChunkExportPlan(
             isChunked = true,

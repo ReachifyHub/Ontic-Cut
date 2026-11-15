@@ -535,7 +535,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showShareAppLogsDialog() {
-        val logs = com.boostlyte.vydra.utils.AppLogger.getRecentLogs(this, 50)
+        val logs = com.boostlyte.vydra.utils.AppLogger.getRecentLogs(this, 350)
         val scrollView = android.widget.ScrollView(this).apply {
             setPadding(40, 20, 40, 20)
         }
