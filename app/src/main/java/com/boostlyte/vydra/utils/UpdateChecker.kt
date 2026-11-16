@@ -1,68 +1,123 @@
 package com.boostlyte.vydra.utils
 
 import android.app.Activity
-import android.content.Context
+import android.app.Application
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import com.boostlyte.vydra.BuildConfig
+import com.boostlyte.vydra.ErrorDisplayActivity
+import com.boostlyte.vydra.R
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import org.json.JSONObject
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.lang.ref.WeakReference
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 
 /**
  * Utility for checking and displaying in-app updates against the remote update.json manifest.
+ * Checks on every fresh app open when internet is available, and enforces mandatory updates
+ * when minimumVersionCode exceeds the current app versionCode or matches latestVersionCode.
  */
 object UpdateChecker {
 
     private const val TAG = "UpdateChecker"
-    private const val PREFS_NAME = "vydra_prefs"
-    private const val KEY_LAST_UPDATE_CHECK_TIME = "key_last_update_check_time"
-    private const val CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L // 24 hours
 
     private val executor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
+    private var lifecycleRegistered = false
+
+    @Volatile
+    private var resumedActivityRef: WeakReference<Activity>? = null
+
+    @Volatile
+    private var mandatoryUpdateInfo: UpdateInfo? = null
+
+    private var activeDialogRef: WeakReference<AlertDialog>? = null
+    private var activeDialogActivityRef: WeakReference<Activity>? = null
+    private var activeDialogMandatory: Boolean = false
+    private var activeDialogVersionCode: Int = -1
+
+    enum class UpdateStatus {
+        NO_UPDATE,
+        OPTIONAL_UPDATE,
+        MANDATORY_UPDATE
+    }
 
     data class UpdateInfo(
         val latestVersionCode: Int,
         val latestVersionName: String,
         val changelog: List<String>,
-        val apkUrl: String
+        val apkUrl: String,
+        val minimumVersionCode: Int = 0
     )
 
     /**
-     * Checks for updates once daily on app start. Fails silently on network errors or if already up-to-date.
+     * Registers Application lifecycle callbacks so a mandatory update dialog cannot be bypassed
+     * by navigating to another Activity, rotating the device, or returning from the download browser.
      */
-    fun checkOnceDaily(activity: Activity) {
-        val prefs = activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val lastCheck = prefs.getLong(KEY_LAST_UPDATE_CHECK_TIME, 0L)
-        val now = System.currentTimeMillis()
+    fun registerLifecycleObserver(application: Application) {
+        if (lifecycleRegistered) return
+        synchronized(this) {
+            if (lifecycleRegistered) return
+            lifecycleRegistered = true
+            application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+                override fun onActivityStarted(activity: Activity) {}
 
-        if (now - lastCheck < CHECK_INTERVAL_MS) {
-            Log.d(TAG, "Skipping daily update check (checked within last 24h)")
-            return
+                override fun onActivityResumed(activity: Activity) {
+                    resumedActivityRef = WeakReference(activity)
+                    if (activity !is ErrorDisplayActivity) {
+                        showMandatoryUpdateDialogIfNeeded(activity)
+                    }
+                }
+
+                override fun onActivityPaused(activity: Activity) {
+                    if (resumedActivityRef?.get() === activity) {
+                        resumedActivityRef = null
+                    }
+                }
+
+                override fun onActivityStopped(activity: Activity) {}
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+
+                override fun onActivityDestroyed(activity: Activity) {
+                    if (activeDialogActivityRef?.get() === activity) {
+                        dismissActiveDialogSafely()
+                    }
+                }
+            })
         }
+    }
 
-        prefs.edit().putLong(KEY_LAST_UPDATE_CHECK_TIME, now).apply()
+    /**
+     * Checks for updates on every fresh app open when internet is available.
+     * Fails silently on network errors or when already up to date.
+     */
+    fun checkOnAppOpen(activity: Activity) {
         checkForUpdates(activity, isManual = false)
     }
 
     /**
-     * Performs an update check.
+     * Performs an update check against [AppUrls.UPDATE_MANIFEST_URL].
      * @param activity The calling activity to attach dialogs or toasts to.
-     * @param isManual True if triggered by user tap ("Check for Updates"), false if background launch check.
+     * @param isManual True if triggered by user tap ("Check for Updates"), false on automatic app open check.
      */
     fun checkForUpdates(activity: Activity, isManual: Boolean) {
         if (!AppUrls.isNetworkAvailable(activity)) {
             if (isManual) {
                 Toast.makeText(
                     activity,
-                    "Unable to check for updates. Please check your internet connection.",
+                    activity.getString(R.string.update_toast_no_internet),
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -70,12 +125,15 @@ object UpdateChecker {
         }
 
         executor.execute {
+            var connection: HttpURLConnection? = null
             try {
                 val url = URL(AppUrls.UPDATE_MANIFEST_URL)
-                val connection = (url.openConnection() as HttpURLConnection).apply {
+                connection = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "GET"
                     connectTimeout = 8000
                     readTimeout = 8000
+                    useCaches = false
+                    setRequestProperty("Cache-Control", "no-cache")
                     setRequestProperty("Accept", "application/json")
                     setRequestProperty("User-Agent", "Vydra-Android/${BuildConfig.VERSION_NAME}")
                 }
@@ -88,18 +146,22 @@ object UpdateChecker {
                     val updateInfo = parseManifest(responseBody)
 
                     mainHandler.post {
-                        if (!activity.isFinishing && !activity.isDestroyed) {
-                            handleUpdateResult(activity, updateInfo, isManual)
+                        val targetActivity = resolveUiActivity(activity)
+                        if (targetActivity != null) {
+                            handleUpdateResult(targetActivity, updateInfo, isManual)
+                        } else if (updateInfo != null && evaluateUpdate(updateInfo, BuildConfig.VERSION_CODE) == UpdateStatus.MANDATORY_UPDATE) {
+                            // App moved to background while request was in flight; enforce on next resume.
+                            mandatoryUpdateInfo = updateInfo
                         }
                     }
                 } else {
                     Log.w(TAG, "Update manifest returned HTTP $responseCode")
                     if (isManual) {
                         mainHandler.post {
-                            if (!activity.isFinishing && !activity.isDestroyed) {
+                            resolveUiActivity(activity)?.let { target ->
                                 Toast.makeText(
-                                    activity,
-                                    "Unable to check for updates. Please try again later.",
+                                    target,
+                                    target.getString(R.string.update_toast_try_later),
                                     Toast.LENGTH_SHORT
                                 ).show()
                             }
@@ -110,31 +172,61 @@ object UpdateChecker {
                 Log.e(TAG, "Failed to check for updates: ${e.message}", e)
                 if (isManual) {
                     mainHandler.post {
-                        if (!activity.isFinishing && !activity.isDestroyed) {
+                        resolveUiActivity(activity)?.let { target ->
                             Toast.makeText(
-                                activity,
-                                "Unable to check for updates. Please check your internet connection.",
+                                target,
+                                target.getString(R.string.update_toast_no_internet),
                                 Toast.LENGTH_SHORT
                             ).show()
                         }
                     }
                 }
+            } finally {
+                connection?.disconnect()
             }
         }
     }
 
-    private fun parseManifest(jsonString: String): UpdateInfo? {
+    /**
+     * Re-displays the mandatory update blocking dialog on [activity] if a mandatory update
+     * has been flagged for the current app version.
+     */
+    fun showMandatoryUpdateDialogIfNeeded(activity: Activity, currentVersionCode: Int = BuildConfig.VERSION_CODE) {
+        val info = mandatoryUpdateInfo ?: return
+        if (evaluateUpdate(info, currentVersionCode) != UpdateStatus.MANDATORY_UPDATE) {
+            mandatoryUpdateInfo = null
+            return
+        }
+        if (activity.isFinishing || activity.isDestroyed) return
+        showUpdateDialog(activity, info, isMandatory = true)
+    }
+
+    internal fun parseManifest(jsonString: String): UpdateInfo? {
         return try {
-            val json = JSONObject(jsonString)
-            val latestCode = json.optInt("latestVersionCode", 0)
-            val latestName = json.optString("latestVersionName", "")
-            val apkUrl = json.optString("apkUrl", "")
+            val trimmed = jsonString.trim().removePrefix("\uFEFF")
+            if (trimmed.isEmpty()) return null
+            val json = JsonParser.parseString(trimmed).asJsonObject
+            val latestCode = json.optIntCompat("latestVersionCode", defaultValue = 0)
+            val latestName = json.optStringCompat("latestVersionName", defaultValue = "")
+            val apkUrl = json.optStringCompat("apkUrl", defaultValue = "")
+            val minimumCode = json.optIntCompat(
+                "minimumVersionCode",
+                "minVersionCode",
+                "minimum_version_code",
+                "min_version_code",
+                defaultValue = 0
+            )
 
             val changelogList = mutableListOf<String>()
-            val changelogArray = json.optJSONArray("changelog")
-            if (changelogArray != null) {
-                for (i in 0 until changelogArray.length()) {
-                    changelogList.add(changelogArray.optString(i))
+            val changelogElem = json.get("changelog")
+            if (changelogElem != null && changelogElem.isJsonArray) {
+                for (item in changelogElem.asJsonArray) {
+                    if (!item.isJsonNull && item.isJsonPrimitive) {
+                        val text = item.asString
+                        if (text.isNotBlank()) {
+                            changelogList.add(text)
+                        }
+                    }
                 }
             }
 
@@ -142,11 +234,28 @@ object UpdateChecker {
                 latestVersionCode = latestCode,
                 latestVersionName = latestName,
                 changelog = changelogList,
-                apkUrl = apkUrl
+                apkUrl = apkUrl,
+                minimumVersionCode = minimumCode
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing update manifest JSON", e)
             null
+        }
+    }
+
+    internal fun evaluateUpdate(info: UpdateInfo, currentVersionCode: Int = BuildConfig.VERSION_CODE): UpdateStatus {
+        val hasNewUpdate = info.latestVersionCode > currentVersionCode
+        if (!hasNewUpdate) {
+            return UpdateStatus.NO_UPDATE
+        }
+
+        val isMandatory = info.minimumVersionCode > 0 &&
+            (info.minimumVersionCode > currentVersionCode || info.minimumVersionCode >= info.latestVersionCode)
+
+        return if (isMandatory) {
+            UpdateStatus.MANDATORY_UPDATE
+        } else {
+            UpdateStatus.OPTIONAL_UPDATE
         }
     }
 
@@ -155,7 +264,7 @@ object UpdateChecker {
             if (isManual) {
                 Toast.makeText(
                     activity,
-                    "Unable to check for updates. Please try again later.",
+                    activity.getString(R.string.update_toast_try_later),
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -163,42 +272,157 @@ object UpdateChecker {
         }
 
         val currentCode = BuildConfig.VERSION_CODE
-        Log.d(TAG, "Current versionCode: $currentCode, remote versionCode: ${info.latestVersionCode}")
+        val status = evaluateUpdate(info, currentCode)
+        Log.d(
+            TAG,
+            "Current versionCode: $currentCode, latestVersionCode: ${info.latestVersionCode}, " +
+                "minimumVersionCode: ${info.minimumVersionCode}, status: $status"
+        )
 
-        if (info.latestVersionCode > currentCode) {
-            showUpdateDialog(activity, info)
-        } else {
-            if (isManual) {
-                Toast.makeText(
-                    activity,
-                    "You are on the latest version of Vydra (${BuildConfig.VERSION_NAME}).",
-                    Toast.LENGTH_SHORT
-                ).show()
+        when (status) {
+            UpdateStatus.MANDATORY_UPDATE -> {
+                mandatoryUpdateInfo = info
+                showUpdateDialog(activity, info, isMandatory = true)
+            }
+            UpdateStatus.OPTIONAL_UPDATE -> {
+                mandatoryUpdateInfo = null
+                showUpdateDialog(activity, info, isMandatory = false)
+            }
+            UpdateStatus.NO_UPDATE -> {
+                mandatoryUpdateInfo = null
+                if (isManual) {
+                    Toast.makeText(
+                        activity,
+                        activity.getString(R.string.update_toast_latest_version, BuildConfig.VERSION_NAME),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
     }
 
-    private fun showUpdateDialog(activity: Activity, info: UpdateInfo) {
+    private fun showUpdateDialog(activity: Activity, info: UpdateInfo, isMandatory: Boolean) {
+        val existingDialog = activeDialogRef?.get()
+        val existingOwner = activeDialogActivityRef?.get()
+        if (existingDialog != null && existingDialog.isShowing && existingOwner === activity) {
+            if (activeDialogMandatory == isMandatory && activeDialogVersionCode == info.latestVersionCode) {
+                return
+            }
+        }
+        dismissActiveDialogSafely()
+
         val changelogFormatted = if (info.changelog.isNotEmpty()) {
             info.changelog.joinToString(separator = "\n") { "• $it" }
         } else {
-            "• Performance improvements and bug fixes"
+            "• ${activity.getString(R.string.update_default_changelog)}"
         }
 
-        val message = "Version ${info.latestVersionName} is now available!\n\nWhat's new:\n$changelogFormatted"
+        val versionLabel = info.latestVersionName.ifBlank { "v${info.latestVersionCode}" }
+        val title = if (isMandatory) {
+            activity.getString(R.string.update_required_title)
+        } else {
+            activity.getString(R.string.update_available_title)
+        }
+        val message = if (isMandatory) {
+            activity.getString(R.string.update_mandatory_message, versionLabel, changelogFormatted)
+        } else {
+            activity.getString(R.string.update_optional_message, versionLabel, changelogFormatted)
+        }
 
-        MaterialAlertDialogBuilder(activity)
-            .setTitle("Update Available")
+        val builder = MaterialAlertDialogBuilder(activity)
+            .setTitle(title)
             .setMessage(message)
-            .setPositiveButton("Download Update") { _, _ ->
-                if (info.apkUrl.isNotBlank()) {
-                    AppUrls.openSafeUrl(activity, info.apkUrl)
-                } else {
-                    AppUrls.openSafeUrl(activity, AppUrls.UPDATE_MANIFEST_URL)
+
+        if (isMandatory) {
+            builder
+                .setPositiveButton(R.string.update_btn_update_now, null)
+                .setNegativeButton(R.string.update_btn_exit_app) { _, _ ->
+                    dismissActiveDialogSafely()
+                    activity.finishAffinity()
                 }
+                .setCancelable(false)
+        } else {
+            builder
+                .setPositiveButton(R.string.update_btn_download) { _, _ ->
+                    openDownloadUrl(activity, info)
+                }
+                .setNegativeButton(R.string.update_btn_later, null)
+                .setCancelable(true)
+        }
+
+        val dialog = builder.create()
+        dialog.setCanceledOnTouchOutside(!isMandatory)
+        dialog.setOnDismissListener {
+            if (activeDialogRef?.get() === dialog) {
+                activeDialogRef = null
+                activeDialogActivityRef = null
             }
-            .setNegativeButton("Later", null)
-            .setCancelable(true)
-            .show()
+        }
+        dialog.show()
+
+        if (isMandatory) {
+            // Keep the mandatory dialog visible even after launching the external download URL
+            // so returning without updating still prevents app usage.
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
+                openDownloadUrl(activity, info)
+            }
+        }
+
+        activeDialogRef = WeakReference(dialog)
+        activeDialogActivityRef = WeakReference(activity)
+        activeDialogMandatory = isMandatory
+        activeDialogVersionCode = info.latestVersionCode
+    }
+
+    private fun openDownloadUrl(activity: Activity, info: UpdateInfo) {
+        val targetUrl = if (info.apkUrl.isNotBlank()) info.apkUrl else AppUrls.UPDATE_MANIFEST_URL
+        AppUrls.openSafeUrl(activity, targetUrl)
+    }
+
+    private fun resolveUiActivity(fallback: Activity): Activity? {
+        val resumed = resumedActivityRef?.get()
+        if (resumed != null && !resumed.isFinishing && !resumed.isDestroyed && resumed !is ErrorDisplayActivity) {
+            return resumed
+        }
+        if (!fallback.isFinishing && !fallback.isDestroyed) {
+            return fallback
+        }
+        return null
+    }
+
+    private fun dismissActiveDialogSafely() {
+        try {
+            val dialog = activeDialogRef?.get()
+            if (dialog != null && dialog.isShowing) {
+                dialog.dismiss()
+            }
+        } catch (_: Exception) {
+        } finally {
+            activeDialogRef = null
+            activeDialogActivityRef = null
+        }
+    }
+
+    private fun JsonObject.optIntCompat(vararg keys: String, defaultValue: Int = 0): Int {
+        for (key in keys) {
+            val elem = get(key) ?: continue
+            if (elem.isJsonNull || !elem.isJsonPrimitive) continue
+            val prim = elem.asJsonPrimitive
+            if (prim.isNumber) {
+                try {
+                    return prim.asInt
+                } catch (_: Exception) {
+                }
+            } else if (prim.isString) {
+                prim.asString.trim().toIntOrNull()?.let { return it }
+            }
+        }
+        return defaultValue
+    }
+
+    private fun JsonObject.optStringCompat(key: String, defaultValue: String = ""): String {
+        val elem = get(key) ?: return defaultValue
+        if (elem.isJsonNull || !elem.isJsonPrimitive) return defaultValue
+        return elem.asString ?: defaultValue
     }
 }

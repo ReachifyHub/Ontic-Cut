@@ -193,22 +193,17 @@ class MainActivity : AppCompatActivity() {
         val ta = obtainStyledAttributes(attrs)
         val inactiveBg = ta.getDrawable(0)
         ta.recycle()
-        binding.tabSettings.background = inactiveBg
-        binding.tabAbout.background = inactiveBg
+        binding.tabMe.background = inactiveBg
 
         // Setup bottom navigation tab switching
         binding.tabHome.setBounceClickListener {
             switchTab(0)
         }
-        
-        binding.tabSettings.setBounceClickListener {
+
+        binding.tabMe.setBounceClickListener {
             switchTab(1)
         }
 
-        binding.tabAbout.setBounceClickListener {
-            switchTab(2)
-        }
-        
         // Setup Settings Actions
         binding.btnChangeExportFolder.setBounceClickListener {
             selectFolderLauncher.launch(null)
@@ -222,16 +217,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnChangeLanguage.setBounceClickListener {
             showLanguageDialog()
         }
-        
+
         binding.btnCheckForUpdates.setBounceClickListener {
             checkForUpdates()
-        }
-        
-        binding.btnOpenSourceLicenses.setBounceClickListener {
-            com.mikepenz.aboutlibraries.LibsBuilder()
-                .withActivityTitle(getString(R.string.str_open_source_licenses))
-                .withSearchEnabled(true)
-                .start(this)
         }
         
         binding.btnShareAppLogs.setBounceClickListener {
@@ -329,8 +317,12 @@ class MainActivity : AppCompatActivity() {
             showOnboardingDialog(prefs)
         }
 
-        // In-app updates: check once daily on launch
-        com.boostlyte.vydra.utils.UpdateChecker.checkOnceDaily(this)
+        // In-app updates: check on every fresh open when internet is available
+        if (savedInstanceState == null) {
+            com.boostlyte.vydra.utils.UpdateChecker.checkOnAppOpen(this)
+        } else {
+            com.boostlyte.vydra.utils.UpdateChecker.showMandatoryUpdateDialogIfNeeded(this)
+        }
 
         // Handle shared/intent videos
         handleIntent(intent)
@@ -611,20 +603,15 @@ class MainActivity : AppCompatActivity() {
 
         // Reset all tabs to inactive
         binding.layoutHomeContent.visibility = View.GONE
-        binding.layoutSettingsContent.visibility = View.GONE
-        binding.layoutAboutContent.visibility = View.GONE
+        binding.layoutMeContent.visibility = View.GONE
 
         binding.tabHome.background = inactiveBg
         binding.ivHome.setColorFilter(inactiveColor)
         binding.tvHomeLabel.setTextColor(inactiveColor)
 
-        binding.tabSettings.background = inactiveBg
-        binding.ivSettings.setColorFilter(inactiveColor)
-        binding.tvSettingsLabel.setTextColor(inactiveColor)
-
-        binding.tabAbout.background = inactiveBg
-        binding.ivAbout.setColorFilter(inactiveColor)
-        binding.tvAboutLabel.setTextColor(inactiveColor)
+        binding.tabMe.background = inactiveBg
+        binding.ivMe.setColorFilter(inactiveColor)
+        binding.tvMeLabel.setTextColor(inactiveColor)
 
         when (tabIndex) {
             0 -> {
@@ -633,17 +620,11 @@ class MainActivity : AppCompatActivity() {
                 binding.ivHome.setColorFilter(activeColor)
                 binding.tvHomeLabel.setTextColor(activeColor)
             }
-            1 -> {
-                binding.layoutSettingsContent.visibility = View.VISIBLE
-                binding.tabSettings.background = activeBg
-                binding.ivSettings.setColorFilter(activeColor)
-                binding.tvSettingsLabel.setTextColor(activeColor)
-            }
-            2 -> {
-                binding.layoutAboutContent.visibility = View.VISIBLE
-                binding.tabAbout.background = activeBg
-                binding.ivAbout.setColorFilter(activeColor)
-                binding.tvAboutLabel.setTextColor(activeColor)
+            else -> {
+                binding.layoutMeContent.visibility = View.VISIBLE
+                binding.tabMe.background = activeBg
+                binding.ivMe.setColorFilter(activeColor)
+                binding.tvMeLabel.setTextColor(activeColor)
             }
         }
     }

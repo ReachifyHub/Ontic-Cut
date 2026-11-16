@@ -78,9 +78,47 @@ object AppLogger {
         }
     }
 
+    fun getDeviceMemorySnapshot(context: Context): String {
+        return try {
+            val rt = Runtime.getRuntime()
+            val nativeAlloc = try { android.os.Debug.getNativeHeapAllocatedSize() } catch (_: Throwable) { -1L }
+            val am = try { context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager } catch (_: Throwable) { null }
+            val mi = android.app.ActivityManager.MemoryInfo()
+            am?.getMemoryInfo(mi)
+            val totalSys = if (am != null) mi.totalMem else -1L
+            val availSys = if (am != null) mi.availMem else -1L
+            val lowSys = am?.let { mi.lowMemory } ?: false
+            val isLowRam = try { am?.isLowRamDevice ?: false } catch (_: Throwable) { false }
+            "maxMemory=${rt.maxMemory()} totalMemory=${rt.totalMemory()} freeMemory=${rt.freeMemory()} " +
+                "nativeHeapAlloc=$nativeAlloc sysTotalMem=$totalSys sysAvailMem=$availSys lowMem=$lowSys isLowRam=$isLowRam"
+        } catch (_: Throwable) {
+            val rt = Runtime.getRuntime()
+            "maxMemory=${rt.maxMemory()} totalMemory=${rt.totalMemory()} freeMemory=${rt.freeMemory()}"
+        }
+    }
+
+    private fun describeExitReason(reason: Int): String = when (reason) {
+        1 -> "EXIT_SELF"
+        2 -> "SIGNALED"
+        3 -> "LOW_MEMORY"
+        4 -> "CRASH"
+        5 -> "CRASH_NATIVE"
+        6 -> "ANR"
+        7 -> "INITIALIZATION_FAILURE"
+        8 -> "PERMISSION_CHANGE"
+        9 -> "EXCESSIVE_RESOURCE_USAGE"
+        10 -> "USER_REQUESTED"
+        11 -> "USER_STOPPED"
+        12 -> "DEPENDENCY_DIED"
+        13 -> "OTHER"
+        else -> "UNKNOWN($reason)"
+    }
+
     /**
      * Checks if the previous export died midway (process kill / OOM / crash)
-     * by looking for an orphan EXPORT_STARTED.
+     * by looking for an unfinished export breadcrumb (EXPORT_STARTED / PASS_COMPLETED / STAGE_TIMING
+     * without EXPORT_ENDED / EXPORT_FAILED / EXPORT_CANCELLED), and records process exit reasons
+     * on API 30+ to distinguish LMK kills from native/Java crashes.
      */
     fun checkDiedMidway(context: Context) {
         try {
@@ -89,10 +127,26 @@ object AppLogger {
             val lines = file.readLines().filter { it.isNotBlank() }
             if (lines.isEmpty()) return
             val lastLine = lines.last()
-            if (lastLine.startsWith("EXPORT_STARTED")) {
-                val rt = Runtime.getRuntime()
-                val memoryInfo = "maxMemory=${rt.maxMemory()} totalMemory=${rt.totalMemory()} freeMemory=${rt.freeMemory()}"
-                val midwayLine = "EXPORT_DIED_MIDWAY ${getIsoTimestamp()} $memoryInfo"
+            val diedMidway = lastLine.startsWith("EXPORT_STARTED") ||
+                lastLine.startsWith("EXPORT_CONFIG") ||
+                lastLine.startsWith("PASS_COMPLETED") ||
+                lastLine.startsWith("STAGE_TIMING")
+            if (diedMidway) {
+                val memoryInfo = getDeviceMemorySnapshot(context)
+                val exitDetails = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    try {
+                        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+                        val latestExit = am?.getHistoricalProcessExitReasons(context.packageName, 0, 5)?.firstOrNull()
+                        if (latestExit != null) {
+                            val desc = latestExit.description?.replace("\n", " ")?.take(120) ?: "none"
+                            " exitReason=${describeExitReason(latestExit.reason)}(${latestExit.reason}) " +
+                                "status=${latestExit.status} importance=${latestExit.importance} " +
+                                "pssKb=${latestExit.pss} rssKb=${latestExit.rss} exitDesc=$desc"
+                        } else ""
+                    } catch (_: Throwable) { "" }
+                } else ""
+                val lastStage = lastLine.take(120).replace("\n", " ")
+                val midwayLine = "EXPORT_DIED_MIDWAY ${getIsoTimestamp()} $memoryInfo$exitDetails lastBreadcrumb=[$lastStage]"
                 appendToFileCapped(file, midwayLine)
                 Log.w(TAG, "Detected unfinished export: $midwayLine")
             }

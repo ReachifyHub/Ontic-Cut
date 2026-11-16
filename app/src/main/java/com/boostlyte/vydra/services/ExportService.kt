@@ -44,8 +44,10 @@ class ExportService : Service() {
         const val ACTION_EXPORT_CANCELLED = "com.boostlyte.vydra.ACTION_EXPORT_CANCELLED"
         const val ACTION_CANCEL_EXPORT = "com.boostlyte.vydra.ACTION_CANCEL_EXPORT"
         const val ACTION_PREPARE_EXPORT = "com.boostlyte.vydra.ACTION_PREPARE_EXPORT"
+        const val ACTION_UPDATE_PREP_PROGRESS = "com.boostlyte.vydra.ACTION_UPDATE_PREP_PROGRESS"
 
         const val EXTRA_PROGRESS = "extra_progress"
+        const val EXTRA_STATUS_MESSAGE = "extra_status_message"
         const val EXTRA_SAVED_URI = "extra_saved_uri"
         const val EXTRA_ERROR = "extra_error"
         const val EXTRA_ERROR_CODE = "extra_error_code"
@@ -93,10 +95,16 @@ class ExportService : Service() {
 
         // Immediately attach foreground notification as required by Android 8.0+ (API 26+)
         // within 5 seconds of startForegroundService().
-        startForeground(NOTIFICATION_ID, buildNotification(0, "Preparing export..."))
+        val initProgress = intent.getIntExtra(EXTRA_PROGRESS, 0).coerceIn(0, 99)
+        val initStatus = intent.getStringExtra(EXTRA_STATUS_MESSAGE) ?: "Preparing export..."
+        startForeground(NOTIFICATION_ID, buildNotification(initProgress, initStatus))
 
         if (intent.action == ACTION_PREPARE_EXPORT) {
             Log.d(TAG, "ExportService started in foreground for preparation phase")
+            return START_NOT_STICKY
+        }
+        if (intent.action == ACTION_UPDATE_PREP_PROGRESS) {
+            updateNotification(initProgress, initStatus)
             return START_NOT_STICKY
         }
 
@@ -186,9 +194,11 @@ class ExportService : Service() {
 
         val projectStats = "durationSecs=$durationSecs isAudioOnly=$isAudioOnly tempOutput=$tempOutputPath script=$scriptFilePath RENDER_PATH=$renderPath"
         com.boostlyte.vydra.utils.AppLogger.logExportStarted(this@ExportService, projectStats)
+        com.boostlyte.vydra.utils.ImagePreviewCache.clear()
+        val spMemSnap = com.boostlyte.vydra.utils.AppLogger.getDeviceMemorySnapshot(this@ExportService)
         com.boostlyte.vydra.utils.AppLogger.logExportConfig(
             this@ExportService,
-            "mode=single_pass isChunked=false encoderPref=$prefEncoder plannedEncoder=$spPlannedEncoder targetBitrate=$spTargetBitrate targetCrf=$spTargetCrf res=${parsedRes}p@$parsedFps $extraMetadata"
+            "mode=single_pass isChunked=false encoderPref=$prefEncoder plannedEncoder=$spPlannedEncoder targetBitrate=$spTargetBitrate targetCrf=$spTargetCrf res=${parsedRes}p@$parsedFps $extraMetadata $spMemSnap"
         )
 
         val concatPreview = concatFilePath?.let { path ->
@@ -676,6 +686,16 @@ class ExportService : Service() {
             return
         }
 
+        // Free preview bitmaps on Java heap before heavy multi-chunk FFmpeg execution
+        com.boostlyte.vydra.utils.ImagePreviewCache.clear()
+
+        val memProfile = com.boostlyte.vydra.export.ExportMemoryProfile.fromContext(
+            context = this@ExportService,
+            targetWidth = plan.targetWidth,
+            targetHeight = plan.targetHeight
+        )
+        val memSnapshot = com.boostlyte.vydra.utils.AppLogger.getDeviceMemorySnapshot(this@ExportService)
+
         // Encoder capability selection
         val sharedPrefs = getSharedPreferences("vydra_prefs", Context.MODE_PRIVATE)
         val prefEncoder = sharedPrefs.getString("default_encoder", "software") ?: "software"
@@ -688,9 +708,10 @@ class ExportService : Service() {
             preference = encoderPref,
             targetWidth = plan.targetWidth,
             targetHeight = plan.targetHeight,
-            fps = plan.fps
+            fps = plan.fps,
+            softwareThreads = memProfile.softwareEncoderThreads
         )
-        Log.d(TAG, "ExportService active encoder: ${selectedEncoder.backend} (${selectedEncoder.codecName})")
+        Log.d(TAG, "ExportService active encoder: ${selectedEncoder.backend} (${selectedEncoder.codecName}), swThreads=${memProfile.softwareEncoderThreads}")
 
         val targetBitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(plan.resolution, plan.fps)
         val targetCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(plan.resolution)
@@ -726,11 +747,14 @@ class ExportService : Service() {
         com.boostlyte.vydra.utils.AppLogger.logExportConfig(
             this@ExportService,
             "mode=chunked isChunked=true numChunks=$numChunks encoderPref=$prefEncoder selectedBackend=${selectedEncoder.backend} selectedCodec=${selectedEncoder.codecName ?: "libx264"} " +
+                "swThreads=${memProfile.softwareEncoderThreads} maxChunk=${memProfile.maxChunkSize} motionShortEdge=${memProfile.motionSpaceShortEdge} " +
                 "targetBitrate=$targetBitrate targetCrf=$targetCrf audioBitrate=${plan.audioBitrate} dim=${plan.targetWidth}x${plan.targetHeight}@${plan.fps} res=${plan.resolution}p " +
-                "canStreamCopyFinal=${plan.canStreamCopyFinalPass} canStreamCopyAudioMux=${plan.canStreamCopyVideoWithAudioMux} needsPadding=${plan.needsVideoPadding} padSecs=${String.format(java.util.Locale.US, "%.2f", plan.paddingDurationSecs)} $projectFeatureSummary"
+                "canStreamCopyFinal=${plan.canStreamCopyFinalPass} canStreamCopyAudioMux=${plan.canStreamCopyVideoWithAudioMux} needsPadding=${plan.needsVideoPadding} padSecs=${String.format(java.util.Locale.US, "%.2f", plan.paddingDurationSecs)} " +
+                "$projectFeatureSummary $memSnapshot"
         )
 
-        updateNotification(0, "Exporting part 1/$numChunks...")
+        updateNotification(8, "Exporting part 1/$numChunks...")
+        broadcastProgress(8)
 
         serviceScope.launch {
             val serviceExecStartMs = System.currentTimeMillis()
@@ -766,17 +790,28 @@ class ExportService : Service() {
                     totalChunksEncodeSecs = 0.0
 
                     // Execute each chunk pass sequentially
+                    val chunkBaseProgress = 8.0
+                    val chunkSpanTotal = 86.0
                     for ((idx, chunkCmd) in currentChunkCommands.withIndex()) {
                         val chunkIdx = idx + 1
                         val chunkDur = plan.chunkDurationsSecs.getOrNull(idx) ?: (totalChunkDurations / numChunks)
-                        val spanStart = if (totalWeight > 0.0) (accumulatedWeight / totalWeight) * 100.0 else (idx.toDouble() / (numChunks + 1)) * 100.0
-                        val spanEnd = if (totalWeight > 0.0) ((accumulatedWeight + chunkDur) / totalWeight) * 100.0 else ((idx + 1).toDouble() / (numChunks + 1)) * 100.0
+                        val spanStart = if (totalChunkDurations > 0.0) {
+                            chunkBaseProgress + (accumulatedWeight / totalChunkDurations) * chunkSpanTotal
+                        } else {
+                            chunkBaseProgress + (idx.toDouble() / numChunks) * chunkSpanTotal
+                        }
+                        val spanEnd = if (totalChunkDurations > 0.0) {
+                            chunkBaseProgress + ((accumulatedWeight + chunkDur) / totalChunkDurations) * chunkSpanTotal
+                        } else {
+                            chunkBaseProgress + ((idx + 1).toDouble() / numChunks) * chunkSpanTotal
+                        }
 
                         var lastReportedProgress = -1
                         var lastNotificationTime = 0L
 
                         Log.d(TAG, "Starting Chunk $chunkIdx/$numChunks (duration: ${chunkCmd.durationSecs}s, encoder: ${if (currentEncoderIsHardware) "hardware" else "software"})")
                         updateNotification(spanStart.toInt(), "Exporting part $chunkIdx/$numChunks...")
+                        broadcastProgress(spanStart.toInt())
 
                         // Internal logging for every clip entering this chunk
                         val chunkSpec = plan.chunkSpecs.getOrNull(idx)
@@ -945,7 +980,8 @@ class ExportService : Service() {
                                         preference = com.boostlyte.vydra.export.EncoderSelector.EncoderPreference.SOFTWARE,
                                         targetWidth = plan.targetWidth,
                                         targetHeight = plan.targetHeight,
-                                        fps = plan.fps
+                                        fps = plan.fps,
+                                        softwareThreads = memProfile.softwareEncoderThreads
                                     )
                                     activeCodecArgs = swEncoder.ffmpegVideoCodecArgs
                                     activeEncoderLabel = "libx264"
@@ -972,7 +1008,7 @@ class ExportService : Service() {
 
                                     val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(plan.resolution)
                                     currentFinalPassCommand = currentFinalPassCommand?.let {
-                                        com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(it, swCrf)
+                                        com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(it, swCrf, memProfile.softwareEncoderThreads)
                                     }
                                     retryWithSoftwareRequested = true
                                     break
@@ -1024,8 +1060,8 @@ class ExportService : Service() {
                 )
 
                 // All chunks succeeded! Verify chunk files before audio/final assembly.
-                val finalSpanStart = if (totalWeight > 0.0) (totalChunkDurations / totalWeight) * 100.0 else (numChunks.toDouble() / (numChunks + 1)) * 100.0
-                val finalSpanEnd = 100.0
+                val finalSpanStart = 94.0
+                val finalSpanEnd = 99.0
                 var lastReportedProgress = -1
                 var lastNotificationTime = 0L
 
@@ -1130,39 +1166,52 @@ class ExportService : Service() {
                 var reencodeFinalSecs = 0.0
                 var finalAssemblyMode = "full_reencode_xfade"
                 var concatListContentForLog: String? = null
-                val formattedTotalDur = String.format(java.util.Locale.US, "%.3f", plan.totalDurationSecs).trimEnd('0').trimEnd('.')
+                val formattedTotalDur = String.format(java.util.Locale.US, "%.6f", plan.totalDurationSecs)
+                val safeFps = plan.fps.coerceAtLeast(1)
+                fun chunkConcatDurationSecs(index: Int, cmd: ChunkCommand): Double {
+                    val spec = plan.chunkSpecs.getOrNull(index)
+                    return if (spec != null && spec.totalFrames > 0) {
+                        spec.totalFrames.toDouble() / safeFps
+                    } else {
+                        cmd.durationSecs
+                    }
+                }
 
                 var finalPassCmdStr: String? = null
                 if (plan.canStreamCopyFinalPass) {
                     Log.d(TAG, "Using fast stream copy concat demuxer for final chunk assembly (video only)")
                     val concatContent = StringBuilder()
-                    for (chunkCmd in currentChunkCommands) {
+                    for ((idx, chunkCmd) in currentChunkCommands.withIndex()) {
                         concatContent.append("file '${File(chunkCmd.outputPath).absolutePath}'\n")
+                        concatContent.append(String.format(java.util.Locale.US, "duration %.6f\n", chunkConcatDurationSecs(idx, chunkCmd)))
                     }
                     val concatListFile = File(jobDir, "final_concat_list.txt")
                     concatListContentForLog = concatContent.toString()
                     concatListFile.writeText(concatListContentForLog)
                     usedStreamCopy = true
                     finalAssemblyMode = "stream_copy_video_only"
-                    finalPassCmdStr = "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -c copy -movflags +faststart \"$tempOutputPath\""
+                    finalPassCmdStr = "-y -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -c copy -movflags +faststart \"$tempOutputPath\""
                 } else if (plan.canStreamCopyVideoWithAudioMux && mixedAudioReady && !plan.mixedAudioTempPath.isNullOrBlank()) {
                     Log.d(TAG, "Using fast stream copy concat + mixed AAC audio mux for final chunk assembly")
                     val concatContent = StringBuilder()
-                    for (chunkCmd in currentChunkCommands) {
+                    for ((idx, chunkCmd) in currentChunkCommands.withIndex()) {
                         concatContent.append("file '${File(chunkCmd.outputPath).absolutePath}'\n")
+                        concatContent.append(String.format(java.util.Locale.US, "duration %.6f\n", chunkConcatDurationSecs(idx, chunkCmd)))
                     }
                     val concatListFile = File(jobDir, "final_concat_list.txt")
                     concatListContentForLog = concatContent.toString()
                     concatListFile.writeText(concatListContentForLog)
                     usedStreamCopy = true
                     finalAssemblyMode = "stream_copy_audio_mux"
-                    finalPassCmdStr = "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -i \"${plan.mixedAudioTempPath}\" -map 0:v -map 1:a -c copy -movflags +faststart -t $formattedTotalDur \"$tempOutputPath\""
+                    finalPassCmdStr = "-y -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -i \"${plan.mixedAudioTempPath}\" -map 0:v -map 1:a -c copy -movflags +faststart -t $formattedTotalDur \"$tempOutputPath\""
                 } else if (mixedAudioReady && plan.needsVideoPadding && !plan.mixedAudioTempPath.isNullOrBlank() && currentChunkCommands.isNotEmpty()) {
                     // Pad ONLY the last chunk so preceding chunks stay untouched for -c copy mux
                     val lastChunk = currentChunkCommands.last()
                     val paddedLastChunkFile = File(jobDir, "padded_last_chunk.mp4")
-                    val formattedPad = String.format(java.util.Locale.US, "%.3f", plan.paddingDurationSecs).trimEnd('0').trimEnd('.')
-                    val padCmd = "-y -i \"${lastChunk.outputPath}\" -vf \"tpad=stop_mode=clone:stop_duration=$formattedPad,settb=1/${plan.fps},fps=${plan.fps},format=yuv420p\" -an $activeCodecArgs -movflags +faststart \"${paddedLastChunkFile.absolutePath}\""
+                    val padFrames = kotlin.math.round(plan.paddingDurationSecs * safeFps).toInt().coerceAtLeast(1)
+                    val quantizedPadSecs = padFrames.toDouble() / safeFps
+                    val formattedPad = String.format(java.util.Locale.US, "%.6f", quantizedPadSecs)
+                    val padCmd = "-y -i \"${lastChunk.outputPath}\" -vf \"tpad=stop_mode=clone:stop_duration=$formattedPad,settb=1/$safeFps,fps=$safeFps,format=yuv420p\" -an $activeCodecArgs -video_track_timescale ${safeFps * 1000} \"${paddedLastChunkFile.absolutePath}\""
                     Log.d(TAG, "Audio extends ${formattedPad}s past video; padding only last chunk for stream-copy assembly")
                     com.boostlyte.vydra.utils.AppLogger.appendFilterGraphEntry(
                         context = this@ExportService,
@@ -1173,7 +1222,7 @@ class ExportService : Service() {
                     val padStartMs = System.currentTimeMillis()
                     val padResult = ffmpegEngine.exportFinal(
                         ffmpegCommand = padCmd,
-                        totalDurationSecs = lastChunk.durationSecs + plan.paddingDurationSecs,
+                        totalDurationSecs = lastChunk.durationSecs + quantizedPadSecs,
                         onProgress = { }
                     )
                     padLastChunkSecs = (System.currentTimeMillis() - padStartMs) / 1000.0
@@ -1193,15 +1242,19 @@ class ExportService : Service() {
                             if (padExists) {
                                 val concatContent = StringBuilder()
                                 for (cIdx in 0 until currentChunkCommands.size - 1) {
-                                    concatContent.append("file '${File(currentChunkCommands[cIdx].outputPath).absolutePath}'\n")
+                                    val cCmd = currentChunkCommands[cIdx]
+                                    concatContent.append("file '${File(cCmd.outputPath).absolutePath}'\n")
+                                    concatContent.append(String.format(java.util.Locale.US, "duration %.6f\n", chunkConcatDurationSecs(cIdx, cCmd)))
                                 }
+                                val lastBaseDur = chunkConcatDurationSecs(currentChunkCommands.size - 1, lastChunk)
                                 concatContent.append("file '${paddedLastChunkFile.absolutePath}'\n")
+                                concatContent.append(String.format(java.util.Locale.US, "duration %.6f\n", lastBaseDur + quantizedPadSecs))
                                 val concatListFile = File(jobDir, "final_concat_list.txt")
                                 concatListContentForLog = concatContent.toString()
                                 concatListFile.writeText(concatListContentForLog)
                                 usedStreamCopy = true
                                 finalAssemblyMode = "padded_last_chunk_stream_copy"
-                                finalPassCmdStr = "-y -fflags +genpts -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -i \"${plan.mixedAudioTempPath}\" -map 0:v -map 1:a -c copy -movflags +faststart -t $formattedTotalDur \"$tempOutputPath\""
+                                finalPassCmdStr = "-y -f concat -safe 0 -i \"${concatListFile.absolutePath}\" -i \"${plan.mixedAudioTempPath}\" -map 0:v -map 1:a -c copy -movflags +faststart -t $formattedTotalDur \"$tempOutputPath\""
                             } else {
                                 paddedLastChunkSuccess = false
                             }

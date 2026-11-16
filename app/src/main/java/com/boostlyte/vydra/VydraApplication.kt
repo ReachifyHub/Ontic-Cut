@@ -10,6 +10,7 @@ class VydraApplication : Application() {
         super.onCreate()
         setupGlobalCrashHandler()
         com.boostlyte.vydra.utils.AppLogger.checkDiedMidway(this)
+        com.boostlyte.vydra.utils.UpdateChecker.registerLifecycleObserver(this)
     }
 
     private fun setupGlobalCrashHandler() {

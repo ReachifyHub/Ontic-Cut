@@ -6314,10 +6314,53 @@ class VideoEditingActivity : AppCompatActivity() {
 
                 val prepResult = withContext(Dispatchers.IO) {
                     val prepStartMs = System.currentTimeMillis()
+                    // Release preview bitmaps early to keep heap headroom on 2GB devices
+                    com.boostlyte.vydra.utils.ImagePreviewCache.clear()
+
                     com.boostlyte.vydra.utils.AppLogger.resetFilterGraphLog(
                         this@VideoEditingActivity,
                         "res=${viewModel.exportResolution.value}p fps=${viewModel.exportFps.value} audioOnly=$isAudioOnly"
                     )
+
+                    val effectiveAspectRatio = project.canvasAspectRatio ?: com.boostlyte.vydra.models.CanvasAspectRatio.LANDSCAPE_16_9
+                    val (targetW, targetH) = effectiveAspectRatio.getTargetDimensions(viewModel.exportResolution.value)
+                    val memProfile = com.boostlyte.vydra.export.ExportMemoryProfile.fromContext(
+                        context = this@VideoEditingActivity,
+                        targetWidth = targetW,
+                        targetHeight = targetH
+                    )
+
+                    val totalMergeItems = project.operations.filterIsInstance<EditOperation.Merge>().sumOf { it.items.size }
+                    val totalAudioItems = project.operations.filterIsInstance<EditOperation.AddBackgroundAudio>().size
+                    val totalPrepItems = (1 + totalMergeItems + totalAudioItems).coerceAtLeast(1)
+                    var processedPrepItems = 0
+                    var lastPrepUiProgress = -1
+                    var lastPrepNotifyMs = 0L
+
+                    suspend fun reportPrepProgress(statusMsg: String, force: Boolean = false) {
+                        val prog = (1 + ((processedPrepItems.toDouble() / totalPrepItems) * 6.0).toInt()).coerceIn(1, 7)
+                        val now = System.currentTimeMillis()
+                        if (force || (prog != lastPrepUiProgress && now - lastPrepNotifyMs >= 200L)) {
+                            lastPrepUiProgress = prog
+                            lastPrepNotifyMs = now
+                            withContext(Dispatchers.Main) {
+                                exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = statusMsg
+                                exportScreen.findViewById<TextView>(R.id.tvExportPercentage)?.text = "$prog%"
+                                exportScreen.findViewById<android.widget.ProgressBar>(R.id.exportProgressBar)?.progress = prog
+                            }
+                            try {
+                                val prepIntent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
+                                    action = com.boostlyte.vydra.services.ExportService.ACTION_UPDATE_PREP_PROGRESS
+                                    putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_PROGRESS, prog)
+                                    putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_STATUS_MESSAGE, statusMsg)
+                                }
+                                startService(prepIntent)
+                            } catch (_: Exception) {}
+                        }
+                    }
+
+                    reportPrepProgress("Preparing export...", force = true)
+
                     // Autosave project state before export
                     val autosaveStartMs = System.currentTimeMillis()
                     try {
@@ -6346,14 +6389,24 @@ class VideoEditingActivity : AppCompatActivity() {
                         autosaveSecs
                     )
 
+                    // Opportunistically prune stale export_job_* directories older than 24h
+                    try {
+                        val cutoff = System.currentTimeMillis() - 86_400_000L
+                        cacheDir.listFiles { f -> f.isDirectory && f.name.startsWith("export_job_") && f.lastModified() < cutoff }
+                            ?.forEach { it.deleteRecursively() }
+                    } catch (_: Exception) {}
+
                     val uriResolveStartMs = System.currentTimeMillis()
                     var imagesCopied = 0
+                    var imagesDownscaled = 0
                     var videosCopied = 0
                     var audioCopied = 0
                     var directFiles = 0
                     var copiedBytes = 0L
 
-                    val sourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
+                    val exportJobDir = File(cacheDir, "export_job_${System.currentTimeMillis()}").apply { mkdirs() }
+
+                    val rawSourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
                         directFiles++
                         tempInputFile.absolutePath
                     } else {
@@ -6377,7 +6430,24 @@ class VideoEditingActivity : AppCompatActivity() {
                         }
                     }
 
-                    val exportJobDir = File(cacheDir, "export_job_${System.currentTimeMillis()}").apply { mkdirs() }
+                    val isSourceImageFile = isImageUri(project.sourceUri) ||
+                        rawSourceFilePath.endsWith(".png", true) ||
+                        rawSourceFilePath.endsWith(".jpg", true) ||
+                        rawSourceFilePath.endsWith(".jpeg", true) ||
+                        rawSourceFilePath.endsWith(".webp", true)
+                    val sourceFilePath = if (isSourceImageFile) {
+                        val scaledSrc = prepareExportImageFile(
+                            rawSourceFilePath,
+                            File(exportJobDir, "source_prepared.jpg"),
+                            memProfile.imagePrepMaxEdge
+                        )
+                        if (scaledSrc != rawSourceFilePath) imagesDownscaled++
+                        scaledSrc
+                    } else {
+                        rawSourceFilePath
+                    }
+                    processedPrepItems++
+                    reportPrepProgress("Preparing media ($processedPrepItems/$totalPrepItems)...")
 
                     // Pre-resolve all sequence items and background audio to ensure stable local files exist
                     val resolvedOperations = project.operations.map { op ->
@@ -6416,10 +6486,25 @@ class VideoEditingActivity : AppCompatActivity() {
                                         }
                                     }
 
-                                    val f = itemPath?.let { File(it) }
+                                    val finalItemPath = if (item.isImage && itemPath != null) {
+                                        val scaled = prepareExportImageFile(
+                                            itemPath,
+                                            File(exportJobDir, "clip_${idx}_prep.jpg"),
+                                            memProfile.imagePrepMaxEdge
+                                        )
+                                        if (scaled != itemPath) imagesDownscaled++
+                                        scaled
+                                    } else {
+                                        itemPath
+                                    }
+
+                                    processedPrepItems++
+                                    reportPrepProgress("Preparing media ($processedPrepItems/$totalPrepItems)...")
+
+                                    val f = finalItemPath?.let { File(it) }
                                     val exists = f?.exists() == true
                                     val size = if (exists) f!!.length() else -1L
-                                    Log.i(TAG, "Pre-resolve Merge clip $idx: origUri='$origUriStr', scheme='$scheme', path='$itemPath', exists=$exists, size=$size bytes")
+                                    Log.i(TAG, "Pre-resolve Merge clip $idx: origUri='$origUriStr', scheme='$scheme', path='$finalItemPath', exists=$exists, size=$size bytes")
 
                                     if (f != null && exists && size > 0L) {
                                         item.copy(uri = Uri.fromFile(f))
@@ -6437,7 +6522,8 @@ class VideoEditingActivity : AppCompatActivity() {
                                     directFiles++
                                     origUri.path
                                 } else if (scheme == "content") {
-                                    val targetFile = File(exportJobDir, "audio_${System.currentTimeMillis()}.mp3")
+                                    val audioExt = getAudioExtension(origUri)
+                                    val targetFile = File(exportJobDir, "audio_${System.currentTimeMillis()}$audioExt")
                                     try {
                                         contentResolver.openInputStream(origUri)?.use { input ->
                                             targetFile.outputStream().use { output -> input.copyTo(output) }
@@ -6460,6 +6546,9 @@ class VideoEditingActivity : AppCompatActivity() {
                                         getFilePathFromUri(origUri)?.also { directFiles++ }
                                     }
                                 }
+
+                                processedPrepItems++
+                                reportPrepProgress("Preparing media ($processedPrepItems/$totalPrepItems)...")
 
                                 val f = audioPath?.let { File(it) }
                                 val exists = f?.exists() == true
@@ -6490,9 +6579,10 @@ class VideoEditingActivity : AppCompatActivity() {
                         this@VideoEditingActivity,
                         "prep_uri_resolve",
                         uriResolveSecs,
-                        "imagesCopied=$imagesCopied videosCopied=$videosCopied audioCopied=$audioCopied directFiles=$directFiles copiedBytes=$copiedBytes"
+                        "imagesCopied=$imagesCopied imagesDownscaled=$imagesDownscaled videosCopied=$videosCopied audioCopied=$audioCopied directFiles=$directFiles copiedBytes=$copiedBytes maxEdge=${memProfile.imagePrepMaxEdge}"
                     )
 
+                    reportPrepProgress("Building export plan...", force = true)
                     val planBuildStartMs = System.currentTimeMillis()
                     val chunkPlan = viewModel.buildChunkExportPlan(
                         sourceFilePath = sourceFilePath,
@@ -10300,29 +10390,141 @@ class VideoEditingActivity : AppCompatActivity() {
         return processedLines.joinToString("\n").trim() + "\n"
     }
 
-    private fun getAudioExtension(uri: Uri): String {
-        val mimeType = contentResolver.getType(uri)
-        if (mimeType != null) {
-            val mime = android.webkit.MimeTypeMap.getSingleton()
-            val extension = mime.getExtensionFromMimeType(mimeType)
-            if (extension != null) {
-                return ".$extension"
+    private fun prepareExportImageFile(srcPath: String, destFile: File, maxEdge: Int): String {
+        val srcFile = File(srcPath)
+        if (!srcFile.exists() || srcFile.length() == 0L) return srcPath
+        return try {
+            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeFile(srcPath, bounds)
+            val rawW = bounds.outWidth
+            val rawH = bounds.outHeight
+            if (rawW <= 0 || rawH <= 0) return srcPath
+
+            val srcMax = maxOf(rawW, rawH)
+            if (srcMax <= maxEdge) {
+                return srcPath
             }
+
+            var sampleSize = 1
+            while ((rawW / (sampleSize * 2)) >= maxEdge || (rawH / (sampleSize * 2)) >= maxEdge) {
+                sampleSize *= 2
+            }
+
+            val decodeOpts = android.graphics.BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+            }
+            val decoded = android.graphics.BitmapFactory.decodeFile(srcPath, decodeOpts) ?: return srcPath
+
+            var orientedBitmap: android.graphics.Bitmap = decoded
+            try {
+                val exif = android.media.ExifInterface(srcPath)
+                val orientation = exif.getAttributeInt(
+                    android.media.ExifInterface.TAG_ORIENTATION,
+                    android.media.ExifInterface.ORIENTATION_NORMAL
+                )
+                val matrix = android.graphics.Matrix()
+                when (orientation) {
+                    android.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                    android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                    android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                    android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                    android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                    android.media.ExifInterface.ORIENTATION_TRANSPOSE -> {
+                        matrix.postRotate(90f)
+                        matrix.postScale(-1f, 1f)
+                    }
+                    android.media.ExifInterface.ORIENTATION_TRANSVERSE -> {
+                        matrix.postRotate(270f)
+                        matrix.postScale(-1f, 1f)
+                    }
+                }
+                if (!matrix.isIdentity) {
+                    val rotated = android.graphics.Bitmap.createBitmap(
+                        decoded, 0, 0, decoded.width, decoded.height, matrix, true
+                    )
+                    if (rotated != decoded) {
+                        decoded.recycle()
+                        orientedBitmap = rotated
+                    }
+                }
+            } catch (_: Exception) {}
+
+            val curMax = maxOf(orientedBitmap.width, orientedBitmap.height)
+            val finalBitmap = if (curMax > maxEdge) {
+                val scale = maxEdge.toDouble() / curMax.toDouble()
+                val dstW = (((orientedBitmap.width * scale).toInt()).coerceAtLeast(2) / 2) * 2
+                val dstH = (((orientedBitmap.height * scale).toInt()).coerceAtLeast(2) / 2) * 2
+                val scaled = android.graphics.Bitmap.createScaledBitmap(orientedBitmap, dstW, dstH, true)
+                if (scaled != orientedBitmap) {
+                    orientedBitmap.recycle()
+                }
+                scaled
+            } else {
+                orientedBitmap
+            }
+
+            val isPng = bounds.outMimeType.equals("image/png", ignoreCase = true) || srcPath.endsWith(".png", ignoreCase = true)
+            val actualDest = if (isPng) {
+                File(destFile.parentFile, "${destFile.nameWithoutExtension}.png")
+            } else {
+                destFile
+            }
+            actualDest.parentFile?.mkdirs()
+            actualDest.outputStream().use { out ->
+                finalBitmap.compress(
+                    if (isPng) android.graphics.Bitmap.CompressFormat.PNG else android.graphics.Bitmap.CompressFormat.JPEG,
+                    92,
+                    out
+                )
+            }
+            finalBitmap.recycle()
+
+            if (actualDest.exists() && actualDest.length() > 0L) {
+                actualDest.absolutePath
+            } else {
+                srcPath
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Image export pre-scale skipped for $srcPath: ${t.message}")
+            srcPath
         }
+    }
+
+    private fun getAudioExtension(uri: Uri): String {
+        val knownExts = setOf(".m4a", ".aac", ".mp3", ".wav", ".ogg", ".flac", ".opus", ".mp4")
         try {
             contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
                     if (nameIndex != -1) {
                         val name = cursor.getString(nameIndex)
-                        val lastDot = name.lastIndexOf('.')
+                        val lastDot = name?.lastIndexOf('.') ?: -1
                         if (lastDot != -1) {
-                            return name.substring(lastDot)
+                            val ext = name.substring(lastDot).lowercase(java.util.Locale.US)
+                            if (ext in knownExts) return ext
                         }
                     }
                 }
             }
         } catch (_: Exception) {}
+        val mimeType = contentResolver.getType(uri)?.lowercase(java.util.Locale.US)
+        if (mimeType != null) {
+            when {
+                mimeType.contains("m4a") || mimeType == "audio/mp4" -> return ".m4a"
+                mimeType.contains("aac") -> return ".aac"
+                mimeType.contains("mpeg") || mimeType.contains("mp3") -> return ".mp3"
+                mimeType.contains("wav") -> return ".wav"
+                mimeType.contains("ogg") -> return ".ogg"
+                mimeType.contains("flac") -> return ".flac"
+                mimeType.contains("opus") -> return ".opus"
+            }
+            val mime = android.webkit.MimeTypeMap.getSingleton()
+            val extension = mime.getExtensionFromMimeType(mimeType)
+            if (extension != null) {
+                return ".$extension"
+            }
+        }
         return ".mp3"
     }
 

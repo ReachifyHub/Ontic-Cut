@@ -86,17 +86,19 @@ object EncoderSelector {
         targetHeight: Int = 720,
         fps: Int = 30,
         bitrate: String? = null,
-        crf: Int? = null
+        crf: Int? = null,
+        softwareThreads: Int = 0
     ): SelectedEncoder {
         val safeW = ((targetWidth + 1) / 2) * 2
         val safeH = ((targetHeight + 1) / 2) * 2
         val effectiveRes = minOf(safeW, safeH)
         val effectiveBitrate = bitrate ?: getTargetVideoBitrate(effectiveRes, fps)
         val effectiveCrf = crf ?: getTargetSoftwareCrf(effectiveRes)
-        val swArgs = "-c:v libx264 -preset veryfast -crf $effectiveCrf -threads 0 -pix_fmt yuv420p"
+        val safeThreads = softwareThreads.coerceAtLeast(0)
+        val swArgs = "-c:v libx264 -preset veryfast -crf $effectiveCrf -threads $safeThreads -pix_fmt yuv420p"
 
         if (preference == EncoderPreference.SOFTWARE) {
-            Log.d(TAG, "Software encoder explicitly requested, using libx264 (crf=$effectiveCrf)")
+            Log.d(TAG, "Software encoder explicitly requested, using libx264 (crf=$effectiveCrf, threads=$safeThreads)")
             return SelectedEncoder(
                 backend = EncoderBackend.SOFTWARE_LIBX264,
                 codecName = null,
@@ -120,7 +122,7 @@ object EncoderSelector {
         }
 
         // Hardware unavailable or unsupported for target parameters -> log exact reason and fall back to libx264
-        Log.w(TAG, "Hardware encoder unavailable/unsupported for ${safeW}x${safeH}@${fps}fps, falling back to software libx264 (crf=$effectiveCrf)")
+        Log.w(TAG, "Hardware encoder unavailable/unsupported for ${safeW}x${safeH}@${fps}fps, falling back to software libx264 (crf=$effectiveCrf, threads=$safeThreads)")
 
         return SelectedEncoder(
             backend = EncoderBackend.SOFTWARE_LIBX264,
@@ -141,7 +143,8 @@ object EncoderSelector {
         targetHeight: Int = 720,
         fps: Int = 30,
         bitrate: String? = null,
-        crf: Int? = null
+        crf: Int? = null,
+        softwareThreads: Int = 0
     ): SelectedEncoder {
         val prefs = context?.getSharedPreferences("vydra_prefs", android.content.Context.MODE_PRIVATE)
         val defaultEncoder = prefs?.getString("default_encoder", "software") ?: "software"
@@ -156,7 +159,8 @@ object EncoderSelector {
             targetHeight = targetHeight,
             fps = fps,
             bitrate = bitrate,
-            crf = crf
+            crf = crf,
+            softwareThreads = softwareThreads
         )
     }
 
@@ -164,9 +168,10 @@ object EncoderSelector {
      * Rewrites a command that failed on h264_mediacodec to use software libx264 with CRF rate control
      * instead of leaving MediaCodec's -b:v argument attached.
      */
-    fun buildSoftwareFallbackCommand(command: String, crf: Int = 23): String {
+    fun buildSoftwareFallbackCommand(command: String, crf: Int = 23, softwareThreads: Int = 0): String {
+        val safeThreads = softwareThreads.coerceAtLeast(0)
         val withoutBitrate = command.replace(Regex("""\s+-b:v\s+\S+"""), "")
-        return withoutBitrate.replace("h264_mediacodec", "libx264 -preset veryfast -crf $crf -threads 0")
+        return withoutBitrate.replace("h264_mediacodec", "libx264 -preset veryfast -crf $crf -threads $safeThreads")
     }
 
     /**

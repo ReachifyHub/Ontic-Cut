@@ -308,4 +308,20 @@
     <string name="str_details">Details</string>
     <string name="str_share_logs">Share App Logs</string>
     <string name="str_share_logs_desc">View diagnostics and share export/crash logs</string>
+    <string name="str_me">Me</string>
+    <string name="str_about_vydra">About Vydra</string>
+
+    <!-- In-App Update Strings -->
+    <string name="update_available_title">Update Available</string>
+    <string name="update_required_title">Update Required</string>
+    <string name="update_optional_message">Version %1$s is now available!\n\nWhat\'s new:\n%2$s</string>
+    <string name="update_mandatory_message">Version %1$s is required to continue using Vydra.\n\nYou must update the app before continuing.\n\nWhat\'s new:\n%2$s</string>
+    <string name="update_default_changelog">Performance improvements and bug fixes</string>
+    <string name="update_btn_download">Download Update</string>
+    <string name="update_btn_update_now">Update Now</string>
+    <string name="update_btn_later">Later</string>
+    <string name="update_btn_exit_app">Exit App</string>
+    <string name="update_toast_no_internet">Unable to check for updates. Please check your internet connection.</string>
+    <string name="update_toast_try_later">Unable to check for updates. Please try again later.</string>
+    <string name="update_toast_latest_version">You are on the latest version of Vydra (%1$s).</string>
 </resources>

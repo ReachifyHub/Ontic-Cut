@@ -367,9 +367,9 @@
 
     </androidx.core.widget.NestedScrollView>
 
-    <!-- Settings Page Content (Bento Style Layout) -->
+    <!-- Me Page Content (Combined Account, Settings & About Bento Layout) -->
     <ScrollView
-        android:id="@+id/layoutSettingsContent"
+        android:id="@+id/layoutMeContent"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_below="@id/layoutTopHeader"
@@ -392,98 +392,66 @@
                 android:layout_marginTop="8dp"
                 android:layout_marginBottom="16dp"
                 android:fontFamily="sans-serif-medium"
-                android:text="@string/str_settings"
+                android:text="@string/str_me"
                 android:textColor="@color/textColor"
                 android:textSize="24sp" />
 
-            <!-- Vydra Cloud Account Bento Card -->
+            <!-- Hero Bento Card: User Account Card (Uses About Hero Card Style) -->
             <LinearLayout
                 android:id="@+id/cardAccountSettings"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:background="@drawable/bg_hero_bento_secondary"
+                android:background="@drawable/bg_hero_bento_primary"
                 android:orientation="vertical"
-                android:padding="20dp"
+                android:padding="24dp"
+                android:gravity="center"
                 android:layout_marginBottom="16dp"
-                android:elevation="4dp">
+                android:elevation="8dp">
 
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <ImageView
+                    android:id="@+id/ivAccountAvatar"
+                    android:layout_width="72dp"
+                    android:layout_height="72dp"
+                    android:src="@drawable/ic_account_circle_24"
+                    app:tint="@color/iconSecondary"
+                    android:contentDescription="@string/auth_account_settings_title" />
+
+                <TextView
+                    android:id="@+id/tvAccountEmail"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="12dp">
+                    android:layout_marginTop="12dp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="Not Signed In"
+                    android:textColor="@color/textColor"
+                    android:textSize="20sp"
+                    android:gravity="center"
+                    android:maxLines="1"
+                    android:ellipsize="end" />
 
-                    <ImageView
-                        android:layout_width="20dp"
-                        android:layout_height="20dp"
-                        android:src="@drawable/ic_bolt_24"
-                        app:tint="@color/colorPrimary"
-                        android:layout_marginEnd="8dp" />
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:fontFamily="sans-serif-medium"
-                        android:text="@string/auth_account_settings_title"
-                        android:textColor="@color/textColor"
-                        android:textSize="16sp" />
-
-                    <TextView
-                        android:id="@+id/tvAccountBadge"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:background="@drawable/bg_aspect_ratio_item"
-                        android:paddingHorizontal="8dp"
-                        android:paddingVertical="2dp"
-                        android:text="Offline Mode"
-                        android:textColor="@color/iconSecondary"
-                        android:textSize="11sp"
-                        android:fontFamily="sans-serif" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:id="@+id/layoutAccountInfo"
-                    android:layout_width="match_parent"
+                <TextView
+                    android:id="@+id/tvAccountBadge"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:paddingVertical="4dp">
+                    android:layout_marginTop="6dp"
+                    android:background="@drawable/bg_pill_accent"
+                    android:paddingHorizontal="12dp"
+                    android:paddingVertical="4dp"
+                    android:text="Offline Mode"
+                    android:textColor="@color/iconSecondary"
+                    android:textSize="12sp"
+                    android:fontFamily="sans-serif-medium" />
 
-                    <ImageView
-                        android:id="@+id/ivAccountAvatar"
-                        android:layout_width="36dp"
-                        android:layout_height="36dp"
-                        android:src="@drawable/ic_account_circle_24"
-                        app:tint="@color/iconSecondary"
-                        android:layout_marginEnd="12dp" />
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:id="@+id/tvAccountEmail"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="Not Signed In"
-                            android:textColor="@color/textColor"
-                            android:textSize="15sp"
-                            android:fontFamily="sans-serif-medium" />
-
-                        <TextView
-                            android:id="@+id/tvAccountSubtitle"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="@string/auth_account_settings_desc_signed_out"
-                            android:textColor="@color/iconSecondary"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-                </LinearLayout>
+                <TextView
+                    android:id="@+id/tvAccountSubtitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:gravity="center"
+                    android:lineSpacingMultiplier="1.3"
+                    android:text="@string/auth_account_settings_desc_signed_out"
+                    android:textColor="@color/iconSecondary"
+                    android:textSize="13sp" />
 
                 <!-- Transcription Credits Container (Visible when logged in) -->
                 <LinearLayout
@@ -492,13 +460,13 @@
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
                     android:visibility="gone"
-                    android:layout_marginTop="12dp">
+                    android:layout_marginTop="16dp">
 
                     <View
                         android:layout_width="match_parent"
                         android:layout_height="1dp"
                         android:background="#22FFFFFF"
-                        android:layout_marginBottom="12dp" />
+                        android:layout_marginBottom="14dp" />
 
                     <LinearLayout
                         android:layout_width="match_parent"
@@ -511,7 +479,8 @@
                             android:layout_height="22dp"
                             android:src="@drawable/ic_bolt_24"
                             app:tint="@color/colorPrimary"
-                            android:layout_marginEnd="10dp" />
+                            android:layout_marginEnd="10dp"
+                            android:contentDescription="@string/credits_section_title" />
 
                         <LinearLayout
                             android:layout_width="0dp"
@@ -540,9 +509,9 @@
 
                         <ImageView
                             android:id="@+id/btnRefreshCredits"
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
-                            android:padding="6dp"
+                            android:layout_width="48dp"
+                            android:layout_height="48dp"
+                            android:padding="12dp"
                             android:src="@drawable/ic_refresh_24"
                             app:tint="@color/iconSecondary"
                             android:background="?attr/selectableItemBackgroundBorderless"
@@ -554,7 +523,7 @@
                     <Button
                         android:id="@+id/btnBuyCredits"
                         android:layout_width="match_parent"
-                        android:layout_height="42dp"
+                        android:layout_height="48dp"
                         android:layout_marginTop="12dp"
                         android:background="@drawable/rounded_button"
                         android:text="@string/credits_btn_buy_whatsapp"
@@ -571,8 +540,8 @@
                 <Button
                     android:id="@+id/btnAccountAction"
                     android:layout_width="match_parent"
-                    android:layout_height="42dp"
-                    android:layout_marginTop="14dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="16dp"
                     android:background="@drawable/rounded_button"
                     android:text="@string/auth_btn_sign_in"
                     android:textColor="@color/colorOnPrimary"
@@ -604,12 +573,13 @@
                     android:id="@+id/btnChangeLanguage"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:orientation="vertical"
                     android:background="?attr/selectableItemBackground"
                     android:clickable="true"
                     android:focusable="true"
                     android:paddingVertical="10dp">
-                    
+
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -617,7 +587,7 @@
                         android:textColor="@color/textColor"
                         android:textSize="15sp"
                         android:fontFamily="sans-serif-medium" />
-                    
+
                     <TextView
                         android:id="@+id/tvCurrentLanguage"
                         android:layout_width="wrap_content"
@@ -639,12 +609,13 @@
                     android:id="@+id/btnChangeExportFolder"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:orientation="vertical"
                     android:background="?attr/selectableItemBackground"
                     android:clickable="true"
                     android:focusable="true"
                     android:paddingVertical="10dp">
-                    
+
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -652,7 +623,7 @@
                         android:textColor="@color/textColor"
                         android:textSize="15sp"
                         android:fontFamily="sans-serif-medium" />
-                    
+
                     <TextView
                         android:id="@+id/tvCurrentExportFolder"
                         android:layout_width="wrap_content"
@@ -674,12 +645,13 @@
                     android:id="@+id/btnChangeAudioExportFolder"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:orientation="vertical"
                     android:background="?attr/selectableItemBackground"
                     android:clickable="true"
                     android:focusable="true"
                     android:paddingVertical="10dp">
-                    
+
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -687,7 +659,7 @@
                         android:textColor="@color/textColor"
                         android:textSize="15sp"
                         android:fontFamily="sans-serif-medium" />
-                    
+
                     <TextView
                         android:id="@+id/tvCurrentAudioExportFolder"
                         android:layout_width="wrap_content"
@@ -709,12 +681,13 @@
                     android:id="@+id/btnChangeSnapshotExportFolder"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:orientation="vertical"
                     android:background="?attr/selectableItemBackground"
                     android:clickable="true"
                     android:focusable="true"
                     android:paddingVertical="10dp">
-                    
+
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
@@ -722,7 +695,7 @@
                         android:textColor="@color/textColor"
                         android:textSize="15sp"
                         android:fontFamily="sans-serif-medium" />
-                    
+
                     <TextView
                         android:id="@+id/tvCurrentSnapshotExportFolder"
                         android:layout_width="wrap_content"
@@ -744,6 +717,7 @@
                     android:id="@+id/btnToggleHapticFeedback"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:orientation="vertical"
                     android:background="?attr/selectableItemBackground"
                     android:clickable="true"
@@ -794,6 +768,7 @@
                     android:id="@+id/btnToggleFullscreenEditor"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:orientation="vertical"
                     android:background="?attr/selectableItemBackground"
                     android:clickable="true"
@@ -829,6 +804,7 @@
                     android:id="@+id/btnChangeDefaultEncoder"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:orientation="vertical"
                     android:background="?attr/selectableItemBackground"
                     android:clickable="true"
@@ -855,186 +831,7 @@
 
             </LinearLayout>
 
-            <!-- System Bento Card -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:background="@drawable/bg_hero_bento_secondary"
-                android:orientation="vertical"
-                android:padding="20dp"
-                android:elevation="4dp">
-
-                <!-- Check for Updates Setting -->
-                <LinearLayout
-                    android:id="@+id/btnCheckForUpdates"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:background="?attr/selectableItemBackground"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:paddingVertical="10dp">
-                    
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/str_check_for_updates"
-                        android:textColor="@color/textColor"
-                        android:textSize="15sp"
-                        android:fontFamily="sans-serif-medium" />
-                    
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="@string/str_manually_check_for_the_latest"
-                        android:textColor="@color/iconSecondary"
-                        android:textSize="13sp" />
-                </LinearLayout>
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:background="@color/outlineVariant"
-                    android:layout_marginVertical="4dp" />
-
-                <!-- Open Source Licenses Setting -->
-                <LinearLayout
-                    android:id="@+id/btnOpenSourceLicenses"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:background="?attr/selectableItemBackground"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:paddingVertical="10dp">
-                    
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/str_open_source_licenses"
-                        android:textColor="@color/textColor"
-                        android:textSize="15sp"
-                        android:fontFamily="sans-serif-medium" />
-                    
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="@string/str_view_third_party_software_licenses"
-                        android:textColor="@color/iconSecondary"
-                        android:textSize="13sp" />
-                </LinearLayout>
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:background="@color/outlineVariant"
-                    android:layout_marginVertical="4dp" />
-
-                <!-- Share App Logs Setting -->
-                <LinearLayout
-                    android:id="@+id/btnShareAppLogs"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:background="?attr/selectableItemBackground"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:paddingVertical="10dp">
-                    
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="@string/str_share_logs"
-                        android:textColor="@color/textColor"
-                        android:textSize="15sp"
-                        android:fontFamily="sans-serif-medium" />
-                    
-                    <TextView
-                        android:id="@+id/tvShareAppLogsDesc"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="2dp"
-                        android:text="@string/str_share_logs_desc"
-                        android:textColor="@color/iconSecondary"
-                        android:textSize="13sp" />
-                </LinearLayout>
-
-            </LinearLayout>
-
-        </LinearLayout>
-    </ScrollView>
-
-    <!-- About Page Content (Bento Style Layout) -->
-    <ScrollView
-        android:id="@+id/layoutAboutContent"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_below="@id/layoutTopHeader"
-        android:visibility="gone"
-        android:paddingHorizontal="20dp"
-        android:paddingTop="12dp"
-        android:paddingBottom="100dp"
-        android:clipToPadding="false"
-        android:overScrollMode="never"
-        android:scrollbars="none">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical">
-
-            <!-- Hero Bento Card: About Header -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:background="@drawable/bg_hero_bento_primary"
-                android:orientation="vertical"
-                android:padding="24dp"
-                android:gravity="center"
-                android:elevation="8dp">
-
-                <ImageView
-                    android:layout_width="72dp"
-                    android:layout_height="72dp"
-                    android:src="@drawable/ic_vydra_logo_round"
-                    android:contentDescription="Vydra App Icon" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:fontFamily="sans-serif-medium"
-                    android:text="@string/app_name"
-                    android:textColor="@color/textColor"
-                    android:textSize="26sp" />
-
-                <TextView
-                    android:id="@+id/tvAboutVersion"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textColor="@color/colorSecondary"
-                    android:textSize="13sp"
-                    android:fontFamily="sans-serif-medium"
-                    android:background="@drawable/bg_pill_accent"
-                    android:paddingHorizontal="10dp"
-                    android:paddingVertical="4dp" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="16dp"
-                    android:gravity="center"
-                    android:lineSpacingMultiplier="1.3"
-                    android:text="@string/str_about_tagline"
-                    android:textColor="@color/iconSecondary"
-                    android:textSize="14sp" />
-            </LinearLayout>
-
-            <!-- Support & Community Bento Card -->
+            <!-- Support, Updates & Diagnostics Bento Card -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -1090,9 +887,81 @@
                     android:insetTop="0dp"
                     android:insetBottom="0dp" />
 
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="@color/outlineVariant"
+                    android:layout_marginTop="16dp"
+                    android:layout_marginBottom="4dp" />
+
+                <!-- Share App Logs Setting -->
+                <LinearLayout
+                    android:id="@+id/btnShareAppLogs"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="vertical"
+                    android:background="?attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:paddingVertical="10dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/str_share_logs"
+                        android:textColor="@color/textColor"
+                        android:textSize="15sp"
+                        android:fontFamily="sans-serif-medium" />
+
+                    <TextView
+                        android:id="@+id/tvShareAppLogsDesc"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="@string/str_share_logs_desc"
+                        android:textColor="@color/iconSecondary"
+                        android:textSize="13sp" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="@color/outlineVariant"
+                    android:layout_marginVertical="4dp" />
+
+                <!-- Check for Updates Setting -->
+                <LinearLayout
+                    android:id="@+id/btnCheckForUpdates"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="48dp"
+                    android:orientation="vertical"
+                    android:background="?attr/selectableItemBackground"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:paddingVertical="10dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/str_check_for_updates"
+                        android:textColor="@color/textColor"
+                        android:textSize="15sp"
+                        android:fontFamily="sans-serif-medium" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="@string/str_manually_check_for_the_latest"
+                        android:textColor="@color/iconSecondary"
+                        android:textSize="13sp" />
+                </LinearLayout>
+
             </LinearLayout>
 
-            <!-- Legal Bento Card -->
+            <!-- About & Legal Bento Card -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -1106,9 +975,67 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:fontFamily="sans-serif-medium"
-                    android:text="@string/str_legal"
+                    android:text="@string/str_about_vydra"
                     android:textColor="@color/textColor"
                     android:textSize="16sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <ImageView
+                        android:layout_width="44dp"
+                        android:layout_height="44dp"
+                        android:src="@drawable/ic_vydra_logo_round"
+                        android:contentDescription="@string/app_name" />
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="12dp"
+                        android:orientation="vertical">
+
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="sans-serif-medium"
+                                android:text="@string/app_name"
+                                android:textColor="@color/textColor"
+                                android:textSize="17sp" />
+
+                            <TextView
+                                android:id="@+id/tvAboutVersion"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:textColor="@color/colorSecondary"
+                                android:textSize="11sp"
+                                android:fontFamily="sans-serif-medium"
+                                android:background="@drawable/bg_pill_accent"
+                                android:paddingHorizontal="8dp"
+                                android:paddingVertical="2dp" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:lineSpacingMultiplier="1.25"
+                            android:text="@string/str_about_tagline"
+                            android:textColor="@color/iconSecondary"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+                </LinearLayout>
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnAboutPrivacyPolicy"
@@ -1152,6 +1079,7 @@
                     android:id="@+id/btnAboutOpenSourceLicenses"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:minHeight="48dp"
                     android:layout_marginTop="16dp"
                     android:orientation="vertical"
                     android:background="@drawable/bg_aspect_ratio_item"
@@ -1191,7 +1119,7 @@
         android:background="@drawable/bg_bottom_nav_docked"
         android:gravity="center"
         android:orientation="horizontal"
-        android:paddingHorizontal="16dp"
+        android:paddingHorizontal="24dp"
         android:elevation="16dp">
 
         <FrameLayout
@@ -1201,20 +1129,21 @@
             <LinearLayout
                 android:id="@+id/tabHome"
                 android:layout_width="wrap_content"
-                android:layout_height="44dp"
+                android:layout_height="48dp"
                 android:layout_gravity="center"
                 android:background="@drawable/bg_nav_active_pill"
                 android:clickable="true"
                 android:focusable="true"
                 android:gravity="center"
                 android:orientation="horizontal"
-                android:paddingHorizontal="18dp">
+                android:paddingHorizontal="22dp">
                 <ImageView
                     android:id="@+id/ivHome"
                     android:layout_width="20dp"
                     android:layout_height="20dp"
                     android:src="@drawable/ic_home_24"
-                    app:tint="@color/colorPrimary" />
+                    app:tint="@color/colorPrimary"
+                    android:contentDescription="Home" />
                 <TextView
                     android:id="@+id/tvHomeLabel"
                     android:layout_width="wrap_content"
@@ -1234,61 +1163,28 @@
             android:layout_height="match_parent"
             android:layout_weight="1">
             <LinearLayout
-                android:id="@+id/tabSettings"
+                android:id="@+id/tabMe"
                 android:layout_width="wrap_content"
-                android:layout_height="44dp"
+                android:layout_height="48dp"
                 android:layout_gravity="center"
                 android:clickable="true"
                 android:focusable="true"
                 android:gravity="center"
                 android:orientation="horizontal"
-                android:paddingHorizontal="18dp">
+                android:paddingHorizontal="22dp">
                 <ImageView
-                    android:id="@+id/ivSettings"
+                    android:id="@+id/ivMe"
                     android:layout_width="20dp"
                     android:layout_height="20dp"
-                    android:src="@drawable/ic_settings_24"
-                    app:tint="@color/inactiveTool" />
+                    android:src="@drawable/ic_account_circle_24"
+                    app:tint="@color/inactiveTool"
+                    android:contentDescription="@string/str_me" />
                 <TextView
-                    android:id="@+id/tvSettingsLabel"
+                    android:id="@+id/tvMeLabel"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginStart="8dp"
-                    android:text="Settings"
-                    android:textColor="@color/inactiveTool"
-                    android:textSize="13sp"
-                    android:singleLine="true"
-                    android:maxLines="1"
-                    android:fontFamily="sans-serif-medium" />
-            </LinearLayout>
-        </FrameLayout>
-
-        <FrameLayout
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1">
-            <LinearLayout
-                android:id="@+id/tabAbout"
-                android:layout_width="wrap_content"
-                android:layout_height="44dp"
-                android:layout_gravity="center"
-                android:clickable="true"
-                android:focusable="true"
-                android:gravity="center"
-                android:orientation="horizontal"
-                android:paddingHorizontal="18dp">
-                <ImageView
-                    android:id="@+id/ivAbout"
-                    android:layout_width="20dp"
-                    android:layout_height="20dp"
-                    android:src="@drawable/ic_info_24"
-                    app:tint="@color/inactiveTool" />
-                <TextView
-                    android:id="@+id/tvAboutLabel"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:text="About"
+                    android:text="@string/str_me"
                     android:textColor="@color/inactiveTool"
                     android:textSize="13sp"
                     android:singleLine="true"

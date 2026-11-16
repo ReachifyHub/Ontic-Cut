@@ -193,7 +193,11 @@ class FFmpegRenderEngine(private val context: Context) {
 
                     if (!isRetry && !isPermanent && command.contains("h264_mediacodec")) {
                         Log.w(TAG, "Hardware encoder h264_mediacodec failed or produced no video stream. Falling back to software encoder libx264. Error:\n$diagnosticLog")
-                        val fallbackCommand = com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(command)
+                        val fallbackThreads = resolveSoftwareThreadsFromCommand(command)
+                        val fallbackCommand = com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(
+                            command = command,
+                            softwareThreads = fallbackThreads
+                        )
                         return@withContext executeCommand(fallbackCommand, isRetry = true)
                     }
 
@@ -410,7 +414,11 @@ class FFmpegRenderEngine(private val context: Context) {
                             m.contains("error") || m.contains("failed") || m.contains("mediacodec")
                         }?.message?.trim() ?: "rc=${returnCode?.getValue()} missingVideo=$missingVideo"
                         Log.w(TAG, "Hardware encoder h264_mediacodec failed or produced no video stream. Falling back to software encoder libx264. Error:\n$diagnosticLog")
-                        val fallbackCommand = com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(ffmpegCommand)
+                        val fallbackThreads = resolveSoftwareThreadsFromCommand(ffmpegCommand)
+                        val fallbackCommand = com.boostlyte.vydra.export.EncoderSelector.buildSoftwareFallbackCommand(
+                            command = ffmpegCommand,
+                            softwareThreads = fallbackThreads
+                        )
                         val retryResult = exportFinal(fallbackCommand, totalDurationSecs, onProgress, isRetry = true)
                         return@withContext if (retryResult is RenderResult.Success) {
                             retryResult.copy(
@@ -916,5 +924,12 @@ class FFmpegRenderEngine(private val context: Context) {
     private fun extractScriptFilePath(command: String): String? {
         val regex = Regex("""-filter_complex_script\s+["']?([^"'\s]+)["']?""")
         return regex.find(command)?.groupValues?.getOrNull(1)
+    }
+
+    private fun resolveSoftwareThreadsFromCommand(command: String): Int {
+        val scaleMatch = Regex("""scale=(?:w=)?(\d+)[:-](?:h=)?(\d+)""").find(command)
+        val w = scaleMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1920
+        val h = scaleMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 1080
+        return com.boostlyte.vydra.export.ExportMemoryProfile.fromContext(context, w, h).softwareEncoderThreads
     }
 }
