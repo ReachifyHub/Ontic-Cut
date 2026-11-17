@@ -324,4 +324,15 @@
     <string name="update_toast_no_internet">Unable to check for updates. Please check your internet connection.</string>
     <string name="update_toast_try_later">Unable to check for updates. Please try again later.</string>
     <string name="update_toast_latest_version">You are on the latest version of Vydra (%1$s).</string>
+
+    <!-- Export Completion UI Strings -->
+    <string name="str_export_complete_title">Export Complete</string>
+    <string name="str_export_audio_complete_title">Audio Exported</string>
+    <string name="str_export_saved_to_default_video">Saved to %1$s</string>
+    <string name="str_export_watch_video">Watch Video</string>
+    <string name="str_export_play_audio">Play Audio</string>
+    <string name="str_export_share">Share</string>
+    <string name="str_export_done">Done</string>
+    <string name="str_export_no_player_app">No app found to open this exported file.</string>
+    <string name="str_export_share_title">Share exported file</string>
 </resources>

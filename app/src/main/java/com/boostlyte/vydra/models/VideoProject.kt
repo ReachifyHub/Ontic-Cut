@@ -221,6 +221,10 @@ data class VideoEditingUiState(
     val isLoading: Boolean = false,
     val isExporting: Boolean = false,
     val exportProgress: Int = 0, // 0-100
+    val isExportComplete: Boolean = false,
+    val exportedUri: String? = null,
+    val exportedDisplayLocation: String? = null,
+    val exportedIsAudioOnly: Boolean = false,
     val errorMessage: String? = null,
     val pendingOperationCount: Int = 0,
     val currentPreviewOperationIndex: Int = -1, // -1 means show original, 0+ means after Nth operation

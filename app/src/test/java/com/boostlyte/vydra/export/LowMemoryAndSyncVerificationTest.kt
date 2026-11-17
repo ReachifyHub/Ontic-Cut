@@ -967,6 +967,148 @@ class LowMemoryAndSyncVerificationTest {
         }
     }
 
+    @Test
+    fun testHostE2E_65Images_100msTransitions_ExactClipFrameMidpointSync() {
+        if (!hasHostFfmpeg()) return
+        for (fps in listOf(30, 24)) {
+            val tempDir = createTempDirCompat("vydra_trans_sync_$fps")
+            try {
+                // Create 65 uniquely color-encoded 320x180 PNG images (distinct RGB grid -> zero JPEG/yuv rounding ambiguity)
+                fun clipRgb(idx: Int): Triple<Int, Int, Int> {
+                    val r = 20 + ((idx % 5) * 50)
+                    val g = 20 + (((idx / 5) % 5) * 50)
+                    val b = 30 + (((idx / 25) % 3) * 80)
+                    return Triple(r, g, b)
+                }
+
+                val imageFiles = (0 until 65).map { idx ->
+                    val (r, g, b) = clipRgb(idx)
+                    val hex = String.format(Locale.US, "0x%02X%02X%02X", r, g, b)
+                    val f = File(tempDir, "color_$idx.png")
+                    runProc("/usr/bin/ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=$hex:s=320x180:d=0.1", "-frames:v", "1", f.absolutePath)
+                    f
+                }
+
+                // Non-uniform Auto-Assemble style durations (633..1467ms) + 100ms (0.1s) transitions at EVERY gap!
+                val durationsMs = (0 until 65).map { idx -> 733L + ((idx * 137L) % 617L) }
+                val transitions = (0 until 64).map { gapIdx ->
+                    EditOperation.Transition(index = gapIdx, type = "fade", durationMs = 100L)
+                }
+                val seqItems = (0 until 65).map { idx ->
+                    EditOperation.MergeItem(
+                        uri = DummyUri.fromPath(imageFiles[idx].absolutePath),
+                        durationMs = durationsMs[idx],
+                        isImage = true
+                    )
+                }
+
+                val layout = com.boostlyte.vydra.viewmodels.TimelineLayoutCalculator.computeTimelineLayout(seqItems, transitions)
+                val ops = mutableListOf<EditOperation>(
+                    EditOperation.Trim(0L, durationsMs[0]),
+                    EditOperation.Merge(items = seqItems.drop(1))
+                )
+                ops.addAll(transitions)
+
+                val plan = ChunkPlanner.plan(
+                    sequenceItems = seqItems,
+                    transitions = transitions,
+                    containBoundaryTransitions = true,
+                    fps = fps,
+                    maxChunkSize = 10,
+                    chunkTriggerThreshold = 16
+                )
+                assertFalse(
+                    "containBoundaryTransitions must avoid boundary xfade",
+                    plan.boundaryTransitions.any { it.transition != null }
+                )
+
+                val vm = VideoEditingViewModel()
+                vm.setExportSettings(resolution = 360, fps = fps, audioOnly = false)
+                val renderedChunks = mutableListOf<File>()
+                for (spec in plan.chunks) {
+                    val outChunk = File(tempDir, "chunk_${spec.chunkIndex}.mp4")
+                    val cmd = vm.buildChunkPassCommand(
+                        chunkSpec = spec,
+                        sourceFilePath = imageFiles[0].absolutePath,
+                        chunkOutputPath = outChunk.absolutePath,
+                        fontFilePath = null,
+                        context = null,
+                        totalDurationMs = layout.totalDurationMs,
+                        density = 1.0f,
+                        targetWidth = 320,
+                        targetHeight = 180,
+                        operations = ops,
+                        encoderOverride = "-c:v libx264 -preset ultrafast -crf 18 -threads 1 -pix_fmt yuv420p"
+                    )
+                    runProc(*((listOf("/usr/bin/ffmpeg") + tokenizeCommand(cmd.command)).toTypedArray()))
+                    renderedChunks.add(outChunk)
+                }
+
+                val concatTxt = File(tempDir, "concat.txt")
+                concatTxt.writeText(buildString {
+                    renderedChunks.forEachIndexed { idx, f ->
+                        append("file '${f.absolutePath}'\n")
+                        append(String.format(Locale.US, "duration %.6f\n", plan.chunks[idx].totalFrames.toDouble() / fps))
+                    }
+                })
+                val outMp4 = File(tempDir, "final_${fps}fps.mp4")
+                val expectedFrames = plan.chunks.sumOf { it.totalFrames }
+                runProc(
+                    "/usr/bin/ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", concatTxt.absolutePath, "-c", "copy",
+                    "-t", String.format(Locale.US, "%.6f", expectedFrames.toDouble() / fps),
+                    outMp4.absolutePath
+                )
+
+                // Decode center-pixel RGB of every single rendered frame at 4x4 resolution
+                val rawRgbFile = File(tempDir, "frames.rgb")
+                runProc(
+                    "/usr/bin/ffmpeg", "-y", "-i", outMp4.absolutePath,
+                    "-vf", "scale=4:4", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                    rawRgbFile.absolutePath
+                )
+                val bytes = rawRgbFile.readBytes()
+                val frameSize = 4 * 4 * 3
+                val totalDecodedFrames = bytes.size / frameSize
+                assertEquals("Exact decoded frame count at ${fps}fps", expectedFrames, totalDecodedFrames)
+
+                // Check midpoint of every single clip i in 0..64 against TimelineLayoutCalculator!
+                var maxAbsRgbError = 0
+                val mismatches = mutableListOf<String>()
+                for (i in 0 until 65) {
+                    val clipLayout = layout.clips[i]
+                    val inTrans = layout.transitions.find { it.gapIndex == i - 1 }?.durationMs ?: 0L
+                    val outTrans = layout.transitions.find { it.gapIndex == i }?.durationMs ?: 0L
+                    val visibleStartMs = clipLayout.startMs + inTrans
+                    val visibleEndMs = clipLayout.endMs - outTrans
+                    val midMs = (visibleStartMs + visibleEndMs) / 2L
+                    val midFrame = ((midMs * fps) / 1000.0).toInt().coerceIn(0, totalDecodedFrames - 1)
+
+                    // Center pixel (2,2) in 4x4
+                    val offset = midFrame * frameSize + (2 * 4 + 2) * 3
+                    val actualR = bytes[offset].toInt() and 0xFF
+                    val actualG = bytes[offset + 1].toInt() and 0xFF
+                    val actualB = bytes[offset + 2].toInt() and 0xFF
+                    val (expR, expG, expB) = clipRgb(i)
+                    val err = maxOf(abs(actualR - expR), abs(actualG - expG), abs(actualB - expB))
+                    if (err > maxAbsRgbError) maxAbsRgbError = err
+                    if (err > 18) {
+                        // Find closest matching clip index for diagnostics
+                        val bestClip = (0 until 65).minByOrNull { c ->
+                            val (cr, cg, cb) = clipRgb(c)
+                            abs(actualR - cr) + abs(actualG - cg) + abs(actualB - cb)
+                        }
+                        mismatches.add("clip=$i midMs=$midMs midFrame=$midFrame expected=($expR,$expG,$expB) actual=($actualR,$actualG,$actualB) matchedClip=$bestClip")
+                    }
+                }
+                println("HOST_E2E_TRANS_SYNC fps=$fps frames=$totalDecodedFrames maxRgbErr=$maxAbsRgbError mismatches=${mismatches.take(5)}")
+                assertTrue("Frame color sync mismatches at ${fps}fps: $mismatches", mismatches.isEmpty())
+            } finally {
+                tempDir.deleteRecursively()
+            }
+        }
+    }
+
     private fun hasHostFfmpeg(): Boolean = File("/usr/bin/ffmpeg").exists() && File("/usr/bin/ffprobe").exists()
 
     private fun findFontFile(): File? = listOf(

@@ -11,7 +11,7 @@
 
     <!-- Center Bento Modal Card -->
     <com.google.android.material.card.MaterialCardView
-        android:layout_width="320dp"
+        android:layout_width="328dp"
         android:layout_height="wrap_content"
         android:layout_gravity="center"
         app:cardCornerRadius="28dp"
@@ -20,78 +20,199 @@
         app:strokeWidth="1dp"
         app:cardElevation="16dp">
 
-        <LinearLayout
+        <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:gravity="center"
-            android:orientation="vertical"
-            android:padding="32dp">
+            android:layout_height="wrap_content">
 
-            <!-- Title Text -->
-            <TextView
-                android:layout_width="wrap_content"
+            <!-- In-Progress Export State -->
+            <LinearLayout
+                android:id="@+id/exportProgressContent"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/str_saving_video"
-                android:textColor="@color/textColor"
-                android:fontFamily="sans-serif-medium"
-                android:textSize="20sp" />
+                android:gravity="center"
+                android:orientation="vertical"
+                android:padding="28dp">
 
-            <!-- Subtitle Text -->
-            <TextView
-                android:id="@+id/tvExportMessage"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="@string/str_please_don_t_close_the_app"
-                android:textAlignment="center"
-                android:textColor="@color/outline"
-                android:fontFamily="sans-serif"
-                android:textSize="14sp" />
-
-            <!-- Progress Indicator with Percentage -->
-            <FrameLayout
-                android:layout_width="80dp"
-                android:layout_height="80dp"
-                android:layout_marginTop="24dp">
-                
-                <ProgressBar
-                    android:id="@+id/exportProgressBar"
-                    style="?android:attr/progressBarStyleHorizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:indeterminate="false"
-                    android:progressDrawable="@drawable/circular_progress_bar"
-                    android:max="100"
-                    android:progress="0" />
-                
+                <!-- Title Text -->
                 <TextView
-                    android:id="@+id/tvExportPercentage"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_gravity="center"
-                    android:text="@string/str_0"
-                    android:textColor="@color/colorPrimary"
-                    android:fontFamily="sans-serif-bold"
-                    android:textSize="18sp" />
-            </FrameLayout>
+                    android:text="@string/str_saving_video"
+                    android:textColor="@color/textColor"
+                    android:fontFamily="sans-serif-medium"
+                    android:textSize="20sp" />
 
-            <!-- Cancel Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnCancelExport"
-                android:layout_width="160dp"
-                android:layout_height="44dp"
-                android:layout_marginTop="28dp"
-                android:text="@string/cancel"
-                android:textColor="@color/textColor"
-                android:backgroundTint="@color/surfaceVariant"
-                app:strokeWidth="0dp"
-                app:cornerRadius="22dp"
-                android:textSize="14sp"
-                android:fontFamily="sans-serif-medium"
-                android:insetTop="0dp"
-                android:insetBottom="0dp" />
+                <!-- Subtitle Text -->
+                <TextView
+                    android:id="@+id/tvExportMessage"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/str_please_don_t_close_the_app"
+                    android:textAlignment="center"
+                    android:textColor="@color/iconSecondary"
+                    android:fontFamily="sans-serif"
+                    android:textSize="14sp" />
 
-        </LinearLayout>
+                <!-- Progress Indicator with Percentage -->
+                <FrameLayout
+                    android:layout_width="84dp"
+                    android:layout_height="84dp"
+                    android:layout_marginTop="24dp">
+
+                    <ProgressBar
+                        android:id="@+id/exportProgressBar"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:indeterminate="false"
+                        android:progressDrawable="@drawable/circular_progress_bar"
+                        android:max="100"
+                        android:progress="0" />
+
+                    <TextView
+                        android:id="@+id/tvExportPercentage"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center"
+                        android:text="@string/str_0"
+                        android:textColor="@color/colorPrimary"
+                        android:fontFamily="sans-serif-bold"
+                        android:textSize="18sp" />
+                </FrameLayout>
+
+                <!-- Cancel Button -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnCancelExport"
+                    android:layout_width="160dp"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="24dp"
+                    android:text="@string/cancel"
+                    android:textColor="@color/textColor"
+                    android:backgroundTint="@color/surfaceVariant"
+                    app:strokeWidth="0dp"
+                    app:cornerRadius="24dp"
+                    android:textSize="14sp"
+                    android:fontFamily="sans-serif-medium"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
+
+            </LinearLayout>
+
+            <!-- Export Complete State -->
+            <LinearLayout
+                android:id="@+id/exportCompleteContent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:padding="28dp"
+                android:visibility="gone">
+
+                <FrameLayout
+                    android:layout_width="64dp"
+                    android:layout_height="64dp"
+                    android:background="@drawable/circle_primary_container">
+
+                    <ImageView
+                        android:id="@+id/ivExportCompleteBadge"
+                        android:layout_width="32dp"
+                        android:layout_height="32dp"
+                        android:layout_gravity="center"
+                        android:contentDescription="@string/str_export_complete_title"
+                        android:src="@drawable/ic_check_24"
+                        app:tint="@color/colorOnPrimary" />
+                </FrameLayout>
+
+                <TextView
+                    android:id="@+id/tvExportCompleteTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="@string/str_export_complete_title"
+                    android:textAlignment="center"
+                    android:textColor="@color/textColor"
+                    android:textSize="20sp" />
+
+                <TextView
+                    android:id="@+id/tvExportCompleteDetails"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:fontFamily="sans-serif"
+                    android:lineSpacingExtra="2dp"
+                    android:textAlignment="center"
+                    android:textColor="@color/iconSecondary"
+                    android:textSize="13sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnExportPlay"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="24dp"
+                    android:backgroundTint="@color/colorPrimary"
+                    android:fontFamily="sans-serif-medium"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:text="@string/str_export_watch_video"
+                    android:textAllCaps="false"
+                    android:textColor="@color/colorOnPrimary"
+                    android:textSize="15sp"
+                    app:cornerRadius="24dp"
+                    app:icon="@drawable/ic_play_24"
+                    app:iconGravity="textStart"
+                    app:iconPadding="8dp"
+                    app:iconTint="@color/colorOnPrimary" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnExportShare"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:backgroundTint="@color/surfaceVariant"
+                        android:fontFamily="sans-serif-medium"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="@string/str_export_share"
+                        android:textAllCaps="false"
+                        android:textColor="@color/textColor"
+                        android:textSize="14sp"
+                        app:cornerRadius="24dp"
+                        app:icon="@drawable/ic_share_24"
+                        app:iconGravity="textStart"
+                        app:iconPadding="6dp"
+                        app:iconTint="@color/textColor" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnExportDone"
+                        android:layout_width="0dp"
+                        android:layout_height="48dp"
+                        android:layout_marginStart="6dp"
+                        android:layout_weight="1"
+                        android:backgroundTint="@android:color/transparent"
+                        android:fontFamily="sans-serif-medium"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="@string/str_export_done"
+                        android:textAllCaps="false"
+                        android:textColor="@color/textColor"
+                        android:textSize="14sp"
+                        app:cornerRadius="24dp"
+                        app:strokeColor="@color/outline"
+                        app:strokeWidth="1dp" />
+                </LinearLayout>
+
+            </LinearLayout>
+
+        </FrameLayout>
     </com.google.android.material.card.MaterialCardView>
 
 </FrameLayout>

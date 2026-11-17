@@ -1308,7 +1308,8 @@ class VideoEditingViewModel : ViewModel() {
 
                 // Explicit normalization stage for clip i: apply target fps BEFORE setpts=N so non-matching video framerates stay in real-time sync
                 if (isImgClip) {
-                    filterParts.add("[raw_stage$i]settb=1/${_exportFps.value},setpts=N,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
+                    val exactTrimPrefix = if (!isSingleFrame && motionFilter == null) "trim=end_frame=$clipFrames," else ""
+                    filterParts.add("[raw_stage$i]${exactTrimPrefix}settb=1/${_exportFps.value},setpts=N,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
                 } else {
                     filterParts.add("[raw_stage$i]fps=${_exportFps.value},settb=1/${_exportFps.value},setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[norm$i]")
                 }
@@ -3514,19 +3515,67 @@ class VideoEditingViewModel : ViewModel() {
     }
 
     fun startExport() {
-        updateUiState { it.copy(isExporting = true, exportProgress = 0, errorMessage = null) }
+        updateUiState {
+            it.copy(
+                isExporting = true,
+                exportProgress = 0,
+                isExportComplete = false,
+                exportedUri = null,
+                exportedDisplayLocation = null,
+                exportedIsAudioOnly = _exportAudioOnly.value,
+                errorMessage = null
+            )
+        }
     }
 
     fun updateExportProgress(progress: Int) {
         updateUiState { it.copy(exportProgress = progress.coerceIn(0, 100)) }
     }
 
+    fun completeExport(savedUri: String?, displayLocation: String? = null) {
+        updateUiState {
+            it.copy(
+                isExporting = false,
+                exportProgress = 100,
+                isExportComplete = true,
+                exportedUri = savedUri,
+                exportedDisplayLocation = displayLocation,
+                exportedIsAudioOnly = _exportAudioOnly.value
+            )
+        }
+    }
+
+    fun dismissExportCompletion() {
+        updateUiState {
+            it.copy(
+                isExportComplete = false,
+                exportedUri = null,
+                exportedDisplayLocation = null
+            )
+        }
+    }
+
     fun finishExport() {
-        updateUiState { it.copy(isExporting = false, exportProgress = 100) }
+        updateUiState {
+            it.copy(
+                isExporting = false,
+                exportProgress = 100,
+                isExportComplete = false,
+                exportedUri = null,
+                exportedDisplayLocation = null
+            )
+        }
     }
 
     fun exportError(error: String) {
-        updateUiState { it.copy(isExporting = false, errorMessage = error) }
+        updateUiState {
+            it.copy(
+                isExporting = false,
+                isExportComplete = false,
+                exportedUri = null,
+                errorMessage = error
+            )
+        }
     }
 
     fun clearError() {
