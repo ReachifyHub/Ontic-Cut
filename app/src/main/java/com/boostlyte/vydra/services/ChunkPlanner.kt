@@ -53,7 +53,8 @@ data class ChunkCommand(
     val outputPath: String,
     val durationSecs: Double,
     val scriptFilePath: String? = null,
-    val renderPath: String = "legacy"
+    val renderPath: String = "legacy",
+    val tailPadFrames: Int = 0
 ) : Serializable
 
 data class ChunkExportPlan(
@@ -80,7 +81,10 @@ data class ChunkExportPlan(
     val audioBitrate: String = "128k",
     val videoDurationSecs: Double = 0.0,
     val needsVideoPadding: Boolean = false,
-    val paddingDurationSecs: Double = 0.0
+    val paddingDurationSecs: Double = 0.0,
+    val expectedAudioDurationSecs: Double = 0.0,
+    val hasAudio: Boolean = false,
+    val prepJobDirPath: String? = null
 ) : Serializable
 
 /**
@@ -137,8 +141,10 @@ object ChunkPlanner {
             val transInFrames = if (i > 0) {
                 val tLayout = chunkLayout.transitions.find { it.gapIndex == i - 1 }
                 if (tLayout != null && tLayout.durationMs > 0L) {
+                    val prevTotalFrames = (prevEndFrame - chunkStartFrame).coerceAtLeast(1L)
+                    val maxPrevTrans = (prevTotalFrames - 1L).coerceAtLeast(1L)
                     ((tLayout.durationMs * safeFps) / 1000.0).roundToLong()
-                        .coerceIn(1L, (prevEndFrame - chunkStartFrame).coerceAtLeast(1L))
+                        .coerceIn(1L, maxPrevTrans)
                         .toInt()
                 } else 0
             } else 0

@@ -34,7 +34,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
  */
 class FFmpegRenderEngine(private val context: Context) {
 
-    private val activeSessions = mutableListOf<FFmpegSession>()
+    private val activeSessions = java.util.Collections.synchronizedList(mutableListOf<FFmpegSession>())
     private val sessionLogBuffers = ConcurrentHashMap<Long, ConcurrentLinkedQueue<com.antonkarpenko.ffmpegkit.Log>>()
     private val TAG = "FFmpegRenderEngine"
 
@@ -162,9 +162,11 @@ class FFmpegRenderEngine(private val context: Context) {
     suspend fun executeCommand(command: String, isRetry: Boolean = false): RenderResult {
         return withContext(Dispatchers.IO) {
             val scriptFilePath = extractScriptFilePath(command)
+            var currentSession: FFmpegSession? = null
             try {
                 Log.d(TAG, "Executing FFmpeg command: $command")
                 val session = FFmpegKit.execute(command)
+                currentSession = session
                 activeSessions.add(session)
 
                 val returnCode = session.getReturnCode()
@@ -177,9 +179,9 @@ class FFmpegRenderEngine(private val context: Context) {
                 val isCancelled = ReturnCode.isCancel(returnCode) || returnCode?.getValue() == 255
                 if (isCancelled) {
                     Log.d(TAG, "FFmpeg session was cancelled (return code: $returnCode)")
-                    val outputPath = extractOutputPath(command)
-                    if (outputPath != null) {
-                        try { File(outputPath).delete() } catch (_: Exception) {}
+                    val cancelOutPath = extractOutputPath(command)
+                    if (cancelOutPath.isNotBlank()) {
+                        try { File(cancelOutPath).delete() } catch (_: Exception) {}
                     }
                     RenderResult.Cancelled
                 } else if (ReturnCode.isSuccess(returnCode) && !missingVideo) {
@@ -214,6 +216,7 @@ class FFmpegRenderEngine(private val context: Context) {
                     RenderResult.Failure(error = diagnosticLog)
                 }
             } finally {
+                currentSession?.let { activeSessions.remove(it) }
                 if (!isRetry && scriptFilePath != null) {
                     try {
                         val file = File(scriptFilePath)

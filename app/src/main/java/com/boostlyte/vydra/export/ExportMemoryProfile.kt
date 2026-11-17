@@ -3,12 +3,13 @@ package com.boostlyte.vydra.export
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
+import android.os.Debug
 import kotlin.math.ceil
 
 /**
  * Memory-aware export sizing profile tailored for constrained Android devices
- * (e.g. 2GB RAM Go/entry devices) without silently lowering user-selected
- * export resolution or frame rate.
+ * (e.g. 2GB RAM Go/entry devices with 128 MiB Java heap) without silently
+ * lowering user-selected export resolution or frame rate.
  */
 data class ExportMemoryProfile(
     val totalMemBytes: Long,
@@ -20,7 +21,13 @@ data class ExportMemoryProfile(
     val maxChunkSize: Int,
     val softwareEncoderThreads: Int,
     val motionSpaceShortEdge: Double,
-    val imagePrepMaxEdge: Int
+    val imagePrepMaxEdge: Int,
+    val javaHeapMaxBytes: Long = 0L,
+    val javaHeapUsedBytes: Long = 0L,
+    val javaHeapFreeBytes: Long = 0L,
+    val nativeHeapAllocatedBytes: Long = 0L,
+    val isJavaHeapConstrained: Boolean = false,
+    val memoryTierLabel: String = if (isLowMemoryTier) "LOW" else if (isMidMemoryTier) "MID" else "HIGH"
 ) {
     companion object {
         private const val GB = 1024L * 1024L * 1024L
@@ -33,7 +40,10 @@ data class ExportMemoryProfile(
                 isLowMemoryFlag = false,
                 isLowRamDevice = false,
                 targetWidth = targetWidth,
-                targetHeight = targetHeight
+                targetHeight = targetHeight,
+                javaHeapMaxBytes = 512L * MB,
+                javaHeapUsedBytes = 48L * MB,
+                nativeHeapAllocatedBytes = 32L * MB
             )
         }
 
@@ -46,9 +56,24 @@ data class ExportMemoryProfile(
                 return defaultHighMemory(targetWidth, targetHeight)
             }
             return try {
+                val rt = Runtime.getRuntime()
+                val javaMax = try { rt.maxMemory() } catch (_: Throwable) { 0L }
+                val javaUsed = try { (rt.totalMemory() - rt.freeMemory()).coerceAtLeast(0L) } catch (_: Throwable) { 0L }
+                val nativeAlloc = try { Debug.getNativeHeapAllocatedSize().coerceAtLeast(0L) } catch (_: Throwable) { 0L }
+
                 val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
                 if (am == null) {
-                    defaultHighMemory(targetWidth, targetHeight)
+                    fromMetrics(
+                        totalMemBytes = 0L,
+                        availMemBytes = 0L,
+                        isLowMemoryFlag = false,
+                        isLowRamDevice = false,
+                        targetWidth = targetWidth,
+                        targetHeight = targetHeight,
+                        javaHeapMaxBytes = javaMax,
+                        javaHeapUsedBytes = javaUsed,
+                        nativeHeapAllocatedBytes = nativeAlloc
+                    )
                 } else {
                     val mi = ActivityManager.MemoryInfo()
                     am.getMemoryInfo(mi)
@@ -60,7 +85,10 @@ data class ExportMemoryProfile(
                         isLowMemoryFlag = mi.lowMemory,
                         isLowRamDevice = lowRamFlag,
                         targetWidth = targetWidth,
-                        targetHeight = targetHeight
+                        targetHeight = targetHeight,
+                        javaHeapMaxBytes = javaMax,
+                        javaHeapUsedBytes = javaUsed,
+                        nativeHeapAllocatedBytes = nativeAlloc
                     )
                 }
             } catch (_: Exception) {
@@ -74,37 +102,64 @@ data class ExportMemoryProfile(
             isLowMemoryFlag: Boolean,
             isLowRamDevice: Boolean,
             targetWidth: Int,
-            targetHeight: Int
+            targetHeight: Int,
+            javaHeapMaxBytes: Long = 0L,
+            javaHeapUsedBytes: Long = 0L,
+            nativeHeapAllocatedBytes: Long = 0L
         ): ExportMemoryProfile {
             val shortEdge = minOf(targetWidth, targetHeight).coerceAtLeast(1)
             val longEdge = maxOf(targetWidth, targetHeight).coerceAtLeast(1)
 
+            val javaHeapConstrained = javaHeapMaxBytes in 1L..(192L * MB)
+            val javaHeapFree = if (javaHeapMaxBytes > 0L) {
+                (javaHeapMaxBytes - javaHeapUsedBytes).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+            val criticalJavaPressure = javaHeapMaxBytes > 0L && javaHeapFree < 24L * MB
+            val criticalNativePressure = (totalMemBytes in 1L..(2600L * MB)) && nativeHeapAllocatedBytes >= 220L * MB
+            val criticalSysPressure = isLowMemoryFlag ||
+                (availMemBytes in 1L..(380L * MB)) ||
+                criticalJavaPressure ||
+                criticalNativePressure
+
             val lowTier = isLowRamDevice ||
                 isLowMemoryFlag ||
+                javaHeapConstrained ||
+                criticalSysPressure ||
                 (totalMemBytes in 1L..(2600L * MB)) ||
-                (availMemBytes in 1L..(600L * MB))
+                (availMemBytes in 1L..(650L * MB))
 
             val midTier = !lowTier && (
                 (totalMemBytes in 1L..(4400L * MB)) ||
                     (availMemBytes in 1L..(1200L * MB))
                 )
 
+            val tierLabel = when {
+                criticalSysPressure && lowTier -> "CRITICAL_LOW"
+                lowTier -> "LOW"
+                midTier -> "MID"
+                else -> "HIGH"
+            }
+
+            // Constrained 2GB / 128 MiB Java heap devices use small 2-3 clip chunks
+            // to keep concurrent decoded frames, filter buffers, and x264 memory low.
             val maxChunkSize = when {
                 lowTier -> when {
-                    shortEdge >= 1080 -> 4
-                    shortEdge >= 720 -> 5
-                    else -> 6
+                    shortEdge >= 1080 || criticalSysPressure -> 2
+                    else -> 3
                 }
                 midTier -> when {
-                    shortEdge >= 1080 -> 6
-                    else -> 8
+                    shortEdge >= 1080 -> 5
+                    else -> 7
                 }
                 else -> 10
             }
 
             val swThreads = when {
-                lowTier -> 2
-                midTier && shortEdge >= 1080 -> 3
+                lowTier -> 1
+                midTier && shortEdge >= 1080 -> 2
+                midTier -> 3
                 else -> 0
             }
 
@@ -131,7 +186,13 @@ data class ExportMemoryProfile(
                 maxChunkSize = maxChunkSize,
                 softwareEncoderThreads = swThreads,
                 motionSpaceShortEdge = motionShortEdge,
-                imagePrepMaxEdge = alignedPrepMax
+                imagePrepMaxEdge = alignedPrepMax,
+                javaHeapMaxBytes = javaHeapMaxBytes,
+                javaHeapUsedBytes = javaHeapUsedBytes,
+                javaHeapFreeBytes = javaHeapFree,
+                nativeHeapAllocatedBytes = nativeHeapAllocatedBytes,
+                isJavaHeapConstrained = javaHeapConstrained,
+                memoryTierLabel = tierLabel
             )
         }
     }

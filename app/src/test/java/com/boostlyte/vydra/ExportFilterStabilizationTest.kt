@@ -200,8 +200,10 @@ class ExportFilterStabilizationTest {
         // Verify total duration includes audio extension (padded to 70s, not cut short at 60s)
         assertEquals("Total export duration must match audio duration (70s)", 70.0, plan.totalDurationSecs, 0.5)
 
-        // Verify final pass includes video padding for audio
-        assertTrue("Final pass filtergraph must contain tpad to freeze last frame", plan.finalPassCommand!!.contains("tpad=stop_mode=clone"))
+        // Verify tail padding is folded directly into the last chunk pass (zero duplicate final re-encode)
+        assertFalse("Duplicate post-chunk padding re-encode must be disabled", plan.needsVideoPadding)
+        assertTrue("Last chunk must carry tailPadFrames", plan.chunkCommands.last().tailPadFrames > 0)
+        assertTrue("Last chunk filtergraph must contain tpad to freeze last frame", plan.chunkCommands.last().command.contains("tpad=stop_mode=clone"))
         assertTrue("Final pass must output to /tmp/final_export.mp4", plan.finalPassCommand!!.contains("/tmp/final_export.mp4"))
     }
 }

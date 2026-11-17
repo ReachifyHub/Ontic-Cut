@@ -6306,6 +6306,7 @@ class VideoEditingActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.Main) {
             var tempOutputFile: File? = null
             var concatFile: File? = null
+            var activePrepJobDir: File? = null
             try {
                 val isAudioOnly = viewModel.exportAudioOnly.value
                 val ext = if (isAudioOnly) ".mp3" else ".mp4"
@@ -6405,6 +6406,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     var copiedBytes = 0L
 
                     val exportJobDir = File(cacheDir, "export_job_${System.currentTimeMillis()}").apply { mkdirs() }
+                    activePrepJobDir = exportJobDir
 
                     val rawSourceFilePath = if (::tempInputFile.isInitialized && tempInputFile.exists()) {
                         directFiles++
@@ -6492,7 +6494,16 @@ class VideoEditingActivity : AppCompatActivity() {
                                             File(exportJobDir, "clip_${idx}_prep.jpg"),
                                             memProfile.imagePrepMaxEdge
                                         )
-                                        if (scaled != itemPath) imagesDownscaled++
+                                        if (scaled != itemPath) {
+                                            imagesDownscaled++
+                                            // Delete unscaled duplicate inside exportJobDir so 179-500 images don't consume 2x temp storage
+                                            try {
+                                                val itemFile = File(itemPath)
+                                                if (itemFile.parentFile?.absolutePath == exportJobDir.absolutePath) {
+                                                    itemFile.delete()
+                                                }
+                                            } catch (_: Exception) {}
+                                        }
                                         scaled
                                     } else {
                                         itemPath
@@ -6634,7 +6645,8 @@ class VideoEditingActivity : AppCompatActivity() {
                     if (chunkPlan.isChunked) {
                         val serializeStartMs = System.currentTimeMillis()
                         val planFile = File(cacheDir, "chunk_plan_${System.currentTimeMillis()}.json")
-                        planFile.writeText(com.boostlyte.vydra.utils.ProjectSerializer.gson.toJson(chunkPlan))
+                        val planWithPrepDir = chunkPlan.copy(prepJobDirPath = exportJobDir.absolutePath)
+                        planFile.writeText(com.boostlyte.vydra.utils.ProjectSerializer.gson.toJson(planWithPrepDir))
                         val serializeSecs = (System.currentTimeMillis() - serializeStartMs) / 1000.0
                         com.boostlyte.vydra.utils.AppLogger.logStageTiming(
                             this@VideoEditingActivity,
@@ -6650,7 +6662,7 @@ class VideoEditingActivity : AppCompatActivity() {
                             prepDurationMs / 1000.0,
                             "mode=chunked numChunks=${chunkPlan.chunkCommands.size}"
                         )
-                        ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath, prepDurationMs, projectMetaStr)
+                        ExportPrepResult(null, planFile, chunkPlan.totalDurationSecs, chunkPlan.renderPath, prepDurationMs, projectMetaStr, exportJobDir.absolutePath)
                     } else {
                         var ffmpegCommand = chunkPlan.singlePassCommand ?: return@withContext null
                         Log.d(TAG, "Raw FFmpeg command: $ffmpegCommand")
@@ -6691,12 +6703,13 @@ class VideoEditingActivity : AppCompatActivity() {
                             prepDurationMs / 1000.0,
                             "mode=single_pass"
                         )
-                        ExportPrepResult(ffmpegCommand, generatedConcat, totalDurationSecs, chunkPlan.renderPath, prepDurationMs, projectMetaStr)
+                        ExportPrepResult(ffmpegCommand, generatedConcat, totalDurationSecs, chunkPlan.renderPath, prepDurationMs, projectMetaStr, exportJobDir.absolutePath)
                     }
                 }
 
                 if (prepResult == null) {
                     tempOutputFile?.let { if (it.exists()) it.delete() }
+                    try { activePrepJobDir?.deleteRecursively() } catch (_: Exception) {}
                     exportScreen.visibility = View.GONE
                     val cancelIntent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
                         action = com.boostlyte.vydra.services.ExportService.ACTION_CANCEL_EXPORT
@@ -6708,7 +6721,7 @@ class VideoEditingActivity : AppCompatActivity() {
                     return@launch
                 }
 
-                val (ffmpegCommand, generatedFile, totalDurationSecs, renderPath, prepDurationMs, exportMetadata) = prepResult
+                val (ffmpegCommand, generatedFile, totalDurationSecs, renderPath, prepDurationMs, exportMetadata, prepJobDirPath) = prepResult
                 val isChunkedPlan = (ffmpegCommand == null)
 
                 exportScreen.findViewById<TextView>(R.id.tvExportMessage)?.text = getString(R.string.str_please_don_t_close_the_app)
@@ -6728,6 +6741,9 @@ class VideoEditingActivity : AppCompatActivity() {
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_IS_AUDIO_ONLY, isAudioOnly)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_PREP_DURATION_MS, prepDurationMs)
                     putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_EXPORT_METADATA, exportMetadata)
+                    if (!prepJobDirPath.isNullOrBlank()) {
+                        putExtra(com.boostlyte.vydra.services.ExportService.EXTRA_PREP_JOB_DIR, prepJobDirPath)
+                    }
                 }
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -6741,6 +6757,7 @@ class VideoEditingActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 tempOutputFile?.let { if (it.exists()) it.delete() }
                 concatFile?.let { if (it.exists()) it.delete() }
+                try { activePrepJobDir?.deleteRecursively() } catch (_: Exception) {}
                 exportScreen.visibility = View.GONE
                 val cancelIntent = Intent(this@VideoEditingActivity, com.boostlyte.vydra.services.ExportService::class.java).apply {
                     action = com.boostlyte.vydra.services.ExportService.ACTION_CANCEL_EXPORT
@@ -10405,86 +10422,113 @@ class VideoEditingActivity : AppCompatActivity() {
                 return srcPath
             }
 
+            val isPng = bounds.outMimeType.equals("image/png", ignoreCase = true) || srcPath.endsWith(".png", ignoreCase = true)
+            val isWebp = bounds.outMimeType.equals("image/webp", ignoreCase = true) || srcPath.endsWith(".webp", ignoreCase = true)
+            val useAlphaConfig = isPng || isWebp
+
             var sampleSize = 1
             while ((rawW / (sampleSize * 2)) >= maxEdge || (rawH / (sampleSize * 2)) >= maxEdge) {
                 sampleSize *= 2
             }
 
-            val decodeOpts = android.graphics.BitmapFactory.Options().apply {
-                inSampleSize = sampleSize
-                inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
-            }
-            val decoded = android.graphics.BitmapFactory.decodeFile(srcPath, decodeOpts) ?: return srcPath
-
-            var orientedBitmap: android.graphics.Bitmap = decoded
-            try {
-                val exif = android.media.ExifInterface(srcPath)
-                val orientation = exif.getAttributeInt(
-                    android.media.ExifInterface.TAG_ORIENTATION,
-                    android.media.ExifInterface.ORIENTATION_NORMAL
-                )
-                val matrix = android.graphics.Matrix()
-                when (orientation) {
-                    android.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-                    android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-                    android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-                    android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
-                    android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
-                    android.media.ExifInterface.ORIENTATION_TRANSPOSE -> {
-                        matrix.postRotate(90f)
-                        matrix.postScale(-1f, 1f)
+            var attempt = 0
+            while (attempt < 3) {
+                var decoded: android.graphics.Bitmap? = null
+                var orientedBitmap: android.graphics.Bitmap? = null
+                var finalBitmap: android.graphics.Bitmap? = null
+                try {
+                    val decodeOpts = android.graphics.BitmapFactory.Options().apply {
+                        inSampleSize = sampleSize
+                        inPreferredConfig = if (useAlphaConfig) {
+                            android.graphics.Bitmap.Config.ARGB_8888
+                        } else {
+                            android.graphics.Bitmap.Config.RGB_565
+                        }
                     }
-                    android.media.ExifInterface.ORIENTATION_TRANSVERSE -> {
-                        matrix.postRotate(270f)
-                        matrix.postScale(-1f, 1f)
+                    decoded = android.graphics.BitmapFactory.decodeFile(srcPath, decodeOpts) ?: return srcPath
+                    orientedBitmap = decoded
+
+                    try {
+                        val exif = android.media.ExifInterface(srcPath)
+                        val orientation = exif.getAttributeInt(
+                            android.media.ExifInterface.TAG_ORIENTATION,
+                            android.media.ExifInterface.ORIENTATION_NORMAL
+                        )
+                        val matrix = android.graphics.Matrix()
+                        when (orientation) {
+                            android.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                            android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+                            android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+                            android.media.ExifInterface.ORIENTATION_TRANSPOSE -> {
+                                matrix.postRotate(90f)
+                                matrix.postScale(-1f, 1f)
+                            }
+                            android.media.ExifInterface.ORIENTATION_TRANSVERSE -> {
+                                matrix.postRotate(270f)
+                                matrix.postScale(-1f, 1f)
+                            }
+                        }
+                        if (!matrix.isIdentity) {
+                            val rotated = android.graphics.Bitmap.createBitmap(
+                                decoded, 0, 0, decoded.width, decoded.height, matrix, true
+                            )
+                            if (rotated != decoded) {
+                                decoded.recycle()
+                                decoded = null
+                                orientedBitmap = rotated
+                            }
+                        }
+                    } catch (_: Exception) {}
+
+                    val curOriented = orientedBitmap ?: return srcPath
+                    val curMax = maxOf(curOriented.width, curOriented.height)
+                    finalBitmap = if (curMax > maxEdge) {
+                        val scale = maxEdge.toDouble() / curMax.toDouble()
+                        val dstW = (((curOriented.width * scale).toInt()).coerceAtLeast(2) / 2) * 2
+                        val dstH = (((curOriented.height * scale).toInt()).coerceAtLeast(2) / 2) * 2
+                        val scaled = android.graphics.Bitmap.createScaledBitmap(curOriented, dstW, dstH, true)
+                        if (scaled != curOriented) {
+                            curOriented.recycle()
+                            orientedBitmap = null
+                            decoded = null
+                        }
+                        scaled
+                    } else {
+                        curOriented
                     }
-                }
-                if (!matrix.isIdentity) {
-                    val rotated = android.graphics.Bitmap.createBitmap(
-                        decoded, 0, 0, decoded.width, decoded.height, matrix, true
-                    )
-                    if (rotated != decoded) {
-                        decoded.recycle()
-                        orientedBitmap = rotated
+
+                    val actualDest = if (isPng) {
+                        File(destFile.parentFile, "${destFile.nameWithoutExtension}.png")
+                    } else {
+                        destFile
                     }
+                    actualDest.parentFile?.mkdirs()
+                    actualDest.outputStream().use { out ->
+                        finalBitmap.compress(
+                            if (isPng) android.graphics.Bitmap.CompressFormat.PNG else android.graphics.Bitmap.CompressFormat.JPEG,
+                            92,
+                            out
+                        )
+                    }
+                    return if (actualDest.exists() && actualDest.length() > 0L) {
+                        actualDest.absolutePath
+                    } else {
+                        srcPath
+                    }
+                } catch (oom: OutOfMemoryError) {
+                    attempt++
+                    sampleSize = (sampleSize * 2).coerceAtLeast(2)
+                    com.boostlyte.vydra.utils.ImagePreviewCache.clear()
+                    Log.w(TAG, "OOM during image prep for $srcPath (attempt $attempt), retrying with inSampleSize=$sampleSize")
+                } finally {
+                    try { if (finalBitmap != null && !finalBitmap.isRecycled) finalBitmap.recycle() } catch (_: Exception) {}
+                    try { if (orientedBitmap != null && orientedBitmap != finalBitmap && !orientedBitmap.isRecycled) orientedBitmap.recycle() } catch (_: Exception) {}
+                    try { if (decoded != null && decoded != orientedBitmap && decoded != finalBitmap && !decoded.isRecycled) decoded.recycle() } catch (_: Exception) {}
                 }
-            } catch (_: Exception) {}
-
-            val curMax = maxOf(orientedBitmap.width, orientedBitmap.height)
-            val finalBitmap = if (curMax > maxEdge) {
-                val scale = maxEdge.toDouble() / curMax.toDouble()
-                val dstW = (((orientedBitmap.width * scale).toInt()).coerceAtLeast(2) / 2) * 2
-                val dstH = (((orientedBitmap.height * scale).toInt()).coerceAtLeast(2) / 2) * 2
-                val scaled = android.graphics.Bitmap.createScaledBitmap(orientedBitmap, dstW, dstH, true)
-                if (scaled != orientedBitmap) {
-                    orientedBitmap.recycle()
-                }
-                scaled
-            } else {
-                orientedBitmap
             }
-
-            val isPng = bounds.outMimeType.equals("image/png", ignoreCase = true) || srcPath.endsWith(".png", ignoreCase = true)
-            val actualDest = if (isPng) {
-                File(destFile.parentFile, "${destFile.nameWithoutExtension}.png")
-            } else {
-                destFile
-            }
-            actualDest.parentFile?.mkdirs()
-            actualDest.outputStream().use { out ->
-                finalBitmap.compress(
-                    if (isPng) android.graphics.Bitmap.CompressFormat.PNG else android.graphics.Bitmap.CompressFormat.JPEG,
-                    92,
-                    out
-                )
-            }
-            finalBitmap.recycle()
-
-            if (actualDest.exists() && actualDest.length() > 0L) {
-                actualDest.absolutePath
-            } else {
-                srcPath
-            }
+            srcPath
         } catch (t: Throwable) {
             Log.w(TAG, "Image export pre-scale skipped for $srcPath: ${t.message}")
             srcPath
@@ -12034,7 +12078,8 @@ class VideoEditingActivity : AppCompatActivity() {
         val totalDurationSecs: Double,
         val renderPath: String,
         val prepDurationMs: Long = 0L,
-        val exportMetadata: String = ""
+        val exportMetadata: String = "",
+        val prepJobDirPath: String? = null
     )
 
     companion object {

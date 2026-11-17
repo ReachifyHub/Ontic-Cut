@@ -114,11 +114,46 @@ object AppLogger {
         else -> "UNKNOWN($reason)"
     }
 
+    internal fun classifyExitReason(reason: Int, status: Int): String = when {
+        reason == 3 -> "LMK_OR_LOW_MEMORY"
+        reason == 2 && status == 9 -> "SIGKILL_LMK_PROBABLE"
+        reason == 5 -> "NATIVE_CRASH"
+        reason == 4 -> "JAVA_CRASH"
+        reason == 6 -> "ANR"
+        reason == 9 -> "EXCESSIVE_RESOURCE_USAGE"
+        reason == 10 || reason == 11 -> "USER_STOPPED"
+        else -> "OTHER"
+    }
+
+    /**
+     * Pure helper: returns the last breadcrumb line if the most recent EXPORT_STARTED
+     * has no subsequent terminal marker (EXPORT_ENDED, EXPORT_FAILED, EXPORT_CANCELLED, EXPORT_DIED_MIDWAY).
+     */
+    internal fun findUnfinishedExportBreadcrumb(lines: List<String>): String? {
+        var lastStartIdx = -1
+        var lastTerminalIdx = -1
+        for (i in lines.indices) {
+            val l = lines[i].trimStart()
+            when {
+                l.startsWith("EXPORT_STARTED") -> lastStartIdx = i
+                l.startsWith("EXPORT_ENDED") ||
+                    l.startsWith("EXPORT_FAILED") ||
+                    l.startsWith("EXPORT_CANCELLED") ||
+                    l.startsWith("EXPORT_DIED_MIDWAY") -> lastTerminalIdx = i
+            }
+        }
+        return if (lastStartIdx in 0..lines.lastIndex && lastStartIdx > lastTerminalIdx) {
+            lines.lastOrNull { it.isNotBlank() }
+        } else {
+            null
+        }
+    }
+
     /**
      * Checks if the previous export died midway (process kill / OOM / crash)
-     * by looking for an unfinished export breadcrumb (EXPORT_STARTED / PASS_COMPLETED / STAGE_TIMING
-     * without EXPORT_ENDED / EXPORT_FAILED / EXPORT_CANCELLED), and records process exit reasons
-     * on API 30+ to distinguish LMK kills from native/Java crashes.
+     * by looking for an EXPORT_STARTED without a subsequent terminal marker
+     * (EXPORT_ENDED / EXPORT_FAILED / EXPORT_CANCELLED / EXPORT_DIED_MIDWAY),
+     * and records ApplicationExitInfo on API 30+ to distinguish LMK kills from native/Java crashes.
      */
     fun checkDiedMidway(context: Context) {
         try {
@@ -126,33 +161,47 @@ object AppLogger {
             if (!file.exists()) return
             val lines = file.readLines().filter { it.isNotBlank() }
             if (lines.isEmpty()) return
-            val lastLine = lines.last()
-            val diedMidway = lastLine.startsWith("EXPORT_STARTED") ||
-                lastLine.startsWith("EXPORT_CONFIG") ||
-                lastLine.startsWith("PASS_COMPLETED") ||
-                lastLine.startsWith("STAGE_TIMING")
-            if (diedMidway) {
-                val memoryInfo = getDeviceMemorySnapshot(context)
-                val exitDetails = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    try {
-                        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-                        val latestExit = am?.getHistoricalProcessExitReasons(context.packageName, 0, 5)?.firstOrNull()
-                        if (latestExit != null) {
-                            val desc = latestExit.description?.replace("\n", " ")?.take(120) ?: "none"
-                            " exitReason=${describeExitReason(latestExit.reason)}(${latestExit.reason}) " +
-                                "status=${latestExit.status} importance=${latestExit.importance} " +
-                                "pssKb=${latestExit.pss} rssKb=${latestExit.rss} exitDesc=$desc"
-                        } else ""
-                    } catch (_: Throwable) { "" }
-                } else ""
-                val lastStage = lastLine.take(120).replace("\n", " ")
-                val midwayLine = "EXPORT_DIED_MIDWAY ${getIsoTimestamp()} $memoryInfo$exitDetails lastBreadcrumb=[$lastStage]"
-                appendToFileCapped(file, midwayLine)
-                Log.w(TAG, "Detected unfinished export: $midwayLine")
-            }
+            val lastBreadcrumb = findUnfinishedExportBreadcrumb(lines) ?: return
+
+            val memoryInfo = getDeviceMemorySnapshot(context)
+            val exitDetails = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+                    val exits = am?.getHistoricalProcessExitReasons(context.packageName, 0, 5).orEmpty()
+                    val latestExit = exits.firstOrNull()
+                    if (latestExit != null) {
+                        val desc = latestExit.description?.replace("\n", " ")?.take(120) ?: "none"
+                        val classification = classifyExitReason(latestExit.reason, latestExit.status)
+                        val historySummary = exits.take(3).joinToString(",") { e ->
+                            "${describeExitReason(e.reason)}@${e.status}"
+                        }
+                        " exitClassification=$classification exitReason=${describeExitReason(latestExit.reason)}(${latestExit.reason}) " +
+                            "status=${latestExit.status} importance=${latestExit.importance} " +
+                            "pssKb=${latestExit.pss} rssKb=${latestExit.rss} exitDesc=$desc recentExits=[$historySummary]"
+                    } else ""
+                } catch (_: Throwable) { "" }
+            } else ""
+            val lastStage = lastBreadcrumb.take(140).replace("\n", " ")
+            val midwayLine = "EXPORT_DIED_MIDWAY ${getIsoTimestamp()} $memoryInfo$exitDetails lastBreadcrumb=[$lastStage]"
+            appendToFileCapped(file, midwayLine)
+            Log.w(TAG, "Detected unfinished export: $midwayLine")
         } catch (e: Exception) {
             Log.w(TAG, "Error checking died midway export: ${e.message}")
         }
+    }
+
+    fun logSyncProbe(context: Context, details: String) {
+        val line = "SYNC_PROBE ${getIsoTimestamp()} ${redact(details)}"
+        Log.i("ExportProfiler", line)
+        appendToFileCapped(getExportLogFile(context), line)
+    }
+
+    fun logMemoryEvent(context: Context, stage: String, details: String = "") {
+        val snap = getDeviceMemorySnapshot(context)
+        val suffix = if (details.isNotBlank()) " ${redact(details)}" else ""
+        val line = "MEMORY_EVENT ${getIsoTimestamp()} stage=$stage $snap$suffix"
+        Log.i("ExportProfiler", line)
+        appendToFileCapped(getExportLogFile(context), line)
     }
 
     /**

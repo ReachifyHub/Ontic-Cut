@@ -1306,11 +1306,11 @@ class VideoEditingViewModel : ViewModel() {
                     filterParts.add("[pre$i]scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2:color=$padColor,setsar=1${singleFrameLoop}[raw_stage$i]")
                 }
 
-                // Explicit normalization stage for clip i: skip redundant scale/pad when image filter already matches targetWidth x targetHeight
+                // Explicit normalization stage for clip i: apply target fps BEFORE setpts=N so non-matching video framerates stay in real-time sync
                 if (isImgClip) {
                     filterParts.add("[raw_stage$i]settb=1/${_exportFps.value},setpts=N,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
                 } else {
-                    filterParts.add("[raw_stage$i]settb=1/${_exportFps.value},setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${_exportFps.value},format=yuv420p[norm$i]")
+                    filterParts.add("[raw_stage$i]fps=${_exportFps.value},settb=1/${_exportFps.value},setpts=N,scale=$mainWidth:$mainHeight:force_original_aspect_ratio=decrease,pad=$mainWidth:$mainHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[norm$i]")
                 }
 
                 val isClipMuted = operations.filterIsInstance<EditOperation.MuteClip>().find { it.index == i }?.isMuted ?: false
@@ -1995,7 +1995,8 @@ class VideoEditingViewModel : ViewModel() {
         targetWidth: Int,
         targetHeight: Int,
         operations: List<EditOperation>,
-        encoderOverride: String? = null
+        encoderOverride: String? = null,
+        tailPadFrames: Int = 0
     ): ChunkCommand {
         val cmd = StringBuilder("-y")
         var inputIndex = 0
@@ -2190,7 +2191,7 @@ class VideoEditingViewModel : ViewModel() {
             val safeSliceD = sliceFrames.toDouble() / exportFps
             durationsArray[localIdx] = safeSliceD
 
-            val startFrame = ((clip.sliceStartInClipMs / 1000.0) * exportFps).toInt().coerceAtLeast(0)
+            val startFrame = kotlin.math.round((clip.sliceStartInClipMs / 1000.0) * exportFps).toInt().coerceAtLeast(0)
             val maskTimeOffsetMs = clip.sliceStartInClipMs
 
             val colorFilterOp = operations.filterIsInstance<EditOperation.ColorFilter>().find { it.index == clip.globalIndex }
@@ -2286,9 +2287,15 @@ class VideoEditingViewModel : ViewModel() {
             }
 
             if (isImgClip) {
-                filterParts.add("[raw_stage$localIdx]settb=1/$exportFps,setpts=N,setsar=1,fps=$exportFps,format=yuv420p[norm$localIdx]")
+                val exactTrimPrefix = if (!isSingleFrame && motionFilter == null) "trim=end_frame=$sliceFrames," else ""
+                filterParts.add("[raw_stage$localIdx]${exactTrimPrefix}settb=1/$exportFps,setpts=N,setsar=1,fps=$exportFps,format=yuv420p[norm$localIdx]")
             } else {
-                filterParts.add("[raw_stage$localIdx]settb=1/$exportFps,setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=$exportFps,format=yuv420p[norm$localIdx]")
+                val speedPrefix = if (!clip.item.isReversed && clip.item.proxyUri == null && clip.item.speed != 1.0f && clip.item.speed > 0.05f) {
+                    "setpts=(PTS-STARTPTS)/${clip.item.speed},"
+                } else {
+                    ""
+                }
+                filterParts.add("[raw_stage$localIdx]${speedPrefix}fps=$exportFps,settb=1/$exportFps,setpts=N,scale=$targetWidth:$targetHeight:force_original_aspect_ratio=decrease,pad=$targetWidth:$targetHeight:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[norm$localIdx]")
             }
         }
 
@@ -2316,7 +2323,7 @@ class VideoEditingViewModel : ViewModel() {
 
         for (gapIdx in 0 until inputCount - 1) {
             val transOp = chunkSpec.internalTransitions.find { it.index == gapIdx }
-            if (transOp == null || transOp.type == "none") {
+            if (transOp == null || transOp.type.equals("none", ignoreCase = true) || transOp.durationMs <= 0L) {
                 pendingClips.add(gapIdx + 1)
             } else {
                 val baseStream = if (pendingClips.isEmpty()) {
@@ -2392,6 +2399,12 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         var currentVideoLabel = finalStream.vLabel
+        val safeTailPadFrames = tailPadFrames.coerceAtLeast(0)
+        if (safeTailPadFrames > 0) {
+            val padOutLabel = "[chunk_tpad]"
+            filterParts.add("${currentVideoLabel}tpad=stop_mode=clone:stop=$safeTailPadFrames$padOutLabel")
+            currentVideoLabel = padOutLabel
+        }
 
         // 5. Clamped overlays and subtitles for this chunk
         val clampedTextOps = mutableListOf<EditOperation.AddText>()
@@ -2461,10 +2474,10 @@ class VideoEditingViewModel : ViewModel() {
             enc.ffmpegVideoCodecArgs
         }
 
-        val chunkTotalFrames = if (chunkSpec.totalFrames > 0) {
-            chunkSpec.totalFrames
-        } else {
-            finalStream.frames.coerceAtLeast(1)
+        val chunkTotalFrames = when {
+            safeTailPadFrames > 0 -> (finalStream.frames + safeTailPadFrames).coerceAtLeast(1)
+            chunkSpec.totalFrames > 0 -> chunkSpec.totalFrames
+            else -> finalStream.frames.coerceAtLeast(1)
         }
         val exactChunkDurSecs = chunkTotalFrames.toDouble() / exportFps
         val timescale = exportFps * 1000
@@ -2487,7 +2500,8 @@ class VideoEditingViewModel : ViewModel() {
             command = commandStr,
             outputPath = chunkOutputPath,
             durationSecs = exactChunkDurSecs,
-            scriptFilePath = scriptFile?.absolutePath
+            scriptFilePath = scriptFile?.absolutePath,
+            tailPadFrames = safeTailPadFrames
         )
     }
 
@@ -2537,7 +2551,13 @@ class VideoEditingViewModel : ViewModel() {
             filterParts.add("${rawChunk}settb=1/${_exportFps.value},setpts=PTS-STARTPTS,fps=${_exportFps.value},format=yuv420p${normChunk}")
         }
 
-        val hasAnyBoundaryTransitions = chunkPlan.boundaryTransitions.any { it.transition != null && it.transition.type != "none" }
+        val exportFpsSafe = _exportFps.value.coerceAtLeast(1)
+        fun chunkDurSec(index: Int): Double {
+            val c = chunkPlan.chunks.getOrNull(index) ?: return 0.0
+            return if (c.totalFrames > 0) c.totalFrames.toDouble() / exportFpsSafe else c.durationMs / 1000.0
+        }
+
+        val hasAnyBoundaryTransitions = chunkPlan.boundaryTransitions.any { it.transition != null && !it.transition.type.equals("none", true) && it.transition.durationMs > 0L }
         var currentV: String
         var currentStreamDurationSec: Double
 
@@ -2547,19 +2567,19 @@ class VideoEditingViewModel : ViewModel() {
             val rawCcatOut = "[raw_ccat]"
             val normCcatOut = "[norm_ccat]"
             filterParts.add("${allInputs}concat=n=$numChunks:v=1:a=0${rawCcatOut}")
-            filterParts.add("${rawCcatOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normCcatOut}")
+            filterParts.add("${rawCcatOut}settb=1/${exportFpsSafe},setpts=N,fps=${exportFpsSafe},format=yuv420p${normCcatOut}")
             currentV = normCcatOut
-            currentStreamDurationSec = chunkPlan.chunks.sumOf { it.durationMs / 1000.0 }
+            currentStreamDurationSec = (0 until numChunks).sumOf { chunkDurSec(it) }
         } else {
             currentV = "[norm_in0]"
-            currentStreamDurationSec = chunkPlan.chunks[0].durationMs / 1000.0
+            currentStreamDurationSec = chunkDurSec(0)
 
             for (bIdx in 0 until numChunks - 1) {
                 val nextChunkInput = "[norm_in${bIdx + 1}]"
-                val nextChunkDurationSec = chunkPlan.chunks[bIdx + 1].durationMs / 1000.0
+                val nextChunkDurationSec = chunkDurSec(bIdx + 1)
                 val boundaryTrans = chunkPlan.boundaryTransitions.find { it.boundaryIndex == bIdx }?.transition
 
-                if (boundaryTrans != null && boundaryTrans.type != "none") {
+                if (boundaryTrans != null && !boundaryTrans.type.equals("none", true) && boundaryTrans.durationMs > 0L) {
                     val rawTransDuration = boundaryTrans.durationMs / 1000.0
                     val maxSafeDuration = minOf(currentStreamDurationSec - 0.05, nextChunkDurationSec - 0.05).coerceAtLeast(0.1)
                     val transDuration = rawTransDuration.coerceIn(0.1, maxSafeDuration)
@@ -2584,11 +2604,11 @@ class VideoEditingViewModel : ViewModel() {
                         else -> if (validXfadeTransitions.contains(rawType)) rawType else "fade"
                     }
 
-                    val formattedDuration = String.format(java.util.Locale.US, "%.3f", transDuration)
-                    val formattedOffset = String.format(java.util.Locale.US, "%.3f", offset)
+                    val formattedDuration = String.format(java.util.Locale.US, "%.6f", transDuration)
+                    val formattedOffset = String.format(java.util.Locale.US, "%.6f", offset)
 
                     filterParts.add("${currentV}${nextChunkInput}xfade=transition=${sanitizedType}:duration=${formattedDuration}:offset=${formattedOffset}${rawXfvOut}")
-                    filterParts.add("${rawXfvOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normXfvOut}")
+                    filterParts.add("${rawXfvOut}settb=1/${exportFpsSafe},setpts=N,fps=${exportFpsSafe},format=yuv420p${normXfvOut}")
 
                     currentV = normXfvOut
                     currentStreamDurationSec = offset + nextChunkDurationSec
@@ -2597,7 +2617,7 @@ class VideoEditingViewModel : ViewModel() {
                     val normCcatOut = "[norm_ccat$bIdx]"
 
                     filterParts.add("${currentV}${nextChunkInput}concat=n=2:v=1:a=0${rawCcatOut}")
-                    filterParts.add("${rawCcatOut}settb=1/${_exportFps.value},setpts=N,fps=${_exportFps.value},format=yuv420p${normCcatOut}")
+                    filterParts.add("${rawCcatOut}settb=1/${exportFpsSafe},setpts=N,fps=${exportFpsSafe},format=yuv420p${normCcatOut}")
 
                     currentV = normCcatOut
                     currentStreamDurationSec += nextChunkDurationSec
@@ -2612,10 +2632,10 @@ class VideoEditingViewModel : ViewModel() {
 
         // If audio extends past total video duration, pad video with frozen last frame (tpad)
         val finalEffectiveDurationSec = if (maxAudioEndSec > currentStreamDurationSec && maxAudioEndSec > 0.0) {
-            val padSec = maxAudioEndSec - currentStreamDurationSec
-            filterParts.add("${currentV}tpad=stop_mode=clone:stop_duration=$padSec[pad_v]")
+            val padFrames = kotlin.math.round((maxAudioEndSec - currentStreamDurationSec) * exportFpsSafe).toInt().coerceAtLeast(1)
+            filterParts.add("${currentV}tpad=stop_mode=clone:stop=$padFrames[pad_v]")
             currentV = "[pad_v]"
-            maxAudioEndSec
+            currentStreamDurationSec + (padFrames.toDouble() / exportFpsSafe)
         } else {
             currentStreamDurationSec
         }
@@ -2630,13 +2650,13 @@ class VideoEditingViewModel : ViewModel() {
             cmd.append(" -filter_complex \"${filterParts.joinToString(";")}\"")
         }
 
-        val bitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(_exportResolution.value, _exportFps.value)
+        val bitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetVideoBitrate(_exportResolution.value, exportFpsSafe)
         val swCrf = com.boostlyte.vydra.export.EncoderSelector.getTargetSoftwareCrf(_exportResolution.value)
         val audioBitrate = com.boostlyte.vydra.export.EncoderSelector.getTargetAudioBitrate(_exportResolution.value)
         val memProfile = com.boostlyte.vydra.export.ExportMemoryProfile.fromContext(context, targetWidth, targetHeight)
         val videoCodec = encoderOverride ?: run {
             val enc = com.boostlyte.vydra.export.EncoderSelector.getEffectiveEncoder(
-                context, targetWidth, targetHeight, _exportFps.value, bitrate, swCrf, memProfile.softwareEncoderThreads
+                context, targetWidth, targetHeight, exportFpsSafe, bitrate, swCrf, memProfile.softwareEncoderThreads
             )
             enc.ffmpegVideoCodecArgs
         }
@@ -2647,9 +2667,9 @@ class VideoEditingViewModel : ViewModel() {
         } else {
             cmd.append(" -an")
         }
-        cmd.append(" $videoCodec")
+        cmd.append(" $videoCodec -video_track_timescale ${exportFpsSafe * 1000}")
 
-        val formattedTotalDur = String.format(java.util.Locale.US, "%.3f", finalEffectiveDurationSec).trimEnd('0').trimEnd('.')
+        val formattedTotalDur = String.format(java.util.Locale.US, "%.6f", finalEffectiveDurationSec).trimEnd('0').trimEnd('.')
         cmd.append(" -t $formattedTotalDur \"$outputFilePath\"")
 
         val commandStr = cmd.toString()
@@ -2871,7 +2891,7 @@ class VideoEditingViewModel : ViewModel() {
                 (op.endTimeMs == null || (op.endTimeMs >= effectiveTargetDur * 1000.0 - 50.0))
 
             if (noFadeOrDelay && unityVol && noStartTrim && fullLengthUsed) {
-                val formattedDur = String.format(java.util.Locale.US, "%.3f", effectiveTargetDur).trimEnd('0').trimEnd('.')
+                val formattedDur = String.format(java.util.Locale.US, "%.6f", effectiveTargetDur).trimEnd('0').trimEnd('.')
                 val directCmd = when {
                     isConfirmedAacInM4a(audioPath) ->
                         "-y -i \"$audioPath\" -vn -c:a copy -t $formattedDur \"$outputAudioPath\""
@@ -2912,7 +2932,7 @@ class VideoEditingViewModel : ViewModel() {
         }
 
         val effectiveDur = maxOf(targetDurationSecs, audioStage.maxAudioEndSec).coerceAtLeast(0.1)
-        val formattedDur = String.format(java.util.Locale.US, "%.3f", effectiveDur).trimEnd('0').trimEnd('.')
+        val formattedDur = String.format(java.util.Locale.US, "%.6f", effectiveDur).trimEnd('0').trimEnd('.')
         cmd.append(" -vn -map \"$outLabel\" -c:a aac -b:a $audioBitrate -t $formattedDur \"$outputAudioPath\"")
         val audioCmdStr = cmd.toString()
         if (context != null) {
@@ -2924,6 +2944,28 @@ class VideoEditingViewModel : ViewModel() {
             )
         }
         return audioCmdStr
+    }
+
+    internal fun computeMaxAudioEndSec(operations: List<EditOperation>): Double {
+        if (operations.any { it is EditOperation.MuteAudio }) return 0.0
+        var maxEndSec = 0.0
+        for (audioOp in operations.filterIsInstance<EditOperation.AddBackgroundAudio>()) {
+            val delayMs = (audioOp.startTimeMs ?: 0L).coerceAtLeast(0L)
+            val effectiveDurMs = when {
+                audioOp.endTimeMs != null && audioOp.startTimeMs != null ->
+                    (audioOp.endTimeMs - audioOp.startTimeMs).coerceAtLeast(0L)
+                audioOp.internalEndMs > 0L ->
+                    (audioOp.internalEndMs - audioOp.internalStartMs).coerceAtLeast(0L)
+                audioOp.originalDurationMs > 0L ->
+                    audioOp.originalDurationMs
+                else -> 0L
+            }
+            val trackEndSec = (delayMs + effectiveDurMs) / 1000.0
+            if (trackEndSec > maxEndSec) {
+                maxEndSec = trackEndSec
+            }
+        }
+        return maxEndSec
     }
 
     /**
@@ -3134,12 +3176,61 @@ class VideoEditingViewModel : ViewModel() {
         val density = context?.resources?.displayMetrics?.density ?: 1.0f
 
         val cmdBuildStartMs = System.currentTimeMillis()
+        val hasBoundaryTransitions = plan.boundaryTransitions.any { it.transition != null && !it.transition.type.equals("none", true) && it.transition.durationMs > 0L }
+        val isMuted = activeOperations.any { it is EditOperation.MuteAudio }
+        val hasAudioOperations = !isMuted && activeOperations.any { it is EditOperation.AddBackgroundAudio }
+        val exportFpsSafe = _exportFps.value.coerceAtLeast(1)
+
+        val baseVideoOnlyDurationSecs = if (!hasBoundaryTransitions && plan.chunks.all { it.totalFrames > 0 }) {
+            plan.chunks.sumOf { it.totalFrames }.toDouble() / exportFpsSafe
+        } else {
+            plan.totalDurationMs / 1000.0
+        }
+        val maxAudioEndSec = if (hasAudioOperations) computeMaxAudioEndSec(activeOperations) else 0.0
+
+        // Fold audio-tail padding directly into the LAST chunk's initial render pass
+        // so the last chunk is encoded only ONCE and final assembly remains fast `-c copy`.
+        val tailPadFrames = if (!hasBoundaryTransitions && hasAudioOperations && plan.chunks.isNotEmpty() && maxAudioEndSec > baseVideoOnlyDurationSecs + 0.05) {
+            kotlin.math.round((maxAudioEndSec - baseVideoOnlyDurationSecs) * exportFpsSafe).toInt().coerceAtLeast(1)
+        } else {
+            0
+        }
+        val tailPadMs = if (tailPadFrames > 0) {
+            kotlin.math.round((tailPadFrames.toDouble() / exportFpsSafe) * 1000.0).toLong()
+        } else {
+            0L
+        }
+        val effectiveChunks = if (tailPadFrames > 0 && plan.chunks.isNotEmpty()) {
+            plan.chunks.mapIndexed { idx, c ->
+                if (idx == plan.chunks.lastIndex) {
+                    c.copy(
+                        globalEndMs = c.globalEndMs + tailPadMs,
+                        durationMs = c.durationMs + tailPadMs,
+                        totalFrames = c.totalFrames + tailPadFrames
+                    )
+                } else {
+                    c
+                }
+            }
+        } else {
+            plan.chunks
+        }
+        val effectivePlan = if (tailPadFrames > 0) {
+            plan.copy(
+                chunks = effectiveChunks,
+                totalDurationMs = plan.totalDurationMs + tailPadMs
+            )
+        } else {
+            plan
+        }
+
         val chunkCommands = mutableListOf<ChunkCommand>()
         val chunkTempPaths = mutableListOf<String>()
 
-        for (chunk in plan.chunks) {
+        for (chunk in effectiveChunks) {
             val chunkTempFile = File(chunkTempDir, "temp_chunk_${chunk.chunkIndex}_${timestamp}.mp4")
             chunkTempPaths.add(chunkTempFile.absolutePath)
+            val chunkTailPadFrames = if (chunk.chunkIndex == effectiveChunks.lastIndex) tailPadFrames else 0
 
             val chunkCmd = buildChunkPassCommand(
                 chunkSpec = chunk,
@@ -3147,18 +3238,19 @@ class VideoEditingViewModel : ViewModel() {
                 chunkOutputPath = chunkTempFile.absolutePath,
                 fontFilePath = effectiveFontPath,
                 context = context,
-                totalDurationMs = plan.totalDurationMs,
+                totalDurationMs = effectivePlan.totalDurationMs,
                 density = density,
                 targetWidth = targetWidth,
                 targetHeight = targetHeight,
                 operations = activeOperations,
-                encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
+                encoderOverride = selectedEncoder.ffmpegVideoCodecArgs,
+                tailPadFrames = chunkTailPadFrames
             )
             chunkCommands.add(chunkCmd.copy(renderPath = overallRenderPath))
         }
 
         val finalPassCmd = buildFinalPassCommand(
-            chunkPlan = plan,
+            chunkPlan = effectivePlan,
             chunkTempPaths = chunkTempPaths,
             outputFilePath = outputFilePath,
             context = context,
@@ -3168,53 +3260,53 @@ class VideoEditingViewModel : ViewModel() {
             encoderOverride = selectedEncoder.ffmpegVideoCodecArgs
         )
 
-        val hasBoundaryTransitions = plan.boundaryTransitions.any { it.transition != null && it.transition.type != "none" }
-        val isMuted = activeOperations.any { it is EditOperation.MuteAudio }
-        val hasAudioOperations = !isMuted && activeOperations.any { it is EditOperation.AddBackgroundAudio }
         val canStreamCopy = !hasBoundaryTransitions && !hasAudioOperations
-
-        val exportFpsSafe = _exportFps.value.coerceAtLeast(1)
-        val exactChunkDurationsSecs = plan.chunks.map { c ->
+        val exactChunkDurationsSecs = effectiveChunks.map { c ->
             if (c.totalFrames > 0) c.totalFrames.toDouble() / exportFpsSafe else c.durationMs / 1000.0
         }
-        val videoOnlyDurationSecs = if (!hasBoundaryTransitions && plan.chunks.all { it.totalFrames > 0 }) {
-            plan.chunks.sumOf { it.totalFrames }.toDouble() / exportFpsSafe
+        val videoOnlyDurationSecs = if (!hasBoundaryTransitions && effectiveChunks.all { it.totalFrames > 0 }) {
+            effectiveChunks.sumOf { it.totalFrames }.toDouble() / exportFpsSafe
         } else {
-            plan.totalDurationMs / 1000.0
+            effectivePlan.totalDurationMs / 1000.0
         }
-        val paddingDurationSecs = (finalPassCmd.durationSecs - videoOnlyDurationSecs).coerceAtLeast(0.0)
-        val needsVideoPadding = paddingDurationSecs > 0.05
+        val effectiveTotalDurationSecs = if (!hasBoundaryTransitions) {
+            videoOnlyDurationSecs
+        } else {
+            finalPassCmd.durationSecs
+        }
+        val paddingDurationSecs = 0.0
+        val needsVideoPadding = false
 
         val mixedAudioTempFile = File(chunkTempDir, "mixed_audio_${timestamp}.m4a")
         val audioMixCmd = if (!hasBoundaryTransitions && hasAudioOperations) {
             buildAudioMixCommand(
                 operations = activeOperations,
                 outputAudioPath = mixedAudioTempFile.absolutePath,
-                targetDurationSecs = finalPassCmd.durationSecs,
+                targetDurationSecs = effectiveTotalDurationSecs,
                 context = context,
                 audioBitrate = audioBitrate
             )
         } else {
             null
         }
-        val canStreamCopyWithAudioMux = !hasBoundaryTransitions && (audioMixCmd != null) && !needsVideoPadding
+        val canStreamCopyWithAudioMux = !hasBoundaryTransitions && (audioMixCmd != null)
         val cmdBuildSecs = (System.currentTimeMillis() - cmdBuildStartMs) / 1000.0
         if (context != null) {
-            val activeBoundaryTransCount = plan.boundaryTransitions.count { it.transition != null && it.transition.type != "none" }
+            val activeBoundaryTransCount = plan.boundaryTransitions.count { it.transition != null && !it.transition.type.equals("none", true) && it.transition.durationMs > 0L }
             val splitBoundaries = plan.boundaryTransitions.count { it.globalGapIndex == -1 }
             com.boostlyte.vydra.utils.AppLogger.logStageTiming(
                 context,
                 "prep_chunk_planning",
                 chunkPlanSecs,
-                "numChunks=${plan.chunks.size} maxChunkSize=${memProfile.maxChunkSize} swThreads=${memProfile.softwareEncoderThreads} " +
-                    "motionShortEdge=${memProfile.motionSpaceShortEdge.toInt()} lowMem=${memProfile.isLowMemoryTier} " +
-                    "splitBoundaries=$splitBoundaries unresolvedBoundaryTrans=$activeBoundaryTransCount"
+                "numChunks=${effectiveChunks.size} maxChunkSize=${memProfile.maxChunkSize} swThreads=${memProfile.softwareEncoderThreads} " +
+                    "motionShortEdge=${memProfile.motionSpaceShortEdge.toInt()} lowMem=${memProfile.isLowMemoryTier} memTier=${memProfile.memoryTierLabel} " +
+                    "splitBoundaries=$splitBoundaries unresolvedBoundaryTrans=$activeBoundaryTransCount tailPadFrames=$tailPadFrames"
             )
             com.boostlyte.vydra.utils.AppLogger.logStageTiming(
                 context,
                 "prep_command_build",
                 cmdBuildSecs,
-                "mode=chunked encoderBackend=${selectedEncoder.backend} canStreamCopy=$canStreamCopy canStreamCopyAudioMux=$canStreamCopyWithAudioMux needsPadding=$needsVideoPadding padSecs=${String.format(java.util.Locale.US, "%.2f", paddingDurationSecs)}"
+                "mode=chunked encoderBackend=${selectedEncoder.backend} canStreamCopy=$canStreamCopy canStreamCopyAudioMux=$canStreamCopyWithAudioMux tailPadFrames=$tailPadFrames needsPadding=$needsVideoPadding"
             )
         }
 
@@ -3223,13 +3315,13 @@ class VideoEditingViewModel : ViewModel() {
             chunkCommands = chunkCommands,
             finalPassCommand = finalPassCmd.command,
             chunkTempPaths = chunkTempPaths,
-            totalDurationSecs = finalPassCmd.durationSecs,
+            totalDurationSecs = effectiveTotalDurationSecs,
             chunkDurationsSecs = exactChunkDurationsSecs,
             renderPath = overallRenderPath,
-            chunkSpecs = plan.chunks,
+            chunkSpecs = effectiveChunks,
             targetWidth = targetWidth,
             targetHeight = targetHeight,
-            fps = _exportFps.value,
+            fps = exportFpsSafe,
             resolution = _exportResolution.value,
             density = density,
             fontFilePath = effectiveFontPath,
@@ -3241,7 +3333,9 @@ class VideoEditingViewModel : ViewModel() {
             audioBitrate = audioBitrate,
             videoDurationSecs = videoOnlyDurationSecs,
             needsVideoPadding = needsVideoPadding,
-            paddingDurationSecs = paddingDurationSecs
+            paddingDurationSecs = paddingDurationSecs,
+            expectedAudioDurationSecs = maxAudioEndSec,
+            hasAudio = hasAudioOperations
         )
     }
 
